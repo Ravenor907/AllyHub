@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.0
+
+- **Save time machine (Tools → Saves):** turn it on and Ally Hub snapshots a game's saves every time it starts,
+  keeping the last few per game. Restore any of them from Game Mode. Your saves as they are now are kept first, and
+  **Undo the last restore** puts them back. Uses Ludusavi (one tap to install).
+- **Sleep guardian (Tools → Sleep):** every sleep is tracked: how long, how much battery it used, what woke the
+  handheld, and sleeps that failed. If sleep drains too much or a USB device keeps waking it, the page says so and
+  can stop that device from waking it (the power button always works). **Send the sleep details** reports it.
+
 ## 1.2.2
 
 - **Quick Access panel:** Ally Hub in the ••• menu while you play. Battery and temperatures, switches for the game

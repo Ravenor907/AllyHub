@@ -531,24 +531,31 @@ class Agent:
         mono, boot = time.monotonic(), time.clock_gettime(time.CLOCK_BOOTTIME)
         pct = core.battery_level()
         charging = (battery or {}).get("status") in ("Charging", "Full")
+        snap = core.sleep_snapshot(full=False)                  # light: stats and wakeup counters only
         if self.sleep_last and self.sleep_pre:
             lm, lb, lpct, lch = self.sleep_last
-            gap = (boot - lb) - (mono - lm)
-            if gap > 60:
+            gap = (boot - lb) - (mono - lm)                        # exact: both clocks move together when awake
+            if gap > 5:
                 post = core.sleep_snapshot()
+                post["irq"] = core.wake_irq_name()
                 entry = core.sleep_entry(self.sleep_pre, post, gap, lpct, pct, lch or charging)
                 core.record_sleep(entry)
-                self.sleep_pre = post
                 log(f"woke after {core.duration_text(gap)}: battery {entry['drop']}% "
                     f"{'(charging)' if entry['charging'] else ''} woke by {', '.join(entry['woke_by']) or '?'}"
                     f"{' FAILED ' + str(entry['failed_dev']) if entry['failed'] else ''}")
-        if self.sleep_pre is None or self.tick % 15 == 0:
-            self.sleep_pre = core.sleep_snapshot()
+            else:
+                f0, f1 = (self.sleep_pre.get("stats") or {}).get("fail"), (snap.get("stats") or {}).get("fail")
+                if isinstance(f0, int) and isinstance(f1, int) and f1 > f0:   # a sleep the kernel gave up on
+                    core.record_sleep(core.sleep_failure_entry(snap["stats"]))
+                    log(f"a sleep failed: {snap['stats'].get('last_failed_dev')} "
+                        f"({snap['stats'].get('last_failed_step')})")
+        self.sleep_pre = snap
         self.sleep_last = (mono, boot, pct, charging)
 
     # ---- Save time machine: snapshot a game's saves as it starts ----
     def tm_snapshot(self, game):
         if not self.tm_lock.acquire(blocking=False):
+            log("save snapshot skipped: another snapshot is still running")
             return
         try:
             if not self.ludusavi_ready():

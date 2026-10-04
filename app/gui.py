@@ -3987,7 +3987,7 @@ class SavesPage(QWidget):
     def __init__(self, hub):
         super().__init__()
         self.hub = hub
-        self.snaps = {}
+        self.snaps, self.undo = {}, {}
         v = page_shell(self, "Saves",
                        "A safety net for your progress: Ally Hub snapshots a game's saves every time it starts, so "
                        "a corrupted save or a choice you regret is one restore away.")
@@ -4071,13 +4071,16 @@ class SavesPage(QWidget):
     def load(self, *_args):
         clear_layout(self.list_box)
         self.list_box.addWidget(label("Looking for snapshots…", "cardDesc"))
-        BackgroundTask(self, core.tm_snapshots, self._loaded)
+        BackgroundTask(self, lambda: {"tm": core.tm_snapshots(), "undo": core.tm_snapshots(core.TM_BEFORE_RESTORE)},
+                       self._loaded)
 
-    def _loaded(self, snaps):
+    def _loaded(self, res):
         clear_layout(self.list_box)
-        if not isinstance(snaps, dict) or "error" in snaps:
+        if not isinstance(res, dict) or "error" in res:
             self.list_box.addWidget(label("Couldn't read the snapshots. Is Ludusavi installed?", "cardDesc"))
             return
+        snaps = res.get("tm") if "tm" in res else res
+        self.undo = res.get("undo") or {} if "tm" in res else {}
         self.snaps = snaps
         if not snaps:
             self.list_box.addWidget(label("No snapshots yet. Turn the time machine on and play something.", "cardDesc"))
@@ -4092,17 +4095,31 @@ class SavesPage(QWidget):
         backs = self.snaps.get(title) or []
         if not backs:
             return
-        labels = [core.when_text(b.get("when", "")) + ("  (locked)" if b.get("locked") else "") for b in backs]
-        choice, ok = ask_item(self, title, "Restore the saves from which session start?", labels)
+        undo = (self.undo.get(title) or [None])[0]
+        labels, seen = [], {}
+        for b in backs:
+            text = core.when_text(b.get("when", "")) + ("  (locked)" if b.get("locked") else "")
+            seen[text] = seen.get(text, 0) + 1
+            labels.append(text if seen[text] == 1 else f"{text} ({seen[text]})")    # every choice unique
+        undo_label = f"Undo the last restore (saves from {core.when_text(undo.get('when', ''))})" if undo else None
+        choice, ok = ask_item(self, title, "Restore the saves from which session start?",
+                              ([undo_label] if undo_label else []) + labels)
         if not ok:
             return
-        b = backs[labels.index(choice)]
-        running = str(core.agent_state().get("game_name") or "")
-        if running and running.lower() == title.lower():
+        st = core.agent_state()
+        game = st.get("game")
+        running = core.ludusavi_title_cached(core.steam_appid_of(game), st.get("game_name") or "") if game else ""
+        if game and (running == title or str(st.get("game_name") or "").lower() == title.lower()):
             msg_warn(self, APP_NAME, f"Quit {title} first, then restore.")
             return
-        if ask(self, f"Restore {title} to {choice}?\n\nYour saves as they are now are kept first, in "
-                     f"{core.TM_BEFORE_RESTORE.name}, so you can go back."):
+        if choice == undo_label:
+            if ask(self, f"Put back {title}'s saves from just before the last restore?"):
+                self.hub.runner.submit(f"Undoing the last restore of {title}",
+                                       core.tm_restore_cmd(title, undo["name"], undo=True), "tm-restore")
+            return
+        b = backs[labels.index(choice)]
+        if ask(self, f"Restore {title} to {choice}?\n\nYour saves as they are now are kept first, and the restore "
+                     "only runs if that worked. “Undo the last restore” puts them back."):
             self.hub.runner.submit(f"Restoring {title}'s saves", core.tm_restore_cmd(title, b["name"]), "tm-restore")
 
     def job_done(self, ok: bool):
@@ -4192,12 +4209,13 @@ class SleepPage(QWidget):
             r.addWidget(button("Allow again", lambda _=False, dp=d: self.allow_wake(dp)))
             self.nowake_box.addLayout(r)
 
-    def _apply_nowake(self, devpaths: list, label_text: str):
+    def _apply_nowake(self, devpaths: list, label_text: str, allow: list = ()):
+        """Run the rule job; the saved list only changes once the job worked (see job_done)."""
         if self.hub.needs_password():
             return
-        cmd = core.nowake_cmd(devpaths)
+        cmd = core.nowake_cmd(devpaths, allow)
         if cmd:
-            update_config(lambda c: c.setdefault("sleep", {}).__setitem__("no_wake", sorted(set(devpaths))))
+            self._pending_nowake = sorted(set(devpaths))
             self.hub.runner.submit(label_text, cmd, "sleep-nowake")
 
     def stop_wake(self, fix: dict):
@@ -4209,7 +4227,7 @@ class SleepPage(QWidget):
 
     def allow_wake(self, devpath: str):
         cur = [d for d in (load_config().get("sleep") or {}).get("no_wake") or [] if d != devpath]
-        self._apply_nowake(cur, "Letting a device wake the handheld again")
+        self._apply_nowake(cur, "Letting a device wake the handheld again", allow=[devpath])
 
     def send_details(self, *_args):
         def send():
@@ -4224,6 +4242,10 @@ class SleepPage(QWidget):
                                                              "daily run."))
 
     def job_done(self, ok: bool):
+        pending = getattr(self, "_pending_nowake", None)
+        self._pending_nowake = None
+        if ok and pending is not None:
+            update_config(lambda c: c.setdefault("sleep", {}).__setitem__("no_wake", pending))
         self.hub.toast("Saved ✔" if ok else "That didn't work. See Settings → Activity.")
         self.refresh()
 

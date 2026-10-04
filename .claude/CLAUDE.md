@@ -148,6 +148,20 @@ the Plugin store page lists every installed plugin (`StorePage.show_mine`) with 
 only; Add restores tiles directly when the launcher is still installed (`LaunchersPage.restorable`). Every new
 catalog item needs a working Remove (EmuDeck uses its own uninstall.sh).
 
+**Save time machine (Tools → Saves, `SavesPage`):** the agent's `tm_snapshot` runs Ludusavi when a game
+starts (`config["saves"]`: time_machine, keep) into `TM_DIR` with `--full-limit keep --differential-limit 0`,
+at most once per game per 10 minutes, niced. Titles: `ludusavi_title` (Steam id, then exact/normalized name,
+never fuzzy); only a clear `errors.unknownGames` answer is cached as unknown. Restore (`tm_restore_cmd`) first
+backs up current saves to `TM_BEFORE_RESTORE` and only restores if that worked (`&&`); "Undo the last restore"
+restores from there. Never restore while that game runs.
+
+**Sleep guardian (Tools → Sleep, `SleepPage`):** the agent's `update_sleep` takes a light snapshot every second
+(suspend_stats + `wakeup_count` per source) and treats a CLOCK_BOOTTIME vs CLOCK_MONOTONIC gap over 5 s as a sleep
+(`sleep_entry`: drain, %/h, sources whose wakeup_count rose or `pm_wakeup_irq`, total_hw_sleep share). A rise in
+suspend_stats/fail without a gap is a failed sleep. `sleep_findings` flags heavy drain, repeat short wakes and
+failures. The only fix writes `NOWAKE_RULE` (USB devices only, never a root hub or non-USB device such as the power
+button); the saved list changes only after the job worked, and "Allow again" re-enables wakeup immediately.
+
 **Quick Access panel (Tools → Games card):** a Decky plugin embedded in core.py (`QAM_PLUGIN_JSON`, `QAM_MAIN_PY`,
 `QAM_INDEX_JS`; bump `QAM_VERSION` when they change) so normal updates deliver it; `qam_install_cmd` copies it
 into ~/homebrew/plugins/AllyHub with sudo and restarts plugin_loader. The frontend is plain ESM on window.SP_REACT /
