@@ -119,18 +119,28 @@ def load_config() -> dict:
     return _merge(DEFAULT_CONFIG, data)
 
 
+_CONFIG_LOCK = threading.RLock()      # the agent writes config from several threads (panel, phone remote)
+
+
 def save_config(cfg: dict) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = CONFIG_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(cfg, indent=2))
-    os.replace(tmp, CONFIG_FILE)
+    with _CONFIG_LOCK:
+        fd, tmp = tempfile.mkstemp(dir=CONFIG_DIR, prefix=".config-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(json.dumps(cfg, indent=2))
+            os.replace(tmp, CONFIG_FILE)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
 
 
 def update_config(fn: Callable[[dict], None]) -> dict:
-    cfg = load_config()
-    fn(cfg)
-    save_config(cfg)
-    return cfg
+    with _CONFIG_LOCK:
+        cfg = load_config()
+        fn(cfg)
+        save_config(cfg)
+        return cfg
 
 
 def read_json(path: Path, default=None):
@@ -2840,6 +2850,16 @@ def _acf_values(text: str) -> dict:
     return {k.lower(): v for k, v in re.findall(r'^\s*"(\w+)"\s+"([^"]*)"', text, re.M)}
 
 
+def library_app_ids() -> set:
+    """Every app Steam lists in its libraries, including ones on an SD card that isn't inserted right now."""
+    text = read_text(STEAM_ROOT / "steamapps/libraryfolders.vdf")
+    ids = set()
+    for lib in (parse_vdf_text(text).get("libraryfolders", {}).values() if text else []):
+        if isinstance(lib, dict):
+            ids |= {k for k in (_ci(lib, "apps") or {}) if k.isdigit()}
+    return ids
+
+
 def steam_apps() -> list:
     """Installed Steam apps across every library: [{appid, name, lib, dir, size}] (size from Steam's manifest)."""
     out, seen = [], set()
@@ -2873,9 +2893,38 @@ def shortcut_ids() -> set:
 def compat_tools_in_use() -> set:
     """Proton builds Steam is set to use (per game, or as the default "0" entry) in config.vdf."""
     text = read_text(STEAM_ROOT / "config/config.vdf") or read_text(HOME / ".steam/root/config/config.vdf")
-    m = re.search(r'"CompatToolMapping"\s*\{(.*?)\n\s*\}\s*\n\s*"', text, re.S | re.I)
-    block = m.group(1) if m else ""
-    return {n for n in re.findall(r'"name"\s+"([^"]*)"', block, re.I) if n}
+    mapping = _ci(parse_vdf_text(text), "InstallConfigStore", "Software", "Valve", "Steam", "CompatToolMapping")
+    return {str(v.get("name") or v.get("Name") or "") for v in (mapping or {}).values()
+            if isinstance(v, dict)} - {""}
+
+
+def tool_names(folder: Path) -> set:
+    """The names Steam knows a compatibility tool by: its folder and the ids in its compatibilitytool.vdf."""
+    names = {folder.name}
+    tools = _ci(parse_vdf_text(read_text(folder / "compatibilitytool.vdf")), "compatibilitytools", "compat_tools")
+    if isinstance(tools, dict):
+        names |= set(tools)
+    return names
+
+
+def tools_in_use_folders() -> set:
+    """Resolved folders of every tool a game uses, plus anything a symlinked tool points at."""
+    used = compat_tools_in_use()
+    keep = set()
+    for root in _tool_dirs():
+        try:
+            entries = list(root.iterdir())
+        except OSError:
+            continue
+        for p in entries:
+            try:
+                if p.is_symlink():
+                    keep.add(p.resolve())
+                elif p.is_dir() and tool_names(p) & used:
+                    keep.add(p.resolve())
+            except OSError:
+                pass
+    return keep
 
 
 def _du_many(paths: list) -> dict:
@@ -2924,7 +2973,7 @@ def storage_scan() -> dict:
     """{"games": [...biggest first], "items": [...cleanup candidates], "drives": [...]}."""
     libs = steam_library_dirs()
     apps = steam_apps()
-    installed = {a["appid"] for a in apps}
+    installed = {a["appid"] for a in apps} | library_app_ids()
     shorts = shortcut_ids()
     extra = {}                                   # appid -> {"shaders": [paths], "prefix": [paths]}
     leftovers = []                               # (kind, appid, path)
@@ -2952,7 +3001,7 @@ def storage_scan() -> dict:
                     leftovers.append(("downloading", d.name, d))
         except OSError:
             pass
-    in_use = compat_tools_in_use()
+    in_use = tools_in_use_folders()
     protons = []
     for root in _tool_dirs():
         try:
@@ -2998,7 +3047,7 @@ def storage_scan() -> dict:
             items.append({"label": f"Unfinished download of {who}", "path": p, "size": size, "warn": "",
                           "group": "safe"})
     for p in protons:
-        if p.name not in in_use and newest.get(_proton_family(p.name)) is not p:
+        if p.resolve() not in in_use and newest.get(_proton_family(p.name)) is not p:
             items.append({"label": f"{p.name} (no game uses it, a newer one is installed)", "path": p,
                           "size": sizes.get(str(p), 0), "warn": "", "group": "safe"})
     trash = sizes.get(str(TRASH_DIR), 0)
@@ -3022,32 +3071,43 @@ def storage_scan() -> dict:
     return {"games": games, "items": items, "drives": drives}
 
 
-def _storage_safe(p: str) -> bool:
-    """Only the kinds of folders storage_scan offers: never a game, never anything outside these."""
+def _storage_safe(p: str, ctx: dict) -> bool:
+    """Only the kinds of folders storage_scan offers, checked again right before deleting (the library may
+    have changed since the scan): never a game, a prefix in use, a Proton in use, a symlink, or anything else."""
     path = Path(p)
     if path == TRASH_DIR:
         return True
+    if ".." in path.parts or path.is_symlink():
+        return False
     if path.parent in _tool_dirs() or path.parent in COMPAT_TOOL_DIRS:
-        return path.name not in ("", ".", "..") and "/" not in path.name
-    if path.parent.name == "compatdata" and PREFIX_BACKUP.match(path.name):
-        return path.parent.parent in steam_library_dirs()
-    if path.parent.name in ("shadercache", "compatdata", "downloading") and path.name.isdigit():
-        return path.parent.parent in steam_library_dirs()
-    return False
+        return path.name not in ("", ".", "..") and path.resolve() not in ctx["tools"]
+    if path.parent.parent not in ctx["libs"]:
+        return False
+    kind, name = path.parent.name, path.name
+    if kind == "compatdata" and PREFIX_BACKUP.match(name):
+        return True
+    if not name.isdigit():
+        return False
+    if kind in ("shadercache", "downloading"):
+        return True                          # rebuilt / re-downloaded by Steam: safe even for installed games
+    return kind == "compatdata" and name not in ctx["installed"] and name not in ctx["shorts"]
 
 
 def storage_clean_cmd(paths: list) -> Optional[str]:
-    safe = [str(p) for p in paths if _storage_safe(str(p))]
+    ctx = {"libs": steam_library_dirs(), "tools": tools_in_use_folders(), "shorts": shortcut_ids(),
+           "installed": {a["appid"] for a in steam_apps()} | library_app_ids()}
+    safe = [str(p) for p in paths if _storage_safe(str(p), ctx)]
     if not safe:
         return None
-    parts = []
+    parts = ["rc=0"]
     for p in safe:
         if Path(p) == TRASH_DIR:
             parts.append(f"rm -rf -- {shlex.quote(p + '/files')} {shlex.quote(p + '/info')} "
-                         f"{shlex.quote(p + '/expunged')}; mkdir -p {shlex.quote(p + '/files')} {shlex.quote(p + '/info')}")
+                         f"{shlex.quote(p + '/expunged')} || rc=1; mkdir -p {shlex.quote(p + '/files')} "
+                         f"{shlex.quote(p + '/info')}")
         else:
-            parts.append(f"rm -rf -- {shlex.quote(p)}")
-    parts.append("echo 'Space freed.'")
+            parts.append(f"rm -rf -- {shlex.quote(p)} || rc=1")
+    parts.append('[ "$rc" = 0 ] && echo "Space freed."; exit $rc')
     return "; ".join(parts)
 
 
@@ -3093,6 +3153,24 @@ def split_launch(opts: str) -> tuple:
     return [], (" " + opts.strip()) if opts.strip() else "", False
 
 
+def launch_parseable(opts: str) -> bool:
+    """The switches can only edit launch options they can split cleanly (no stray quotes)."""
+    pre, _post, had = split_launch(opts)
+    if not had:
+        return True
+    head = (opts or "").split("%command%", 1)[0]
+    return re.sub(r"\s+", "", "".join(pre)) == re.sub(r"\s+", "", head)
+
+
+def steam_appid_of(game) -> Optional[int]:
+    """The Steam app id for a running game id: non-Steam games carry their tile's id in the top 32 bits."""
+    try:
+        n = int(game)
+    except (TypeError, ValueError):
+        return None
+    return n >> 32 if n > 0xFFFFFFFF else n
+
+
 def launch_flags(opts: str) -> set:
     pre, _post, _had = split_launch(opts)
     on = set()
@@ -3105,12 +3183,13 @@ def launch_flags(opts: str) -> set:
 
 
 def set_launch_flags(opts: str, keys: set) -> str:
-    """The same launch options with exactly these switches on. Everything else the owner typed is kept."""
+    """The same launch options with exactly these switches on. Everything else the owner typed is kept: only
+    our exact tokens are removed (a turned-on switch also replaces other values of its own variable)."""
     pre, post, had = split_launch(opts)
-    ours_env = {_env_key(tok) for _t, _d, kind, tok in GAME_TOGGLES.values() if kind == "env"}
-    ours_wrap = {tok for _t, _d, kind, tok in GAME_TOGGLES.values() if kind == "wrap"}
-    ours_wrap |= {str(HOME / t[2:]) for t in ours_wrap}
-    keep = [t for t in pre if _env_key(t) not in ours_env and t not in ours_wrap]
+    ours = {tok for _t, _d, _k, tok in GAME_TOGGLES.values()}
+    ours |= {str(HOME / tok[2:]) for _t, _d, kind, tok in GAME_TOGGLES.values() if kind == "wrap"}
+    turning_on = {_env_key(GAME_TOGGLES[k][3]) for k in keys if k in GAME_TOGGLES and GAME_TOGGLES[k][2] == "env"}
+    keep = [t for t in pre if t not in ours and _env_key(t) not in turning_on]
     env = [GAME_TOGGLES[k][3] for k in GAME_TOGGLES if k in keys and GAME_TOGGLES[k][2] == "env"]
     wrap = [GAME_TOGGLES[k][3] for k in GAME_TOGGLES if k in keys and GAME_TOGGLES[k][2] == "wrap"]
     lead = env + [t for t in keep if _env_key(t)] + [t for t in keep if not _env_key(t)] + wrap
@@ -3257,8 +3336,8 @@ def reset_prefix_cmd(appid) -> Optional[str]:
     if not dirs:
         return None
     stamp = time.strftime("%Y%m%d%H%M%S")
-    return "; ".join(f"mv -- {shlex.quote(str(d))} {shlex.quote(str(d.parent / f'{d.name}_allyhub_backup_{stamp}'))}"
-                     for d in dirs) + "; echo 'Done. Steam makes fresh Windows files on the next launch.'"
+    return " && ".join(f"mv -- {shlex.quote(str(d))} {shlex.quote(str(d.parent / f'{d.name}_allyhub_backup_{stamp}'))}"
+                       for d in dirs) + " && echo 'Done. Steam makes fresh Windows files on the next launch.'"
 
 
 def proton_log(appid) -> str:
@@ -3347,7 +3426,9 @@ const React = window.SP_REACT;
 const h = React.createElement;
 const { useState, useEffect, useRef } = React;
 const { PanelSection, PanelSectionRow, ToggleField, SliderField, DropdownItem, ButtonItem, Field, staticClasses } = window.DFL;
-const API = window.__DECKY_SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED_deckyLoaderAPIInit.connect(1, "Ally Hub");
+// The same hand-shake @decky/api does. API 2 adds useQuickAccessVisible; older Decky builds still answer.
+const API = window.__DECKY_SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED_deckyLoaderAPIInit.connect(2, "Ally Hub");
+const useVisible = API.useQuickAccessVisible || (() => true);
 
 const call = (method, ...args) => API.call(method, ...args).catch((e) => ({ error: String(e) }));
 const toast = (body) => { try { API.toaster.toast({ title: "Ally Hub", body }); } catch (e) {} };
@@ -3370,18 +3451,28 @@ function temp(v) { return v === null || v === undefined ? "–" : `${Math.round(
 
 function Content() {
   const [s, setS] = useState(null);
-  const [busy, setBusy] = useState(false);
+  const [level, setLevel] = useState(null);       // brightness while the slider moves
+  const busy = useRef(false);
   const bright = useRef(null);
-  const load = async () => setS(await call("status"));
+  const seq = useRef(0);
+  const visible = useVisible();
+  const load = async () => {
+    const mine = ++seq.current;                   // an older, slower answer never overwrites a newer one
+    const r = await call("status");
+    if (mine === seq.current) setS(r);
+  };
   useEffect(() => {
+    if (!visible) return undefined;               // no polling while the menu is closed
     load();
     const t = setInterval(load, 3000);
     return () => clearInterval(t);
-  }, []);
+  }, [visible]);
+  useEffect(() => () => clearTimeout(bright.current), []);
   const act = async (name, data = {}, quiet = false) => {
-    setBusy(true);
+    if (busy.current) return;                     // one change at a time; controls stay enabled for focus
+    busy.current = true;
     const r = await call("action", name, data);
-    setBusy(false);
+    busy.current = false;
     if (r && r.message && !quiet) toast(r.message);
     else if (r && r.error) toast("Ally Hub's agent didn't answer.");
     load();
@@ -3409,7 +3500,7 @@ function Content() {
       for (const [key, title, desc] of GAME_SWITCHES) {
         if (key === "lsfg" && !s.lsfg && !flags.includes(key)) continue;
         rows.push(h(PanelSectionRow, { key }, h(ToggleField, { label: title, description: desc,
-          checked: flags.includes(key), disabled: busy || !s.game_live,
+          checked: flags.includes(key), disabled: !s.game_live,
           onChange: (on) => act("game_flag", { key, on }) })));
       }
     }
@@ -3417,7 +3508,7 @@ function Content() {
   }
 
   sections.push(h(PanelSection, { title: "Performance", key: "perf" },
-    h(PanelSectionRow, null, h(ToggleField, { label: "Game Boost", checked: !!s.boost, disabled: busy,
+    h(PanelSectionRow, null, h(ToggleField, { label: "Game Boost", checked: !!s.boost,
       description: s.boost && s.boost_note ? `CPU: ${s.boost_note}` : "Performance CPU setting while you play.",
       onChange: (on) => act("boost", { on }) }))));
 
@@ -3427,17 +3518,18 @@ function Content() {
       h(PanelSectionRow, null, h(DropdownItem, { label: "Effect", rgOptions: opts,
         selectedOption: s.effect, strDefaultLabel: s.effect || "Pick one",
         onChange: (o) => act("preset", { name: o.data }) })),
-      h(PanelSectionRow, null, h(SliderField, { label: "Brightness", value: Math.round((s.brightness || 0) / 2.55),
+      h(PanelSectionRow, null, h(SliderField, { label: "Brightness",
+        value: level !== null ? level : Math.round((s.brightness || 0) / 2.55),
         min: 0, max: 100, step: 5, showValue: true, valueSuffix: "%",
-        onChange: (v) => { clearTimeout(bright.current);
-          bright.current = setTimeout(() => act("brightness", { value: Math.round(v * 2.55) }, true), 300); } })),
-      h(PanelSectionRow, null, h(ButtonItem, { layout: "below", disabled: busy,
-        onClick: () => act("lights") }, "Lights off"))));
+        onChange: (v) => { setLevel(v); clearTimeout(bright.current);
+          bright.current = setTimeout(async () => { await act("brightness", { value: Math.round(v * 2.55) }, true);
+            setLevel(null); }, 400); } })),
+      h(PanelSectionRow, null, h(ButtonItem, { layout: "below", onClick: () => act("lights") }, "Lights off"))));
   }
 
   if (s.backup) {
     sections.push(h(PanelSection, { title: "Saves", key: "saves" },
-      h(PanelSectionRow, null, h(ButtonItem, { layout: "below", disabled: busy || s.backup_running,
+      h(PanelSectionRow, null, h(ButtonItem, { layout: "below", disabled: s.backup_running,
         onClick: () => act("backup") }, s.backup_running ? "Backing up…" : "Back up saves now"))));
   }
   return h("div", null, ...sections);
@@ -3482,7 +3574,7 @@ def qam_install_cmd() -> str:
     """Copy the panel into Decky's plugin folder (root's) and restart Decky so it shows up."""
     stage, dest = shlex.quote(str(qam_stage())), shlex.quote(str(QAM_DIR))
     return (f'sudo mkdir -p {shlex.quote(str(QAM_DIR.parent))} && sudo rm -rf {dest} && '
-            f'sudo cp -r {stage} {dest} && sudo chown -R ":" {dest} && '
+            f'sudo cp -r {stage} {dest} && '
             'sudo systemctl restart plugin_loader && echo "Quick Access panel ready."')
 
 

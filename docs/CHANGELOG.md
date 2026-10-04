@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.0
+
+- **Quick Access panel:** Ally Hub in the ••• menu while you play. Battery and temperatures, switches for the game
+  you're playing, Game Boost, lighting and a save backup button. Add it under Tools → Games (needs Decky Loader).
+- **Game settings (Tools → Games):** switches instead of typing launch options: FSR 4, frame generation, Steam Deck
+  mode, an older-game fix and a troubleshooting log. Pick the Proton per game, and get help when a game won't start
+  (try another Proton, reset its Windows files with a backup, send the log, check its files).
+- **Storage saver (Tools → Storage):** each game's real size including its shader cache and Windows files, and a
+  one-tap cleanup of what Steam leaves behind. Anything that can hold saves starts unticked.
+
 ## 1.1.0
 
 - **Library art:** blank blue tiles for launchers and Ally Hub itself now get a cover, banner, hero and icon,

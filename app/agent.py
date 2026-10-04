@@ -414,6 +414,7 @@ class Agent:
         self.stopping = False      # set by SIGTERM; the loop exits and Game Boost is put back
         self.control = None        # local socket for the Quick Access panel (see serve_control)
         self.backup_now = False
+        self._ludusavi, self._ludusavi_t = False, 0.0
         self.qam_game = {}         # the running game's switches, read from Steam once per game
 
     # ---- config ----
@@ -576,11 +577,7 @@ class Agent:
                 pass
 
     def _steam_appid(self, game):
-        try:
-            n = int(game)
-        except (TypeError, ValueError):
-            return None
-        return n >> 32 if n > 0xFFFFFFFF else n         # non-Steam game ids carry the tile's id on top
+        return core.steam_appid_of(game)
 
     def read_game_flags(self, game):
         appid = self._steam_appid(game)
@@ -605,7 +602,8 @@ class Agent:
             "watts": round(watts, 1) if watts else None,
             "cpu": s.get("cpu_temp"), "gpu": s.get("gpu_temp"), "fan": s.get("fan_rpm"),
             "game": self.game, "game_name": self.seen.get(self.game) if self.game else None,
-            "game_flags": g.get("flags"), "game_live": bool(g.get("live")),
+            "game_flags": g.get("flags"),
+            "game_live": bool(g.get("live")) and core.launch_parseable(g.get("options", "")),
             "game_tool": g.get("tool", ""), "lsfg": core.LSFG_WRAPPER.exists(),
             "boost": bool((self.cfg.get("performance") or {}).get("boost")), "boost_note": self.boost_note,
             "lighting": "huesync" if core.lighting_shelved(self.cfg) else "allyhub",
@@ -618,7 +616,7 @@ class Agent:
     def ludusavi_ready(self) -> bool:
         """Ludusavi (the save backup tool) is installed; checked at most once a minute."""
         now = time.time()
-        if now - getattr(self, "_ludusavi_t", 0) > 60:
+        if now - self._ludusavi_t > 60:
             self._ludusavi_t = now
             self._ludusavi = core.run_quiet(["flatpak", "info", core.LUDUSAVI_ID])[0] == 0
         return self._ludusavi
@@ -650,6 +648,10 @@ class Agent:
             g = self.qam_game if self.qam_game.get("game") == self.game else {}
             if key not in core.GAME_TOGGLES or not g.get("appid"):
                 return {"ok": False, "message": "No game to change"}
+            if not core.launch_parseable(g.get("options", "")):
+                return {"ok": False, "message": "This game's launch options need editing in Ally Hub"}
+            if key == "lsfg" and on and not core.LSFG_WRAPPER.exists():
+                return {"ok": False, "message": "Install Lossless Scaling Frame Gen first"}
             flags = set(core.launch_flags(g.get("options", "")))
             flags = flags | {key} if on else flags - {key}
             opts = core.set_launch_flags(g.get("options", ""), flags)

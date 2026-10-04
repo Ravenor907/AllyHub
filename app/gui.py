@@ -1008,16 +1008,29 @@ def _message(parent, icon, title, text, buttons=None) -> QMessageBox:
     return box
 
 
+def _wait_for_sheet(fn, title, text) -> bool:
+    """A message that arrives while another pop-up is open (say, a background task finishing) waits for it
+    to close, instead of opening as a separate window."""
+    hub = _HUB
+    if hub is not None and getattr(hub, "_sheet", None) is not None:
+        QTimer.singleShot(400, lambda: fn(None, title, text))
+        return True
+    return False
+
+
 def msg_info(parent, title, text):
-    _message(parent, QMessageBox.Information, title, text)
+    if not _wait_for_sheet(msg_info, title, text):
+        _message(parent, QMessageBox.Information, title, text)
 
 
 def msg_warn(parent, title, text):
-    _message(parent, QMessageBox.Warning, title, text)
+    if not _wait_for_sheet(msg_warn, title, text):
+        _message(parent, QMessageBox.Warning, title, text)
 
 
 def msg_error(parent, title, text):
-    _message(parent, QMessageBox.Critical, title, text)
+    if not _wait_for_sheet(msg_error, title, text):
+        _message(parent, QMessageBox.Critical, title, text)
 
 
 def ask(parent, text: str) -> bool:
@@ -3552,7 +3565,7 @@ class GamesPage(QWidget):
         if not self.games:
             self.body.addWidget(label("No games found yet.", "cardDesc"))
             return
-        playing = str(core.agent_state().get("game") or "")
+        playing = str(core.steam_appid_of(core.agent_state().get("game")) or "")
         games = sorted(self.games, key=lambda g: str(g["appid"]) != playing)
         shown = games if self.show_all else games[:self.LIST_SIZE]
         card = card_frame()
@@ -3611,8 +3624,7 @@ class GamesPage(QWidget):
 
     def qam_done(self, ok: bool, key: str):
         if ok and key == "qam-install":
-            msg_info(self, APP_NAME, "Ally Hub is in your Quick Access menu now. In Game Mode, press ••• and open "
-                                     "the plug icon, then Ally Hub.")
+            self.hub.toast("Ally Hub is in your Quick Access menu: press ••• and open the plug icon.")
         if self.game is None:
             self.show_list()
 
@@ -3631,7 +3643,11 @@ class GamesPage(QWidget):
             self.show_list()
             return
         self.settings = s
-        self.other = core.set_launch_flags(s.get("options", ""), set())
+        opts = s.get("options", "")
+        self.parseable = core.launch_parseable(opts)
+        self.flags0 = core.launch_flags(opts) if self.parseable else set()
+        self.other = core.set_launch_flags(opts, set()) if self.parseable else opts
+        self.other_edited = False
         self.show_game()
 
     def show_game(self):
@@ -3645,12 +3661,16 @@ class GamesPage(QWidget):
         if not s.get("live"):
             self.body.addWidget(label("⚠ Steam's connection for plugins is off, so these can't be saved right now. "
                                       "It comes with Decky Loader.", "cardWarn", wrap=True))
-        flags = core.launch_flags(s.get("options", ""))
+        flags = self.flags0
         card, cv = titled_card("sparkles", "#8b5cf6", "Switches")
+        if not self.parseable:
+            cv.addWidget(label("This game's launch options have quotes the switches can't change safely. Edit them "
+                               "under Other launch options instead.", "cardWarn", wrap=True))
         self.checks = {}
         for key, (title, desc, _kind, _tok) in core.GAME_TOGGLES.items():
             cb = QCheckBox(title)
             cb.setChecked(key in flags)
+            cb.setEnabled(self.parseable)
             note = desc
             if key == "lsfg" and not core.LSFG_WRAPPER.exists() and key not in flags:
                 cb.setEnabled(False)
@@ -3665,7 +3685,8 @@ class GamesPage(QWidget):
         pcard, pv = titled_card("wine", "#f59e0b", "Proton",
                                 "Which compatibility tool runs this game. Steam's default is right for most games.")
         self.tool_combo = QComboBox()
-        tools = [("", "Steam's default")] + [t for t in s.get("tools") or [] if t[0]]
+        none = "None (for Linux apps)" if g.get("kind") == "shortcut" else "Steam's default"
+        tools = [("", none)] + [t for t in s.get("tools") or [] if t[0]]
         cur = s.get("tool", "")
         if cur and cur not in [t[0] for t in tools]:
             tools.append((cur, cur))
@@ -3719,15 +3740,36 @@ class GamesPage(QWidget):
 
     def edit_other(self, *_args):
         text, ok = ask_text(self, "Other launch options", "Anything else for this game's launch options:", self.other)
-        if ok:
-            self.other = core.set_launch_flags(text.strip(), set())
-            self.other_label.setText(self.other or "None")
+        if not ok:
+            return
+        text = text.strip()
+        self.other_edited = True
+        if core.launch_parseable(text):
+            for key in core.launch_flags(text):           # switches typed by hand show up as switches
+                self.checks[key].setChecked(True)
+            self.other = core.set_launch_flags(text, set())
+            if not self.parseable:
+                self.parseable = True
+                self.flags0 = set()
+                for key, cb in self.checks.items():
+                    cb.setEnabled(key != "lsfg" or core.LSFG_WRAPPER.exists())
+        else:
+            self.other, self.parseable = text, False
+            for cb in self.checks.values():
+                cb.setEnabled(False)
+        self.other_label.setText(self.other or "None")
 
     def new_options(self) -> str:
+        """Launch options to save. Untouched options go back exactly as they were."""
+        original = (self.settings or {}).get("options", "")
+        if not self.parseable:
+            return self.other if self.other_edited else original
         keys = {k for k, cb in self.checks.items() if cb.isChecked()}
-        return core.set_launch_flags(self.other, keys)
+        if not self.other_edited and keys == self.flags0:
+            return original
+        return core.set_launch_flags(self.other if self.other_edited else original, keys)
 
-    def save(self, *_args):
+    def save(self, *_args, note: str = ""):
         g, s = self.game, self.settings
         opts = self.new_options()
         tool = self.chosen_tool()
@@ -3735,16 +3777,23 @@ class GamesPage(QWidget):
         self.btn_save.setEnabled(False)
         self.btn_save.setText("Saving…")
         BackgroundTask(self, lambda: core.apply_game_settings(g["appid"], opts, tool_arg),
-                       lambda done: self._saved(g, opts, tool, done))
+                       lambda done: self._saved(g, opts, tool, done, note))
 
-    def _saved(self, g: dict, opts: str, tool: str, done):
+    def _saved(self, g: dict, opts: str, tool: str, done, note: str = ""):
         if self.game is g:
             self.btn_save.setEnabled(True)
             self.btn_save.setText("Save")
         if isinstance(done, list) and "options" in done:
-            self.settings = dict(self.settings or {}, options=opts, tool=tool if "tool" in done else
-                                 (self.settings or {}).get("tool", ""))
-            self.hub.toast(f"Saved. Applies next time you start {g['name']}.")
+            if self.game is g:
+                self.settings = dict(self.settings or {}, options=opts, tool=tool if "tool" in done else
+                                     (self.settings or {}).get("tool", ""))
+                self.flags0 = core.launch_flags(opts) if core.launch_parseable(opts) else set()
+                self.other = core.set_launch_flags(opts, set()) if core.launch_parseable(opts) else opts
+                self.other_edited = False
+            if note:
+                msg_info(self, APP_NAME, note)
+            else:
+                self.hub.toast(f"Saved. Applies next time you start {g['name']}.")
             core.app_log("games", f"{g['name']} ({g['appid']}): launch options set ({len(opts)} chars)")
         else:
             msg_warn(self, APP_NAME, "Steam didn't take the change. Make sure Decky Loader is running, then try "
@@ -3780,20 +3829,23 @@ class GamesPage(QWidget):
                     self.tool_combo.setCurrentIndex(idx)
                 self.save()
         elif choice.startswith("Turn on"):
+            if not self.parseable:
+                msg_warn(self, APP_NAME, "This game's launch options can't be changed with switches. Add "
+                                         "PROTON_LOG=1 under Other launch options instead.")
+                return
             self.checks["log"].setChecked(True)
-            self.save()
-            msg_info(self, APP_NAME, f"Start {g['name']} once, then come back here and choose “Send the log from "
-                                     "the last launch”.")
+            self.save(note=f"Log turned on. Start {g['name']} once, then come back here and choose “Send the log "
+                           "from the last launch”.")
         elif choice.startswith("Send"):
-            core.queue_report("user", f"{g['name']} won't start"[:110],
-                              f"Reported from Game settings for {g['name']} (app {g['appid']}).\n"
-                              f"Launch options: {s.get('options', '')}\nProton: {s.get('tool') or 'default'}",
-                              core._fingerprint("game-log", str(g["appid"]), str(time.time())),
-                              attachments=[("Proton log", core.proton_log(g["appid"]))], force=True)
-            self.hub.send_reports_now()
-            self.hub.toast("Log sent. It'll be looked at in the next daily run.")
+            def send():
+                return core.queue_report("user", f"{g['name']} won't start"[:110],
+                                         f"Reported from Game settings for {g['name']} (app {g['appid']}).\n"
+                                         f"Launch options: {s.get('options', '')}\nProton: {s.get('tool') or 'default'}",
+                                         core._fingerprint("game-log", str(g["appid"]), str(time.time())),
+                                         attachments=[("Proton log", core.proton_log(g["appid"]))], force=True)
+            BackgroundTask(self, send, lambda _r: self.hub.toast("Log sent. It'll be looked at in the next daily run."))
         elif choice.startswith("Reset"):
-            if str(core.agent_state().get("game") or "") == str(g["appid"]):
+            if core.steam_appid_of(core.agent_state().get("game")) == int(g["appid"]):
                 msg_warn(self, APP_NAME, f"Quit {g['name']} first.")
                 return
             if ask(self, f"Reset {g['name']}'s Windows files?\n\nSteam makes fresh ones on the next launch. The old "
