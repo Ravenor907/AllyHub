@@ -274,8 +274,31 @@ input[type=password]{width:100%%;padding:14px;border-radius:12px;border:1px soli
 %(body)s</body></html>"""
 
 REMOTE_LOGIN = """<h1>Ally Hub Remote</h1><div class="sub">Enter the PIN shown in Ally Hub &gt; Connect.</div>
-<form method="get" class="card"><input type="password" name="pin" inputmode="numeric" autofocus>
-<button class="p">Unlock</button></form>"""
+<form method="post" action="/login" class="card"><input type="password" name="pin" inputmode="numeric" autofocus>
+<button class="p">Unlock</button></form><div id="msg">%(note)s</div>"""
+
+REMOTE_TRIES = 5          # wrong PINs from one address before it has to wait
+REMOTE_LOCK_S = 300       # how long it waits
+
+
+def remote_host_ok(host: str) -> bool:
+    """Only answer to the handheld's own address or its .local name. A web page that points some other
+    domain at the handheld (DNS rebinding) gets nothing."""
+    import ipaddress
+    h = (host or "").strip().lower()
+    if h.startswith("["):
+        h = h[1:h.find("]")] if "]" in h else h
+    elif h.count(":") == 1:
+        h = h.split(":")[0]
+    if not h:
+        return False
+    if h == "localhost" or h.endswith(".local") or h == socket.gethostname().lower():
+        return True
+    try:
+        ipaddress.ip_address(h)
+        return True
+    except ValueError:
+        return False
 
 REMOTE_MAIN = """<h1>%(device)s</h1><div class="sub">Ally Hub Remote</div>
 <div class="card grid">
@@ -303,7 +326,13 @@ refresh();setInterval(refresh,5000);</script>"""
 
 
 def make_handler(agent):
+    sessions = {}         # random session token -> the PIN it was opened with (a new PIN logs everyone out)
+    fails = {}            # address -> [wrong tries, locked until]
+    lock = threading.Lock()
+
     class Handler(BaseHTTPRequestHandler):
+        timeout = 15      # idle connections from the network can't pile up threads
+
         def log_message(self, *args):
             pass
 
@@ -315,7 +344,34 @@ def make_handler(agent):
             if not pin:
                 return False
             c = SimpleCookie(self.headers.get("Cookie", ""))
-            return "ahpin" in c and secrets.compare_digest(c["ahpin"].value, pin)
+            tok = c["ahs"].value if "ahs" in c else ""
+            with lock:
+                opened = sessions.get(tok)
+            return bool(tok) and opened is not None and secrets.compare_digest(opened, pin)
+
+        def _locked_out(self) -> int:
+            """Seconds this address still has to wait after too many wrong PINs (0 = may try)."""
+            with lock:
+                n, until = fails.get(self.client_address[0], [0, 0.0])
+            return max(0, int(until - time.time())) if n >= REMOTE_TRIES else 0
+
+        def _login(self, pin: str) -> bool:
+            ip = self.client_address[0]
+            good = bool(pin) and bool(self._pin()) and secrets.compare_digest(pin, self._pin())
+            with lock:
+                if good:
+                    fails.pop(ip, None)
+                    return True
+                n, _until = fails.get(ip, [0, 0.0])
+                n = 1 if n >= REMOTE_TRIES else n + 1     # after a lockout ends, counting starts over
+                fails[ip] = [n, time.time() + REMOTE_LOCK_S if n >= REMOTE_TRIES else 0.0]
+            return False
+
+        def _host_ok(self) -> bool:
+            if remote_host_ok(self.headers.get("Host", "")):
+                return True
+            self._send(403, "Open the remote by the handheld's address.", "text/plain")
+            return False
 
         def _send(self, code: int, body: str, ctype: str = "text/html", cookie: str = ""):
             data = body.encode()
@@ -324,7 +380,7 @@ def make_handler(agent):
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
             if cookie:
-                self.send_header("Set-Cookie", f"ahpin={cookie}; Path=/; SameSite=Strict; HttpOnly")
+                self.send_header("Set-Cookie", f"ahs={cookie}; Path=/; SameSite=Strict; HttpOnly")
             self.end_headers()
             self.wfile.write(data)
 
@@ -332,18 +388,16 @@ def make_handler(agent):
             pal = core.theme_palette(agent.cfg["theme"])
             return REMOTE_HTML % dict(pal, body=body)
 
+        def _login_page(self, note: str = "") -> str:
+            return self._page(REMOTE_LOGIN % {"note": html.escape(note)})
+
         def do_GET(self):
+            if not self._host_ok():
+                return
             url = urlparse(self.path)
             if url.path == "/":
-                pin = parse_qs(url.query).get("pin", [""])[0]
-                if pin and self._pin() and secrets.compare_digest(pin, self._pin()):
-                    self.send_response(303)
-                    self.send_header("Location", "/")
-                    self.send_header("Set-Cookie", f"ahpin={pin}; Path=/; SameSite=Strict; HttpOnly")
-                    self.end_headers()
-                    return
                 if not self._authed():
-                    return self._send(200, self._page(REMOTE_LOGIN))
+                    return self._send(200, self._login_page())
                 rgb = agent.cfg.get("rgb") or {}
                 names = list(core.PRESETS) + list((agent.cfg.get("lighting") or {}).get("custom") or {})
                 presets = "".join(
@@ -365,6 +419,30 @@ def make_handler(agent):
             self._send(404, "not found", "text/plain")
 
         def do_POST(self):
+            if not self._host_ok():
+                return
+            if urlparse(self.path).path == "/login":
+                wait = self._locked_out()
+                if wait:
+                    return self._send(429, self._login_page(f"Too many wrong PINs. Try again in {wait // 60 + 1} min."))
+                try:
+                    n = min(int(self.headers.get("Content-Length", 0)), 512)
+                    pin = parse_qs(self.rfile.read(n).decode("utf-8", "replace")).get("pin", [""])[0].strip()
+                except (ValueError, UnicodeError):
+                    pin = ""
+                if not self._login(pin):
+                    return self._send(403, self._login_page("Wrong PIN."))
+                tok = secrets.token_urlsafe(24)
+                with lock:
+                    if len(sessions) > 50:             # old phones' sessions; they just log in again
+                        sessions.clear()
+                    sessions[tok] = self._pin()
+                self.send_response(303)
+                self.send_header("Location", "/")
+                self.send_header("Set-Cookie", f"ahs={tok}; Path=/; SameSite=Strict; HttpOnly")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             if not self._authed():
                 return self._send(403, '{"message":"locked"}', "application/json")
             try:
@@ -967,6 +1045,7 @@ class Agent:
             log("rolled back a bad update, restarting on the previous version")
             sys.exit(1)
         self.safely("boost", self.recover_boost)
+        self.safely("privacy", core.secure_data_dir)
         while not self.stopping:
             self.reload_config()
             if not self.cfg["agent"].get("enabled", True):

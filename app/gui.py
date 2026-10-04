@@ -5181,6 +5181,9 @@ class SystemPage(QWidget):
             return None
         path = shlex.quote(str(b["limit_file"]))
         bat = Path(b["path"]).name
+        value = core.charge_limit_ok(value)
+        if not value or '"' in bat or "'" in bat:
+            return None
         if value == "100":
             return (f"echo 100 | sudo tee {path} >/dev/null && sudo rm -f {core.UDEV_CHARGE_RULE} && "
                     "echo 'Charge limit removed.'")
@@ -6394,7 +6397,7 @@ class Hub(QMainWindow):
             if not url:
                 msg_warn(self, APP_NAME, f"{name} has no downloadable release.")
                 return
-            self.runner.submit(f"Installing plugin {name}", core.decky_store_install_cmd(url), key)
+            self.runner.submit(f"Installing plugin {name}", core.decky_store_install_cmd(url, core.store_artifact_hash(plugin)), key)
         self.update_cards()
 
     def toggle_decky(self, names: list, off: bool, key: str, confirm: bool = True, after=None):
@@ -6463,7 +6466,7 @@ class Hub(QMainWindow):
             cmds = ["flatpak remote-add --user --if-not-exists flathub "
                     "https://dl.flathub.org/repo/flathub.flatpakrepo"]
             cmds += [f"flatpak install --user -y --noninteractive flathub {shlex.quote(f)} "
-                     f"|| echo 'Skipped {f}'" for f in plan["flatpaks"]]
+                     f"|| echo {shlex.quote('Skipped ' + f)}" for f in plan["flatpaks"]]
             self.runner.submit(f"Installing {len(plan['flatpaks'])} apps", "; ".join(cmds), "profile-apps")
         if plan["decky_plugins"]:
             wanted = {p.lower() for p in plan["decky_plugins"]}
@@ -6474,7 +6477,7 @@ class Hub(QMainWindow):
                         url = core.store_artifact_url(p)
                         if url:
                             self.runner.submit(f"Installing plugin {p['name']}",
-                                               core.decky_store_install_cmd(url), "store:" + p["name"])
+                                               core.decky_store_install_cmd(url, core.store_artifact_hash(p)), "store:" + p["name"])
                 self.update_cards()
             self.store_page.with_plugins(queue_plugins)
         if sysp.get("charge_limit") and sysp["charge_limit"] != "100":
@@ -6737,6 +6740,10 @@ def main():
         os.execv(sys.executable, [sys.executable, str(core.APP_DIR / "allyhub.py")] + sys.argv[1:])
     sys.excepthook = _excepthook
     core.app_log("gui", f"start {VERSION} ({'game mode' if GAMEMODE else 'desktop'})")
+    try:
+        core.secure_data_dir()
+    except Exception:
+        pass
     global _SCALE_SET_BY_US
     if "QT_SCALE_FACTOR" not in os.environ:
         os.environ["QT_SCALE_FACTOR"] = str(core.ui_scale(load_config()["theme"], GAMEMODE))

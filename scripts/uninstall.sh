@@ -6,7 +6,14 @@ for unit in allyhub-agent.service; do
     rm -f "$HOME/.config/systemd/user/$unit"
 done
 systemctl --user daemon-reload 2>/dev/null
-rm -rf "$HOME/.local/share/allyhub" "$HOME/.config/allyhub"
+# The Game Mode library tile (through Steam itself, while Steam and Decky are running)
+APP_DIR="$HOME/.local/share/allyhub"
+TILE=0
+if [ -f "$APP_DIR/core.py" ] && command -v python3 >/dev/null; then
+    python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import core; sys.exit(0 if core.cef_remove_shortcuts(["Ally Hub"]) else 1)' \
+        "$APP_DIR" 2>/dev/null && TILE=1
+fi
+rm -rf "$APP_DIR" "$HOME/.config/allyhub"
 rm -f "$HOME/.config/environment.d/90-allyhub-games.conf"
 rm -f "$HOME/.local/bin/allyhub" \
       "$HOME/.local/share/applications/allyhub.desktop" \
@@ -20,14 +27,19 @@ for r in /etc/udev/rules.d/99-allyhub-leds.rules /etc/udev/rules.d/99-allyhub-ch
          /etc/systemd/system/allyhub-zram.service /etc/allyhub/zram.sh; do
     [ -f "$r" ] && RULES="$RULES $r"
 done
-if [ -n "$RULES" ]; then
-    echo "Removing Ally Hub's system settings (lighting, charge limit, performance; needs your password)"
+QAM="$HOME/homebrew/plugins/AllyHub"          # Ally Hub's Quick Access panel (a Decky plugin, owned by root)
+if [ -n "$RULES" ] || [ -d "$QAM" ]; then
+    echo "Removing Ally Hub's system settings and Quick Access panel (needs your password)"
     if [ -f /etc/systemd/system/allyhub-zram.service ]; then
         sudo systemctl disable --now allyhub-zram.service 2>/dev/null
     fi
-    sudo rm -f $RULES
+    [ -n "$RULES" ] && sudo rm -f $RULES
     sudo rmdir /etc/allyhub 2>/dev/null
     sudo systemctl daemon-reload 2>/dev/null
-    echo "Restart once to return every performance setting to SteamOS's defaults."
+    if [ -d "$QAM" ]; then
+        sudo rm -rf "$QAM" && sudo systemctl restart plugin_loader 2>/dev/null
+    fi
+    [ -n "$RULES" ] && echo "Restart once to return every performance setting to SteamOS's defaults."
 fi
+[ "$TILE" = 1 ] || echo "If Ally Hub is still in your Game Mode library, remove it there: Manage > Remove non-Steam game."
 echo "Ally Hub removed. Your backups are still in ~/AllyHub-Backups."
