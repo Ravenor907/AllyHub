@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.2.3-e11d48?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.3.2-e11d48?style=flat-square">
   <img alt="SteamOS" src="https://img.shields.io/badge/SteamOS-3.8%2B-1a9fff?style=flat-square&logo=steam&logoColor=white">
   <img alt="Device" src="https://img.shields.io/badge/ROG%20Xbox%20Ally%20X-tested-8b5cf6?style=flat-square">
   <img alt="License" src="https://img.shields.io/github/license/Ravenor907/AllyHub?color=22c55e&style=flat-square">
@@ -36,6 +36,8 @@ and a phone remote. Works in Desktop Mode, and fully in Game Mode with just the 
 | 🕹️ **PC launchers** | Battle.net, Epic, EA, Ubisoft, GOG and 10 more added straight to your Steam library with their own cover art, plus uninstall and a leftover cleaner |
 | 🚀 **Performance** | Game Boost while you play, a one-tap system tune-up and FSR 4 for every game, ideas from CachyOS and Bazzite, all undoable |
 | 🎚️ **Game settings** | Per-game switches instead of typing launch options (FSR 4, frame generation, Steam Deck mode and more), the right Proton per game, and help when a game won't start |
+| 🕰️ **Save time machine** | A snapshot of each game's saves every time it starts, restorable from Game Mode, with undo |
+| 🌙 **Sleep guardian** | Battery used per sleep, what woke the handheld and failed sleeps, with a fix for USB devices that keep waking it |
 | 💽 **Storage saver** | See each game's real size and clear what Steam leaves behind: shader caches and files of removed games, unused Proton builds, old downloads |
 | 🌈 **Ring lighting** | Smooth animated effects, a customizable RGB Spiral, battery and per-game colors, or hand the rings to HueSync |
 | 🎨 **Themes** | 8 themes, custom accent colors, interface size, and tabs on the top or as icons down the sides |
@@ -61,10 +63,9 @@ No keyboard? Press **Steam + X** for the on-screen one.
 
 It's finished when it says **Done!**
 
-**4. Open Ally Hub** from the desktop icon or the app launcher.
-
-**5. Add it to Steam (recommended).** Settings → Tweaks → **Add Ally Hub to Steam**. Now it opens from your
-Game Mode library and works with the controller.
+**4. Open Ally Hub** from the desktop icon, the app launcher, or your Game Mode library (the installer adds it
+there for you). The first time, a short setup walks you through the rest: a sudo password, Decky Loader and a few
+favorites. Skip anything you like; Home keeps a reminder.
 
 That's it. Ally Hub keeps itself up to date from here on.
 
@@ -88,7 +89,7 @@ That's it. Ally Hub keeps itself up to date from here on.
 | **Home** | Health report: battery, temps, power draw, storage, and what needs attention |
 | **Install** | Mods · Plugin store · Apps · Launchers |
 | **Customize** | Lighting · Themes · Automation |
-| **Tools** | Performance · Games · Storage · Doctor · Connect (phone remote) · System |
+| **Tools** | Performance · Games · Saves · Storage · Sleep · Doctor · Connect (phone remote) · System |
 | **Settings** | Updates · Tweaks · Activity |
 
 <details>

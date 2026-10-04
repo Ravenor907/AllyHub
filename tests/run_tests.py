@@ -73,6 +73,7 @@ check(top == [".claude", ".github", ".gitignore", "LICENSE", "README.md", "VERSI
               "scripts", "tests"], "tidy repo top level: " + ", ".join(top))
 # install.sh run from scripts/ finds and copies every app file (only its copy step, no network)
 inst = open(os.path.join({root!r}, "scripts", "install.sh")).read()
+check("--first-install" in inst and 'FRESH' in inst, "a fresh install sets itself up (helper on, Game Mode entry, setup)")
 copy_part = inst.split('rm -rf "$APP_DIR/__pycache__"')[0]
 tmp_sh = os.path.join({root!r}, "scripts", ".copy_test.sh")
 open(tmp_sh, "w").write(copy_part)
@@ -879,6 +880,120 @@ core.EMUDECK_PATH.parent.mkdir(parents=True, exist_ok=True); core.EMUDECK_PATH.w
 _r = subprocess.run(["bash", "-c", core.emudeck_uninstall_cmd()], capture_output=True, text=True)
 check(_r.returncode == 0 and not core.EMUDECK_PATH.exists() and "never set up" in _r.stdout,
       "EmuDeck that was never set up is removed cleanly (no missing-uninstaller error)")
+# ---- Save time machine (Ludusavi stand-in on PATH) ----
+_fb = Path(HOME) / "fakebin"; _fb.mkdir(exist_ok=True)
+(_fb / "flatpak").write_text('''#!/usr/bin/env python3
+import sys, json, os
+log = os.path.join(os.environ["HOME"], "flatpak.log")
+open(log, "a").write(json.dumps(sys.argv[1:]) + "\\n")
+a = sys.argv[1:]
+if a[0] == "info":
+    sys.exit(0)
+a = a[2:]
+if a[0] == "find":
+    if "--steam-id" in a:
+        print(json.dumps({"games": {"Big Game": {}}} if a[a.index("--steam-id") + 1] == "100" else {"games": {}}))
+        sys.exit(0 if a[a.index("--steam-id") + 1] == "100" else 1)
+    print(json.dumps({"games": {"Battle.net Thing": {}}})); sys.exit(0)
+if a[0] == "backups":
+    print(json.dumps({"games": {"Big Game": {"backupPath": "x", "backups": [
+        {"name": "backup-1", "when": "2026-10-01T10:00:00Z", "locked": False},
+        {"name": "backup-2", "when": "2026-10-03T10:00:00Z", "locked": False}]}}}))
+    sys.exit(0)
+print(json.dumps({"overall": {}, "games": {}})); sys.exit(0)
+''')
+(_fb / "flatpak").chmod(0o755)
+os.environ["PATH"] = str(_fb) + os.pathsep + os.environ["PATH"]
+_flog = Path(HOME) / "flatpak.log"
+check(core.ludusavi_ready(), "sees Ludusavi")
+check(core.ludusavi_title(100, "Big Game") == "Big Game" and core.ludusavi_title(100) == "Big Game"
+      and sum(1 for l in _flog.read_text().splitlines() if '"find"' in l) == 1, "finds a game's Ludusavi title by Steam id, once")
+check(core.ludusavi_title(None, "Battle.net") == "Battle.net Thing" and core.ludusavi_title(555) == "", "by name for non-Steam games; unknown games are skipped")
+check("steam:555" not in core.read_json(core.TM_TITLES, {}), "a lookup without a clear answer is tried again later")
+check(core.ludusavi_title_cached(100) == "Big Game" and core.ludusavi_title_cached(None, "nope") == "", "cached titles for quick checks")
+ba = core.tm_backup_args("Big Game", 5)
+check(ba[-1] == "Big Game" and "--full-limit" in ba and ba[ba.index("--full-limit") + 1] == "5" and "--no-cloud-sync" in ba
+      and str(core.TM_DIR) in ba, "snapshots go to their own folder with Ludusavi keeping the newest few")
+core.TM_DIR.mkdir(parents=True, exist_ok=True)
+sn = core.tm_snapshots()
+check(list(sn) == ["Big Game"] and sn["Big Game"][0]["name"] == "backup-2", "lists snapshots per game, newest first")
+_r = subprocess.run(["bash", "-c", core.tm_restore_cmd("Big Game", "backup-1")], capture_output=True, text=True)
+calls = [json.loads(l) for l in _flog.read_text().splitlines()][-2:]
+_rc = core.tm_restore_cmd("Big Game", "b")
+check("'Big Game' && flatpak run com.github.mtkennerly.ludusavi restore" in _rc and ">/dev/null" not in _rc,
+      "the restore only runs if saving the current saves worked, and its output is kept")
+_ru = core.tm_restore_cmd("Big Game", "u1", undo=True)
+check(str(core.TM_BEFORE_RESTORE) in _ru and "u1" in _ru and " backup " not in _ru, "undo restores the safety copy")
+check(_r.returncode == 0 and "Restored Big Game" in _r.stdout and "backup" in calls[0] and str(core.TM_BEFORE_RESTORE) in calls[0]
+      and "restore" in calls[1] and calls[1][calls[1].index("--backup") + 1] == "backup-1",
+      "a restore saves what's there now first, then restores the chosen snapshot: " + _r.stderr[-200:])
+check(core.tm_due("Big Game") and (core.tm_record("Big Game", 0, "Big Game") or True) and not core.tm_due("Big Game"),
+      "one snapshot per game per 10 minutes")
+check(core.when_text("bad") == "bad" and core.when_text("2020-01-02T03:04:00Z").startswith("Jan"), "snapshot times read naturally")
+# ---- Sleep guardian: fake kernel power files ----
+_pw = Path(HOME) / "fake-power"; (_pw / "suspend_stats").mkdir(parents=True)
+for k, v in {"success": "10", "fail": "0", "last_failed_dev": "", "last_failed_errno": "0", "last_failed_step": "",
+             "last_hw_sleep": "0", "total_hw_sleep": "0"}.items():
+    (_pw / "suspend_stats" / k).write_text(v + "\n")
+_wk = Path(HOME) / "fake-wakeup"
+_usb = Path(HOME) / "fake-sys/devices/pci0000:00/usb1/1-3"; (_usb / "power").mkdir(parents=True); (_usb / "power/wakeup").write_text("enabled")
+_btn = Path(HOME) / "fake-sys/devices/LNXSYSTM:00/PNP0C0C:00"; (_btn / "power").mkdir(parents=True); (_btn / "power/wakeup").write_text("enabled")
+for n, name, dev in (("wakeup0", "1-3", _usb), ("wakeup1", "PNP0C0C:00", _btn)):
+    (_wk / n).mkdir(parents=True); (_wk / n / "name").write_text(name); (_wk / n / "wakeup_count").write_text("5")
+    (_wk / n / "device").symlink_to(dev)
+core.POWER_ROOT, core.WAKEUP_ROOT = _pw, _wk
+pre = core.sleep_snapshot()
+check(pre["stats"]["success"] == 10 and pre["wake"]["wakeup0"]["name"] == "1-3" and pre["wake"]["wakeup0"]["wake_file"],
+      "reads suspend stats and wakeup sources")
+(_wk / "wakeup0/wakeup_count").write_text("6"); (_pw / "suspend_stats/total_hw_sleep").write_text(str(int(3600 * 0.5 * 1e6)))
+post = core.sleep_snapshot()
+e = core.sleep_entry(pre, post, 7200, 80.0, 70.0, False)
+check(e["drop"] == 10.0 and e["per_hour"] == 5.0 and e["woke_by"] == ["1-3"] and not e["failed"] and e["hw_sleep_pct"] == 25.0,
+      "a sleep's cost, cause and deep-sleep share: " + str(e))
+check(core.sleep_entry(pre, post, 7200, 80.0, 90.0, True)["per_hour"] is None, "charging sleeps don't count as drain")
+check(core.sleep_entry(pre, dict(post, wc=pre["wc"], irq="acpi PNP0C0C"), 600, 80.0, 79.0, False)["woke_by"] == ["acpi PNP0C0C"],
+      "without a counter change, the kernel's last wakeup interrupt names the cause")
+check(core.sleep_snapshot(full=False).get("wake") is None and "wc" in core.sleep_snapshot(full=False), "the every-second snapshot stays light")
+fl = core.sleep_failure_entry({"last_failed_dev": "xhci", "last_failed_step": "suspend"})
+check(fl["failed"] and fl["slept"] == 0 and fl["failed_dev"] == "xhci", "a sleep the kernel gave up on is recorded too")
+(_pw / "suspend_stats/fail").write_text("1"); (_pw / "suspend_stats/last_failed_dev").write_text("amdgpu")
+fe = core.sleep_entry(post, core.sleep_snapshot(), 30, 70.0, 70.0, False)
+check(fe["failed"] and fe["failed_dev"] == "amdgpu", "a failed sleep and the device behind it")
+srcs = core.wakeup_sources()
+f = {x["id"]: x for x in core.sleep_findings([e, e], srcs)}
+check("drain" in f and "5.0%" in f["drain"]["detail"] and "deepest sleep" in f["drain"]["detail"], "flags heavy sleep drain")
+short = dict(e, slept=40, per_hour=None)
+f = {x["id"]: x for x in core.sleep_findings([short] * 3 + [fe], srcs)}
+check(f["wakes"]["fix"] and f["wakes"]["fix"]["name"] == "1-3" and "failed" in f and "amdgpu" in f["failed"]["detail"],
+      "names the device that keeps waking it, with a fix, and the failed sleep")
+btn = dict(short, woke_by=["PNP0C0C:00"])
+check(core.sleep_findings([btn] * 3, srcs)[0]["fix"] is None, "never offers to stop the power button (or anything not USB)")
+check(core.sleep_findings([], srcs) == [], "nothing to say without sleeps")
+nc = core.nowake_cmd(["/devices/pci0000:00/usb1/1-3", "/devices/LNXSYSTM:00/PNP0C0C:00", '/devices/usb1/x"y',
+                      "/devices/pci0000:00/usb1"])
+check(nc.count("DEVPATH") == 1 and "PNP0C0C" not in nc and "udevadm" in nc and 'SUBSYSTEM=="usb"' in nc and "usb1/power" not in nc,
+      "the wake rule only ever covers USB devices, never a whole USB bus: " + nc[:200])
+na = core.nowake_cmd([], allow=["/devices/pci0000:00/usb1/1-3"])
+check("rm -f" in na and "echo enabled" in na and "1-3/power/wakeup" in na, "allowing a device again removes the rule and re-enables it now")
+check(core._never_offer({"devpath": "/devices/pci0000:00/usb1", "wake_file": "/x"}), "a USB bus itself is never offered")
+check(core.duration_text(7260) == "2 h 1 min" and core.duration_text(90) == "1 min", "sleep lengths read naturally")
+core.record_sleep(e); check(core.sleep_log()[-1]["slept"] == 7200, "sleeps are logged")
+# ---- first run: a fresh install sets itself up, updates change nothing ----
+_cfgf = core.CONFIG_FILE
+_bak = _cfgf.read_bytes() if _cfgf.exists() else None
+if _cfgf.exists():
+    _cfgf.unlink()
+_fi = core.first_install(sys.executable)
+_c = core.load_config()
+check(_c["agent"]["enabled"] and _c["setup"]["done"] is False and len(_fi) == 2,
+      "a brand new install turns the helper on and opens setup on first launch: " + str(_fi))
+check(core.first_install(sys.executable) == [], "running the installer again (an update) changes nothing")
+if _bak is not None:
+    _cfgf.write_bytes(_bak)
+check(core.load_config()["setup"]["done"] is True or _bak is None, "existing installs count as set up")
+check("--gamemode" in core.gamemode_desktop_text(), "the Game Mode entry opens the controller layout")
+_cl = core.setup_checklist({"password": False, "decky": {}})
+check([k for k, _t, _d in _cl] == ["password", "decky", "steam", "agent"] and not _cl[0][2], "the setup checklist knows what's left")
 # ---- reports: attachments, snapshot, instant upload, per-version repeats, manual reports ----
 posts = []
 def _fake_gh(method, path, data=None, **kw):
@@ -1054,6 +1169,29 @@ check(not _ask({"op": "action", "name": "game_flag", "data": {"key": "deck", "on
       and not _ask({"op": "status"})["game_live"], "launch options the switches can't parse are never touched")
 core.game_settings, core.apply_game_settings = _gs, _ag
 check(_ask({"op": "action", "name": "backup"})["ok"], "panel can ask for a save backup")
+sg = agent.Agent()
+sg.update_sleep(core.battery_info())
+mono0, boot0, pct0, ch0 = sg.sleep_last
+sg.sleep_last = (mono0 - 1, boot0 - 4000, 80.0, False)       # as if the handheld slept for about an hour
+sg.update_sleep(core.battery_info())
+_sl = core.sleep_log()
+check(_sl and 3900 < _sl[-1]["slept"] < 4100 and _sl[-1]["drop"] is not None and _sl[-1]["drop"] > 10,
+      "the agent notices a sleep and what it cost: " + str(_sl[-1] if _sl else None))
+sg.update_sleep(core.battery_info())
+check(len(core.sleep_log()) == len(_sl), "normal ticks aren't sleeps")
+_fb = Path(HOME) / "fakebin"; _fb.mkdir(exist_ok=True)
+(_fb / "flatpak").write_text("#!/bin/sh\necho \"$@\" >> \"$HOME/flatpak.log\"\ncase \"$*\" in *find*) echo '{\"games\": {\"Halo Infinite\": {}}}';; esac\nexit 0\n")
+(_fb / "flatpak").chmod(0o755)
+os.environ["PATH"] = str(_fb) + os.pathsep + os.environ["PATH"]
+a._ludusavi_t = 0
+a.tm_snapshot(a.game)
+_tms = core.read_json(core.TM_STATE, {})
+check(_tms.get("Halo Infinite", {}).get("rc") == 0 and "--full-limit" in (Path(HOME) / "flatpak.log").read_text(),
+      "a game starting gets its saves snapshotted: " + str(_tms))
+a.tm_snapshot(a.game)
+check(sum(1 for l in (Path(HOME) / "flatpak.log").read_text().splitlines() if "time-machine" in l and " backup " in l) == 1,
+      "but not again right away")
+
 _spec = _iu.spec_from_loader("qam_main", loader=None)
 qam = _iu.module_from_spec(_spec)
 exec(core.QAM_MAIN_PY, qam.__dict__)
@@ -1839,6 +1977,84 @@ check(hub.launchers.restorable(["Youtube"]) and not hub.launchers.restorable(["B
       "web launchers and installed stores can come back without reinstalling")
 tryit("launchers quick restore", hub.launchers.add)
 hub.runner.submit = _sub3
+hub.go("Saves")
+check(hub.current_page() is hub.saves, "Saves live under Tools")
+tryit("saves refresh", hub.saves.refresh)
+tryit("saves on", lambda: hub.saves.set_on(True))
+check(core.load_config()["saves"]["time_machine"], "the time machine can be turned on")
+tryit("saves keep", lambda: hub.saves.set_keep(2))
+check(core.load_config()["saves"]["keep"] == 10, "and told how many to keep")
+_snaps = {"Big Game": [{"name": "b2", "when": "2026-10-03T10:00:00Z"}, {"name": "b1", "when": "2026-10-01T10:00:00Z"}]}
+tryit("saves loaded", lambda: hub.saves._loaded(_snaps))
+tryit("saves empty", lambda: hub.saves._loaded({}))
+hub.saves.snaps = _snaps
+_ai3, _sub4 = gui.ask_item, hub.runner.submit
+_tm = []
+hub.runner.submit = lambda label, cmd, key="": _tm.append((key, cmd))
+gui.ask_item = lambda *a, **k: (core.when_text("2026-10-01T10:00:00Z"), True)
+tryit("saves restore", lambda: hub.saves.pick("Big Game"))
+check(_tm and _tm[-1][0] == "tm-restore" and "b1" in _tm[-1][1], "picking a snapshot restores that one")
+hub.saves.undo = {"Big Game": [{"name": "u1", "when": "2026-10-04T10:00:00Z"}]}
+gui.ask_item = lambda *a, **k: (a[3][0], True)
+tryit("saves undo", lambda: hub.saves.pick("Big Game"))
+check("u1" in _tm[-1][1] and str(core.TM_BEFORE_RESTORE) in _tm[-1][1], "the last restore can be undone from the same list")
+tryit("saves loaded (both lists)", lambda: hub.saves._loaded({"tm": _snaps, "undo": {}}))
+gui.ask_item, hub.runner.submit = _ai3, _sub4
+tryit("saves restore done", lambda: hub.on_job_finished("tm-restore", 0, ""))
+hub.go("Sleep")
+check(hub.current_page() is hub.sleep, "Sleep lives under Tools")
+tryit("sleep refresh empty", hub.sleep.refresh)
+_sle = {"end": 1, "slept": 40, "pct_before": 80, "pct_after": 79, "drop": 1, "charging": False, "per_hour": None,
+        "woke_by": ["1-3"], "failed": False, "failed_dev": "", "failed_step": "", "hw_sleep_pct": None}
+core.write_json(core.SLEEP_LOG, [_sle] * 3)
+_ws = core.wakeup_sources
+core.wakeup_sources = lambda: {"w0": {"name": "1-3", "count": 1, "devpath": "/devices/pci0000:00/usb1/1-3", "wake_file": "/x"}}
+tryit("sleep refresh with findings", hub.sleep.refresh)
+_np5, _sub5 = hub.needs_password, hub.runner.submit
+_sj = []
+hub.needs_password = lambda: False
+hub.runner.submit = lambda label, cmd, key="": _sj.append((key, cmd))
+tryit("sleep stop wake", lambda: hub.sleep.stop_wake({"kind": "nowake", "devpath": "/devices/pci0000:00/usb1/1-3", "name": "1-3"}))
+check(_sj and _sj[-1][0] == "sleep-nowake" and core.load_config()["sleep"]["no_wake"] == [],
+      "stopping a device only changes the saved list once the job worked")
+tryit("sleep nowake done", lambda: hub.sleep.job_done(True))
+check(core.load_config()["sleep"]["no_wake"] == ["/devices/pci0000:00/usb1/1-3"], "a device can be stopped from waking the handheld")
+tryit("sleep allow wake", lambda: hub.sleep.allow_wake("/devices/pci0000:00/usb1/1-3"))
+tryit("sleep allow failed", lambda: hub.sleep.job_done(False))
+check(core.load_config()["sleep"]["no_wake"] == ["/devices/pci0000:00/usb1/1-3"], "a failed job leaves the list as it was")
+tryit("sleep allow wake again", lambda: (hub.sleep.allow_wake("/devices/pci0000:00/usb1/1-3"), hub.sleep.job_done(True)))
+check(core.load_config()["sleep"]["no_wake"] == [] and "echo enabled" in _sj[-1][1], "and allowed again, right away")
+hub.needs_password, hub.runner.submit = _np5, _sub5
+core.wakeup_sources = _ws
+tryit("sleep send details", hub.sleep.send_details)
+tryit("sleep job done", lambda: hub.on_job_finished("sleep-nowake", 0, ""))
+hub.go("Setup")
+check(hub.current_page() is hub.setup, "Setup lives under Home")
+tryit("setup refresh", hub.setup.refresh)
+_steps = hub.setup.steps()
+check(_steps[0] == "welcome" and _steps[-1] == "done" and "reports" not in _steps, "the walkthrough skips reports without a key")
+for _ in range(len(_steps) - 1):
+    tryit("setup step " + hub.setup.steps()[hub.setup.step], hub.setup.next)
+check(hub.setup.steps()[hub.setup.step] == "done", "every step can be walked through")
+tryit("setup back", hub.setup.back)
+_np6, _sub6, _ia = hub.needs_password, hub.runner.submit, hub.on_item_action
+_acts = []
+hub.needs_password = lambda: False
+hub.on_item_action = lambda iid, action: _acts.append((iid, action))
+hub.setup.step = hub.setup.steps().index("essentials"); hub.setup.refresh()
+for _k, (_cb, _have) in hub.setup.essentials.items():
+    _cb.isChecked = lambda: True
+hub.setup.essentials = {k: (cb, False) for k, (cb, _h) in hub.setup.essentials.items()}
+tryit("setup install essentials", hub.setup.install_essentials)
+check(("decky", "install") in _acts and (core.LUDUSAVI_ID, "install") in _acts and hub.qam_after_decky,
+      "picked essentials install, the Quick Access panel right after Decky")
+hub.needs_password, hub.on_item_action = _np6, _ia
+tryit("setup finish", hub.setup.finish)
+check(core.load_config()["setup"]["done"] is True, "finishing marks setup done")
+tryit("home checklist", lambda: hub.health.refresh_notices({"password": False, "decky": {}}))
+tryit("home checklist hide", hub.health.hide_setup)
+check(core.load_config()["setup"]["checklist_hidden"], "the Home reminder can be hidden")
+hub.qam_after_decky = False
 tryit("NSL card opens the page", lambda: hub.on_item_action("nonsteamlaunchers", "install"))
 check(hub.current_page() is hub.launchers, "the catalog card opens the themed page, not the script's windows")
 # header/footer on the sides

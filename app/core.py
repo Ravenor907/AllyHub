@@ -86,6 +86,12 @@ DEFAULT_CONFIG = {
         "save_backup": False, "save_backup_hours": 24,
         "save_backup_dir": str(BACKUP_DIR / "saves"),
     },
+    # Save time machine (Tools > Saves): a snapshot of a game's saves each time it starts
+    "saves": {"time_machine": False, "keep": 5},
+    # First-run setup (Home > Setup). Existing installs count as set up; a fresh install sets done False.
+    "setup": {"done": True, "checklist_hidden": False},
+    # Sleep guardian: USB devices the owner stopped from waking the handheld (sysfs DEVPATHs)
+    "sleep": {"no_wake": []},
     "game_colors": {},
     "dock": {"lights": "off", "audio_hdmi": True},
     "wol": {"name": "Gaming PC", "mac": "", "broadcast": "255.255.255.255"},
@@ -3634,6 +3640,405 @@ def emudeck_uninstall_cmd() -> str:
                                                      HOME / ".local/share/applications/EmuDeck.desktop"))
     return (f'if [ -f {u} ]; then bash {u}; '
             f'else rm -f -- {files} && echo "EmuDeck was never set up, so only its app was removed."; fi')
+
+
+
+# ==========================================================================
+# Save time machine: a snapshot of a game's saves every time it starts, restorable from Game Mode
+# Ludusavi does the work (it knows where thousands of games keep their saves, Proton prefixes included).
+# Snapshots live in their own folder with Ludusavi's per-game retention (--full-limit), so they never mix with
+# the scheduled full backups.
+# ==========================================================================
+
+TM_DIR = BACKUP_DIR / "time-machine"
+TM_BEFORE_RESTORE = BACKUP_DIR / "before-restore"     # what was there right before a restore
+TM_STATE = DATA_DIR / "time_machine.json"             # {title: {"t", "rc", "game"}}
+TM_TITLES = DATA_DIR / "ludusavi_titles.json"         # game id / name -> Ludusavi title (or "" = not known)
+TM_MIN_GAP_S = 600                                    # one snapshot per game per 10 minutes (relaunch loops)
+
+
+def ludusavi_cmd(*args) -> list:
+    return ["flatpak", "run", LUDUSAVI_ID, *args]
+
+
+def ludusavi_ready() -> bool:
+    return run_quiet(["flatpak", "info", LUDUSAVI_ID])[0] == 0
+
+
+def ludusavi_title(appid: Optional[int] = None, name: str = "") -> str:
+    """Ludusavi's title for a game ("" when Ludusavi doesn't know it). Steam games by id, others by name."""
+    key = f"steam:{appid}" if appid and appid < 0x80000000 else f"name:{name.strip().lower()}"
+    cache = read_json(TM_TITLES, {}) or {}
+    if key in cache:
+        return cache[key]
+    if key == "name:":
+        return ""
+
+    def ask(args):
+        """(title, definitely-unknown). Only a clear "unknown game" answer is remembered as unknown, so a
+        timeout or an offline first run is simply tried again next time."""
+        rc, out = run_quiet(["nice", "-n", "19"] + ludusavi_cmd("find", "--api", *args), timeout=90)
+        try:
+            data = json.loads(out) if out else {}
+        except ValueError:
+            return "", False
+        title = next(iter(data.get("games") or {}), "") if isinstance(data, dict) else ""
+        unknown = bool(((data.get("errors") or {}) if isinstance(data, dict) else {}).get("unknownGames"))
+        return title, unknown and not title
+
+    title, unknown = ask(["--steam-id", str(appid)]) if key.startswith("steam:") else ("", True)
+    if not title and name.strip():
+        title, unknown2 = ask(["--normalized", name.strip()])   # exact name first, then normalized (never fuzzy)
+        unknown = unknown and unknown2
+    if title or unknown:
+        cache[key] = title
+        write_json(TM_TITLES, cache)
+    return title
+
+
+def ludusavi_title_cached(appid: Optional[int] = None, name: str = "") -> str:
+    """The title from earlier lookups only (never runs Ludusavi), for quick checks in the window."""
+    cache = read_json(TM_TITLES, {}) or {}
+    key = f"steam:{appid}" if appid and appid < 0x80000000 else f"name:{name.strip().lower()}"
+    return cache.get(key, "")
+
+
+def tm_backup_args(title: str, keep: int, path: Path = None) -> list:
+    return ludusavi_cmd("backup", "--force", "--no-cloud-sync", "--path", str(path or TM_DIR),
+                        "--full-limit", str(max(1, min(50, int(keep)))), "--differential-limit", "0", "--api", title)
+
+
+def tm_due(title: str) -> bool:
+    last = ((read_json(TM_STATE, {}) or {}).get(title) or {}).get("t", 0)
+    return time.time() - last > TM_MIN_GAP_S
+
+
+def tm_record(title: str, rc: int, game: str = "") -> None:
+    st = read_json(TM_STATE, {}) or {}
+    st[title] = {"t": time.time(), "rc": rc, "game": game}
+    write_json(TM_STATE, st)
+
+
+def tm_snapshots(path: Path = None) -> dict:
+    """{title: [{"name", "when", "locked"}...] newest first} from Ludusavi's own listing of a snapshot folder."""
+    path = path or TM_DIR
+    if not path.exists():
+        return {}
+    rc, out = run_quiet(ludusavi_cmd("backups", "--api", "--path", str(path)), timeout=120)
+    try:
+        games = json.loads(out).get("games") or {} if rc == 0 and out else {}
+    except ValueError:
+        return {}
+    res = {}
+    for title, info in games.items():
+        backs = [b for b in (info or {}).get("backups") or [] if isinstance(b, dict) and b.get("name")]
+        if backs:
+            res[title] = sorted(backs, key=lambda b: b.get("when", ""), reverse=True)
+    return res
+
+
+def tm_restore_cmd(title: str, backup: str, undo: bool = False) -> str:
+    """Restore one snapshot. What's there now is saved first (in its own folder) and the restore only runs if
+    that worked, so every restore can be undone. undo=True restores that safety copy instead."""
+    src = TM_BEFORE_RESTORE if undo else TM_DIR
+    restore = " ".join(shlex.quote(a) for a in ludusavi_cmd("restore", "--force", "--no-cloud-sync", "--path",
+                                                            str(src), "--backup", backup, title))
+    done = f"echo {shlex.quote(('Undid the last restore of ' if undo else 'Restored ') + title + '.')}"
+    if undo:
+        return f"{restore} && {done}"
+    before = " ".join(shlex.quote(a) for a in tm_backup_args(title, 3, TM_BEFORE_RESTORE)[:-2] + [title])
+    return (f"mkdir -p {shlex.quote(str(TM_BEFORE_RESTORE))} && echo 'Saving your current saves first…' && "
+            f"{before} && {restore} && {done}")
+
+
+def when_text(iso: str) -> str:
+    """'Today 14:32', 'Yesterday 21:05', 'Mar 3, 09:10' for a snapshot time."""
+    import datetime
+    try:
+        t = datetime.datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone()
+    except (ValueError, AttributeError):
+        return iso or "?"
+    now = datetime.datetime.now().astimezone()
+    days = (now.date() - t.date()).days
+    hm = t.strftime("%H:%M")
+    return f"Today {hm}" if days == 0 else f"Yesterday {hm}" if days == 1 else t.strftime("%b %-d, ") + hm
+
+
+
+# ==========================================================================
+# Sleep guardian: how much battery each sleep costs, what woke the handheld, and sleeps that failed
+# The agent notices a sleep from the gap between CLOCK_BOOTTIME (keeps counting while suspended) and
+# CLOCK_MONOTONIC (doesn't), then compares the kernel's wakeup counters and suspend statistics from just before
+# and just after. Everything read here is world-readable sysfs; the only fix (stop a USB device waking the
+# handheld) is a udev rule in /etc, undone from the same page and by the uninstaller.
+# ==========================================================================
+
+POWER_ROOT = Path("/sys/power")
+WAKEUP_ROOT = Path("/sys/class/wakeup")
+SLEEP_LOG = DATA_DIR / "sleep_log.json"
+SLEEP_KEEP = 60
+NOWAKE_RULE = "/etc/udev/rules.d/71-allyhub-nowake.rules"
+SLEEP_DRAIN_HIGH = 3.0          # % per hour while asleep that counts as a problem
+SLEEP_STATS = ("success", "fail", "last_failed_dev", "last_failed_errno", "last_failed_step", "last_hw_sleep",
+               "total_hw_sleep")
+
+
+def suspend_stats() -> dict:
+    out = {}
+    for name in SLEEP_STATS:
+        v = read_text(POWER_ROOT / "suspend_stats" / name).strip()
+        out[name] = int(v) if v.lstrip("-").isdigit() else v
+    return out
+
+
+def wakeup_sources() -> dict:
+    """{source dir name: {"name", "count", "devpath", "wake_file"}} for every wakeup source the kernel lists."""
+    out = {}
+    try:
+        entries = list(WAKEUP_ROOT.iterdir())
+    except OSError:
+        return out
+    for d in entries:
+        count = read_text(d / "wakeup_count").strip()      # times it woke the system or stopped a sleep
+        dev = ""
+        try:
+            if (d / "device").exists():
+                dev = str((d / "device").resolve())
+        except OSError:
+            dev = ""
+        wake = Path(dev) / "power/wakeup" if dev else None
+        out[d.name] = {"name": read_text(d / "name").strip() or d.name, "count": int(count) if count.isdigit() else 0,
+                       "devpath": dev[4:] if dev.startswith("/sys/") else dev,
+                       "wake_file": str(wake) if wake and wake.exists() else ""}
+    return out
+
+
+def battery_level() -> Optional[float]:
+    now, full = battery_energy_wh()
+    if now and full:
+        return round(100 * now / full, 2)
+    b = battery_info()
+    try:
+        return float(b.get("capacity"))
+    except (TypeError, ValueError):
+        return None
+
+
+def wake_counts() -> dict:
+    """Just the wakeup counters, cheap enough to read every second: {source dir: count}."""
+    out = {}
+    try:
+        entries = list(WAKEUP_ROOT.iterdir())
+    except OSError:
+        return out
+    for d in entries:
+        c = read_text(d / "wakeup_count").strip()
+        out[d.name] = int(c) if c.isdigit() else 0
+    return out
+
+
+def wake_irq_name() -> str:
+    """What the kernel says woke it last: /sys/power/pm_wakeup_irq, named through /proc/interrupts."""
+    irq = read_text(POWER_ROOT / "pm_wakeup_irq").strip()
+    if not irq.isdigit():
+        return ""
+    for line in read_text(Path("/proc/interrupts")).splitlines():
+        parts = line.split()
+        if parts and parts[0].rstrip(":") == irq:
+            return " ".join(p for p in parts[1:] if not p.isdigit())[-60:] or f"IRQ {irq}"
+    return f"IRQ {irq}"
+
+
+def sleep_snapshot(full: bool = True) -> dict:
+    """Suspend stats and wakeup counters. The agent takes a light one every second (so the "before" side is
+    never stale, and the button press that started the sleep isn't blamed for waking it)."""
+    snap = {"t": time.time(), "stats": suspend_stats(), "wc": wake_counts()}
+    if full:
+        snap["wake"] = wakeup_sources()
+    return snap
+
+
+def sleep_entry(pre: dict, post: dict, slept_s: float, pct_before, pct_after, charging: bool) -> dict:
+    hours = slept_s / 3600
+    drop = round(pct_before - pct_after, 2) if pct_before is not None and pct_after is not None else None
+    names = {k: v["name"] for k, v in (post.get("wake") or {}).items()}
+    c0, c1 = pre.get("wc") or {}, post.get("wc") or {}
+    woke = [names.get(k, k) for k in c1 if k in c0 and c1[k] > c0[k]]
+    if not woke and post.get("irq"):
+        woke = [post["irq"]]
+    s0, s1 = pre.get("stats", {}), post.get("stats", {})
+    failed = isinstance(s1.get("fail"), int) and isinstance(s0.get("fail"), int) and s1["fail"] > s0["fail"]
+    t0, t1 = s0.get("total_hw_sleep"), s1.get("total_hw_sleep")         # microseconds in hardware sleep
+    hw = t1 - t0 if isinstance(t0, int) and isinstance(t1, int) and t1 >= t0 else None
+    hw_pct = round(min(100.0, hw / 1e6 / slept_s * 100), 1) if hw and slept_s > 0 else None
+    return {"end": round(post.get("t", time.time())), "slept": round(slept_s), "pct_before": pct_before,
+            "pct_after": pct_after, "drop": drop, "charging": bool(charging),
+            "per_hour": round(drop / hours, 2) if drop is not None and not charging and hours >= 0.25 else None,
+            "woke_by": woke[:6], "failed": failed,
+            "failed_dev": s1.get("last_failed_dev") if failed else "",
+            "failed_step": s1.get("last_failed_step") if failed else "", "hw_sleep_pct": hw_pct}
+
+
+def sleep_failure_entry(stats: dict) -> dict:
+    """A sleep that never happened (the kernel gave up): no clock gap, so the agent records it from the stats."""
+    return {"end": round(time.time()), "slept": 0, "pct_before": None, "pct_after": None, "drop": None,
+            "charging": False, "per_hour": None, "woke_by": [], "failed": True,
+            "failed_dev": stats.get("last_failed_dev") or "", "failed_step": stats.get("last_failed_step") or "",
+            "hw_sleep_pct": None}
+
+
+def record_sleep(entry: dict) -> None:
+    log = read_json(SLEEP_LOG, []) or []
+    log.append(entry)
+    write_json(SLEEP_LOG, log[-SLEEP_KEEP:])
+
+
+def sleep_log() -> list:
+    log = read_json(SLEEP_LOG, []) or []
+    return [e for e in log if isinstance(e, dict)]
+
+
+def duration_text(seconds: float) -> str:
+    m = int(seconds // 60)
+    return f"{m // 60} h {m % 60} min" if m >= 60 else f"{m} min" if m else f"{int(seconds)} s"
+
+
+def _never_offer(source: dict) -> bool:
+    """Devices Ally Hub never offers to stop: anything that isn't a USB device (power button, lid, the
+    chipset), and USB root hubs (blocking one would stop every device on it, the built-in controller too)."""
+    dev = source.get("devpath", "")
+    return "/usb" not in dev or bool(re.search(r"/usb\d+$", dev)) or not source.get("wake_file")
+
+
+def sleep_findings(log: list = None, sources: dict = None) -> list:
+    """Plain-language problems with recent sleeps: [{"id", "title", "detail", "fix": {...} or None}]."""
+    log = sleep_log() if log is None else log
+    sources = wakeup_sources() if sources is None else sources
+    recent = log[-12:]
+    out = []
+    long_ = [e for e in recent if e.get("per_hour") is not None and e.get("slept", 0) >= 3600]
+    if long_:
+        rates = sorted(e["per_hour"] for e in long_)
+        med = rates[len(rates) // 2]
+        if med > SLEEP_DRAIN_HIGH:
+            last = long_[-1]
+            detail = (f"About {med:.1f}% per hour while asleep. Last time it lost {last['drop']:.0f}% over "
+                      f"{duration_text(last['slept'])}.")
+            hw = [e["hw_sleep_pct"] for e in long_ if e.get("hw_sleep_pct") is not None]
+            if hw and min(hw) < 80:
+                detail += f" It only spent {min(hw):.0f}% of that time in its deepest sleep, so something keeps it busy."
+            out.append({"id": "drain", "title": "Sleep uses a lot of battery", "detail": detail, "fix": None})
+    shorts = [e for e in recent if 0 < e.get("slept", 0) < 180 and e.get("woke_by")]
+    if len(shorts) >= 3:
+        names = {}
+        for e in shorts:
+            for n in e["woke_by"]:
+                names[n] = names.get(n, 0) + 1
+        culprit = max(names, key=names.get)
+        src = next((s for s in sources.values() if s["name"] == culprit), None)
+        fix = None if not src or _never_offer(src) else {"kind": "nowake", "devpath": src["devpath"], "name": culprit}
+        out.append({"id": "wakes", "title": f"{culprit} keeps waking the handheld",
+                    "detail": f"{len(shorts)} recent sleeps ended within 3 minutes, woken by {culprit}."
+                              + ("" if fix else " It's a system device, so it's best left alone; this was noted in "
+                                                "the sleep details."), "fix": fix})
+    fails = [e for e in recent if e.get("failed")]
+    if fails:
+        e = fails[-1]
+        dev, step = e.get("failed_dev") or "", e.get("failed_step") or ""
+        detail = "The handheld couldn't go to sleep" + (f" because of {dev}" if dev else "") + \
+                 (f" (step: {step})" if step else "") + ". Send the sleep details so it can be looked at."
+        out.append({"id": "failed", "title": "A sleep attempt failed", "detail": detail, "fix": None})
+    return out
+
+
+def _nowake_ok(d: str) -> bool:
+    return d.startswith("/devices/") and "/usb" in d and not re.search(r"/usb\d+$", d) and \
+        not any(c in d for c in '"\n\\')
+
+
+def nowake_cmd(devpaths: list, allow: list = ()) -> Optional[str]:
+    """Rewrite the rule file for exactly these USB devices (an empty list removes it) and apply it right away:
+    blocked devices get wakeup disabled, devices taken off the list (`allow`) get it enabled again."""
+    devpaths = sorted({d for d in devpaths if _nowake_ok(d)})
+    allow = sorted({d for d in allow if _nowake_ok(d)} - set(devpaths))
+    rule = shlex.quote(NOWAKE_RULE)
+    sets = [f"echo disabled | sudo tee {shlex.quote('/sys' + d + '/power/wakeup')} >/dev/null" for d in devpaths] + \
+           [f"echo enabled | sudo tee {shlex.quote('/sys' + d + '/power/wakeup')} >/dev/null" for d in allow]
+    apply = f"{{ {' ; '.join(sets)} ; true; }} && " if sets else ""
+    if not devpaths:
+        return (f"sudo rm -f {rule} && sudo udevadm control --reload && {apply}"
+                "echo 'Every device can wake the handheld again.'")
+    lines = "".join(f'ACTION=="add|bind|change", SUBSYSTEM=="usb", DEVPATH=="{d}", ATTR{{power/wakeup}}="disabled"\n'
+                    for d in devpaths)
+    return (f"printf %s {shlex.quote(lines)} | sudo tee {rule} >/dev/null && sudo udevadm control --reload && "
+            f"{apply}echo 'Saved.'")
+
+
+
+# ==========================================================================
+# First run: what a fresh install does on its own, and what's left for the user
+# ==========================================================================
+
+GAMEMODE_DESKTOP = HOME / ".local/share/applications/allyhub-gamemode.desktop"
+LAUNCHER = HOME / ".local/bin/allyhub"
+
+
+def gamemode_desktop_text() -> str:
+    return ("[Desktop Entry]\nType=Application\nName=Ally Hub\n"
+            f"Exec={LAUNCHER} --gamemode\nIcon={APP_DIR / 'allyhub.svg'}\nNoDisplay=true\nTerminal=false\n")
+
+
+def in_steam_library() -> bool:
+    return any(n.strip().lower() == "ally hub" for n in steam_shortcut_names())
+
+
+def add_to_steam() -> str:
+    """Put Ally Hub in the Game Mode library through SteamOS's own helper. Returns what happened."""
+    if in_steam_library():
+        return "already"
+    tool = shutil.which("steamos-add-to-steam")
+    if not tool or not LAUNCHER.exists():
+        return "unavailable"
+    GAMEMODE_DESKTOP.parent.mkdir(parents=True, exist_ok=True)
+    GAMEMODE_DESKTOP.write_text(gamemode_desktop_text())
+    try:
+        subprocess.Popen([tool, str(GAMEMODE_DESKTOP)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except OSError:
+        return "unavailable"
+    return "added"
+
+
+def start_agent(python: str) -> bool:
+    AGENT_UNIT.parent.mkdir(parents=True, exist_ok=True)
+    AGENT_UNIT.write_text(agent_unit_text(python))
+    ok = run_quiet(["systemctl", "--user", "daemon-reload"], timeout=20)[0] == 0
+    return ok and run_quiet(["systemctl", "--user", "enable", "--now", "allyhub-agent.service"], timeout=30)[0] == 0
+
+
+def first_install(python: str) -> list:
+    """Run by install.sh. Only on a brand new install (no settings yet): turn the agent on, put Ally Hub in the
+    Game Mode library, and have the app open its setup on first launch. Updates and reinstalls change nothing."""
+    if CONFIG_FILE.exists():
+        return []
+    update_config(lambda c: (c["agent"].__setitem__("enabled", True),
+                             c.setdefault("setup", {}).__setitem__("done", False)))
+    out = ["Background helper " + ("started" if start_agent(python) else "will start from the app")]
+    res = add_to_steam()
+    out.append({"added": "Added to your Game Mode library (Steam may take a moment to show it)",
+                "already": "Already in your Game Mode library",
+                "unavailable": "Add it to Game Mode later from the app's setup"}[res])
+    return out
+
+
+def setup_checklist(state: dict) -> list:
+    """[(key, title, done)] for the Home 'Finish setting up' card and the setup page."""
+    cfg = load_config()
+    decky = CATALOG_BY_ID["decky"].check(state) if "decky" in CATALOG_BY_ID else False
+    return [("password", "Set a sudo password", state.get("password") is not False),
+            ("decky", "Install Decky Loader", bool(decky)),
+            ("steam", "Put Ally Hub in your Game Mode library", in_steam_library()),
+            ("agent", "Turn on the background helper", bool(cfg["agent"].get("enabled")) and agent_running())]
 
 
 def decky_version(item, state: dict) -> str:

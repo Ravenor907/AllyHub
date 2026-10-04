@@ -416,6 +416,9 @@ class Agent:
         self.backup_now = False
         self._ludusavi, self._ludusavi_t = False, 0.0
         self.qam_game = {}         # the running game's switches, read from Steam once per game
+        self.tm_lock = threading.Lock()   # one save snapshot at a time
+        self.sleep_last = None     # (monotonic, boottime, battery %, charging) at the previous tick
+        self.sleep_pre = None      # wakeup counters / suspend stats from shortly before a sleep
 
     # ---- config ----
     def reload_config(self):
@@ -522,6 +525,64 @@ class Agent:
             except OSError as e:
                 log(f"remote failed: {e}")
                 self.server = None
+
+    # ---- Sleep guardian: a gap between boottime and monotonic time is a sleep ----
+    def update_sleep(self, battery: dict):
+        mono, boot = time.monotonic(), time.clock_gettime(time.CLOCK_BOOTTIME)
+        pct = core.battery_level()
+        charging = (battery or {}).get("status") in ("Charging", "Full")
+        snap = core.sleep_snapshot(full=False)                  # light: stats and wakeup counters only
+        if self.sleep_last and self.sleep_pre:
+            lm, lb, lpct, lch = self.sleep_last
+            gap = (boot - lb) - (mono - lm)                        # exact: both clocks move together when awake
+            if gap > 5:
+                post = core.sleep_snapshot()
+                post["irq"] = core.wake_irq_name()
+                entry = core.sleep_entry(self.sleep_pre, post, gap, lpct, pct, lch or charging)
+                core.record_sleep(entry)
+                log(f"woke after {core.duration_text(gap)}: battery {entry['drop']}% "
+                    f"{'(charging)' if entry['charging'] else ''} woke by {', '.join(entry['woke_by']) or '?'}"
+                    f"{' FAILED ' + str(entry['failed_dev']) if entry['failed'] else ''}")
+            else:
+                f0, f1 = (self.sleep_pre.get("stats") or {}).get("fail"), (snap.get("stats") or {}).get("fail")
+                if isinstance(f0, int) and isinstance(f1, int) and f1 > f0:   # a sleep the kernel gave up on
+                    core.record_sleep(core.sleep_failure_entry(snap["stats"]))
+                    log(f"a sleep failed: {snap['stats'].get('last_failed_dev')} "
+                        f"({snap['stats'].get('last_failed_step')})")
+        self.sleep_pre = snap
+        self.sleep_last = (mono, boot, pct, charging)
+
+    # ---- Save time machine: snapshot a game's saves as it starts ----
+    def tm_snapshot(self, game):
+        if not self.tm_lock.acquire(blocking=False):
+            log("save snapshot skipped: another snapshot is still running")
+            return
+        try:
+            if not self.ludusavi_ready():
+                log("save snapshot skipped: Ludusavi isn't installed")
+                return
+            name = self.seen.get(game) or ""
+            appid = core.steam_appid_of(game)
+            title = core.ludusavi_title(None if int(game) > 0xFFFFFFFF else appid, name)
+            if not title:
+                log(f"save snapshot skipped: Ludusavi doesn't know {name or game}")
+                return
+            if not core.tm_due(title):
+                return
+            keep = int((self.cfg.get("saves") or {}).get("keep", 5) or 5)
+            gentle = (["nice", "-n", "19"] + (["ionice", "-c3"] if shutil.which("ionice") else []))
+            core.TM_DIR.mkdir(parents=True, exist_ok=True)
+            try:
+                rc = subprocess.run(gentle + core.tm_backup_args(title, keep), stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.PIPE, timeout=900).returncode
+            except subprocess.TimeoutExpired:
+                rc = -1
+            core.tm_record(title, rc, name)
+            log(f"save snapshot for {title}: {'done' if rc == 0 else f'failed rc={rc}'}")
+        except Exception:
+            log(f"save snapshot failed: {sys.exc_info()[1]!r}")
+        finally:
+            self.tm_lock.release()
 
     # ---- Quick Access panel (a Decky plugin talks to this socket; only this user can open it) ----
     def serve_control(self):
@@ -719,6 +780,8 @@ class Agent:
             self.qam_game = {}
             if g and self.control:
                 threading.Thread(target=self.read_game_flags, args=(g,), daemon=True).start()
+            if g and (self.cfg.get("saves") or {}).get("time_machine"):
+                threading.Thread(target=self.tm_snapshot, args=(g,), daemon=True).start()
 
     # ---- Game Boost (Tools > Performance) ----
     def recover_boost(self):
@@ -923,6 +986,7 @@ class Agent:
             if self.cfg["agent"].get("health_log"):
                 self.safely("health", self.log_health, battery)
             self.safely("saves", self.save_backups, battery)
+            self.safely("sleep", self.update_sleep, battery)
             self.safely("lighting", self.update_lighting, battery)
             self.safely("state", self.write_state)
             if not self.healthy and time.time() - self.started > core.HEALTHY_AFTER_S:

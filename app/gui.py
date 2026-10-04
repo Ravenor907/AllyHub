@@ -2987,7 +2987,21 @@ class HealthPage(QWidget):
         super().__init__()
         self.hub = hub
         v = page_shell(self, "Health", "Live readings, history and which games drain your battery.")
-        # Home notices: only shown when something needs you (no password, Decky gone after an update)
+        # Home notices: only shown when something needs you (setup left, no password, Decky gone after an update)
+        self.setup_card = QFrame()
+        self.setup_card.setObjectName("banner")
+        scl = QVBoxLayout(self.setup_card)
+        scl.setContentsMargins(20, 14, 20, 14)
+        scl.addWidget(label("Finish setting up", "cardTitle"))
+        self.setup_items = QVBoxLayout()
+        scl.addLayout(self.setup_items)
+        sr = QHBoxLayout()
+        sr.addWidget(button("Open setup", lambda: hub.go("Setup"), "primary"))
+        sr.addWidget(button("Hide", self.hide_setup))
+        sr.addStretch()
+        scl.addLayout(sr)
+        self.setup_card.hide()
+        v.addWidget(self.setup_card)
         self.alerts_box = QVBoxLayout()
         self.alerts_box.setSpacing(8)
         v.addLayout(self.alerts_box)
@@ -3056,7 +3070,13 @@ class HealthPage(QWidget):
         osr = core.os_release()
         self.info.setText(f"{core.device_name()} · SteamOS {osr.get('VERSION_ID', '?')} · "
                           f"Ally Hub {core.version_label()}")
-        self.pw_banner.setVisible(state.get("password") is False)
+        left = [t for _k, t, done in core.setup_checklist(state) if not done]
+        hidden = (load_config().get("setup") or {}).get("checklist_hidden")
+        clear_layout(self.setup_items)
+        for t in left:
+            self.setup_items.addWidget(label("○  " + t, "bannerText"))
+        self.setup_card.setVisible(bool(left) and not hidden)
+        self.pw_banner.setVisible(state.get("password") is False and (hidden or not left))
         clear_layout(self.alerts_box)
         for a in core.read_json(core.DATA_DIR / "alerts.json", []) or []:
             f = QFrame()
@@ -3069,6 +3089,11 @@ class HealthPage(QWidget):
                                    lambda: self.hub.on_item_action("decky", "install"), "primary"))
             h.addWidget(button("Dismiss", lambda _=False, i=a.get("id"): self.hub.dismiss_alert(i)))
             self.alerts_box.addWidget(f)
+
+    def hide_setup(self, *_args):
+        update_config(lambda c: c.setdefault("setup", {}).__setitem__("checklist_hidden", True))
+        self.setup_card.hide()
+        self.hub.toast("Hidden. Home → Setup is always there.")
 
     def sample(self):
         try:
@@ -3975,6 +4000,480 @@ class GamesPage(QWidget):
                     self.hub.runner.submit(f"Resetting {g['name']}'s Windows files", cmd, "game-reset")
         elif choice.startswith("Check"):
             QDesktopServices.openUrl(QUrl(f"steam://validate/{g['appid']}"))
+
+
+# ==========================================================================
+# Setup: a short walkthrough on first launch (Home > Setup), skippable and re-runnable
+# One page that redraws itself per step, so every button and question stays inside the window.
+# ==========================================================================
+
+class SetupPage(QWidget):
+    STEPS = ["welcome", "password", "gamemode", "essentials", "lighting", "features", "reports", "done"]
+
+    def __init__(self, hub):
+        super().__init__()
+        self.hub = hub
+        self.step = 0
+        self.essentials = {}
+        self.v = page_shell(self, "Setup", "A minute to get your Ally ready. Everything here can be changed later.")
+        self.dots = label("", "cardMeta")
+        self.v.addWidget(self.dots)
+        self.body = QVBoxLayout()
+        self.body.setSpacing(12)
+        self.v.addLayout(self.body)
+        nav = QHBoxLayout()
+        self.btn_back = button("‹ Back", self.back)
+        self.btn_skip = button("Skip setup", self.finish)
+        self.btn_next = button("Next ›", self.next, "primary")
+        nav.addWidget(self.btn_back)
+        nav.addStretch()
+        nav.addWidget(self.btn_skip)
+        nav.addWidget(self.btn_next)
+        self.v.addLayout(nav)
+        self.v.addStretch()
+
+    def steps(self) -> list:
+        """Steps that apply here: lighting only with ring lights, reports only on a device with a report key."""
+        out = list(self.STEPS)
+        if not core.find_leds():
+            out.remove("lighting")
+        if not core.github_token():
+            out.remove("reports")
+        return out
+
+    def refresh(self):
+        steps = self.steps()
+        self.step = max(0, min(self.step, len(steps) - 1))
+        name = steps[self.step]
+        self.dots.setText(f"Step {self.step + 1} of {len(steps)}")
+        self.btn_back.setEnabled(self.step > 0)
+        self.btn_skip.setVisible(name != "done")
+        self.btn_next.setText("Finish" if name == "done" else "Next ›")
+        clear_layout(self.body)
+        getattr(self, "step_" + name)()
+        QTimer.singleShot(0, lambda: _focus_first(self))
+
+    def back(self, *_args):
+        self.step -= 1
+        self.refresh()
+
+    def next(self, *_args):
+        if self.steps()[self.step] == "done":
+            self.finish()
+            return
+        self.step += 1
+        self.refresh()
+
+    def finish(self, *_args):
+        update_config(lambda c: c.setdefault("setup", {}).__setitem__("done", True))
+        if core.in_steam_library():
+            self.hub.launchers.fix_artwork(only=["Ally Hub"], quiet=True)
+        self.step = 0
+        self.hub.go("Health")
+        self.hub.refresh()
+
+    # ---- pieces ----
+    def card(self, icon: str, color: str, title: str, desc: str) -> QVBoxLayout:
+        c, cv = titled_card(icon, color, title, desc)
+        self.body.addWidget(c)
+        return cv
+
+    def status_row(self, cv: QVBoxLayout, done: bool, done_text: str, todo_text: str, btn_text: str, fn):
+        row = QHBoxLayout()
+        pill = label("", "pill")
+        set_pill(pill, "DONE" if done else "TO DO", "on" if done else "off")
+        row.addWidget(pill)
+        row.addWidget(label(done_text if done else todo_text, "cardDesc", wrap=True), 1)
+        if not done and fn:
+            row.addWidget(button(btn_text, fn, "primary"))
+        cv.addLayout(row)
+
+    # ---- steps ----
+    def step_welcome(self):
+        self.card("gamepad-2", "#e11d48", "Welcome to Ally Hub",
+                  "Mods and apps in one tap, smoother games, lighting, save snapshots and more, all working with the "
+                  "controller. The next few steps set up the basics. Skip anything you don't want.")
+
+    def step_password(self):
+        cv = self.card("lock-keyhole", "#f59e0b", "Sudo password",
+                       "SteamOS ships without one. Ally Hub needs it to install Decky, plugins and system tweaks, "
+                       "and asks for it only when a task needs it.")
+        pw = self.hub.state.get("password") is not False
+        self.status_row(cv, pw, "A password is set.", "No password yet.", "Set password", self.hub.set_password)
+        if not pw:
+            cv.addWidget(label("A terminal opens to set it. Come back here and tap Check again.", "cardMeta", wrap=True))
+            r = QHBoxLayout()
+            r.addWidget(button("Check again", lambda: (self.hub.refresh(), self.refresh())))
+            r.addStretch()
+            cv.addLayout(r)
+
+    def step_gamemode(self):
+        cv = self.card("monitor-play", "#0ea5e9", "Game Mode",
+                       "Open Ally Hub from your Steam library and use it with the controller.")
+        self.status_row(cv, core.in_steam_library(), "Ally Hub is in your Game Mode library.",
+                        "Not in your Steam library yet.", "Add to Steam",
+                        lambda: (self.hub.add_to_steam(), QTimer.singleShot(4000, self.refresh)))
+        cfg = load_config()
+        on = bool(cfg["agent"].get("enabled")) and core.agent_running()
+        self.status_row(cv, on, "The background helper is running.",
+                        "The background helper is off. It powers the Quick Access panel, Game Boost, save snapshots "
+                        "and sleep tracking.", "Turn on",
+                        lambda: (self.hub.enable_agent(), QTimer.singleShot(3000, self.refresh)))
+
+    def step_essentials(self):
+        cv = self.card("download", "#22c55e", "Essentials",
+                       "Pick what to install now. Nothing installs until you tap Install.")
+        decky = CATALOG_BY_ID["decky"].check(self.hub.state)
+        ludusavi = CATALOG_BY_ID[core.LUDUSAVI_ID].check(self.hub.state) if core.LUDUSAVI_ID in CATALOG_BY_ID else True
+        qam = bool(core.qam_installed())
+        options = [("decky", "Decky Loader", "Plugins in Game Mode's ••• menu. Most Game Mode extras need it.", decky),
+                   ("qam", "Ally Hub in Quick Access", "Battery, temps, game switches and lighting while you play.", qam),
+                   ("ludusavi", "Ludusavi", "Lets Ally Hub snapshot your saves before every session.", ludusavi)]
+        self.essentials = {}
+        for key, title, desc, have in options:
+            cb = QCheckBox(title + ("  ✔ installed" if have else ""))
+            cb.setChecked(not have)
+            cb.setEnabled(not have)
+            cv.addWidget(cb)
+            cv.addWidget(label(desc, "cardMeta", wrap=True))
+            self.essentials[key] = (cb, have)
+        r = QHBoxLayout()
+        r.addWidget(button("Install selected", self.install_essentials, "primary"))
+        r.addStretch()
+        cv.addLayout(r)
+
+    def install_essentials(self, *_args):
+        pick = [k for k, (cb, have) in self.essentials.items() if cb.isChecked() and not have]
+        if not pick:
+            self.hub.toast("Nothing selected")
+            return
+        if ("decky" in pick or "qam" in pick) and self.hub.needs_password():
+            return
+        if "decky" in pick:
+            self.hub.on_item_action("decky", "install")
+        if "ludusavi" in pick:
+            self.hub.on_item_action(core.LUDUSAVI_ID, "install")
+        if "qam" in pick:
+            if "decky" in pick:
+                self.hub.qam_after_decky = True              # the panel goes in once Decky is there
+            else:
+                self.hub.games.qam_install()
+        self.hub.toast("Installing… progress is in Settings → Activity")
+
+    def step_lighting(self):
+        cv = self.card("lightbulb", "#8b5cf6", "Joystick ring lighting",
+                       "Pick who runs the rings. HueSync is a Decky plugin; Ally Hub lighting has effects, battery "
+                       "and per-game colors. You can switch any time under Customize → Lighting.")
+        shelved = core.lighting_shelved()
+        cv.addWidget(label("Now: " + ("HueSync" if shelved else "Ally Hub lighting"), "cardDesc"))
+        r = QHBoxLayout()
+        r.addWidget(button("Use HueSync", lambda: (self.hub.use_huesync_lighting(), self.refresh())))
+        r.addWidget(button("Use Ally Hub lighting", lambda: (self.hub.use_allyhub_lighting(), self.refresh())))
+        r.addStretch()
+        cv.addLayout(r)
+
+    def step_features(self):
+        cv = self.card("rocket", "#f97316", "A few favorites",
+                       "Turn on what you like. Each one has its own page under Tools with more options.")
+        cfg = load_config()
+        boost = QCheckBox("Game Boost: the CPU's performance setting while you play")
+        boost.setChecked(bool((cfg.get("performance") or {}).get("boost")))
+        boost.toggled.connect(lambda on: self.hub.performance.set_boost(on))
+        cv.addWidget(boost)
+        tm = QCheckBox("Save time machine: snapshot a game's saves every time it starts")
+        tm.setChecked(bool((cfg.get("saves") or {}).get("time_machine")))
+        tm.toggled.connect(lambda on: self.hub.saves.set_on(on))
+        cv.addWidget(tm)
+        cv.addWidget(label("Sleep tracking is automatic once the background helper runs.", "cardMeta", wrap=True))
+
+    def step_reports(self):
+        cv = self.card("bug", "#e11d48", "Error reports",
+                       "Problems are filed on GitHub with personal details removed, so they get fixed in the "
+                       "daily updates.")
+        cb = QCheckBox("Send error reports")
+        cb.setChecked(bool(load_config()["updates"].get("reporting")))
+        cb.toggled.connect(lambda on: update_config(lambda c: c["updates"].__setitem__("reporting", bool(on))))
+        cv.addWidget(cb)
+
+    def step_done(self):
+        left = [t for _k, t, done in core.setup_checklist(self.hub.state) if not done]
+        cv = self.card("sparkles", "#22c55e", "All set" if not left else "Almost there",
+                       "Ally Hub is ready. Home shows your battery and temps; everything else is in the tabs above."
+                       if not left else "Still to do (Home keeps a reminder): " + "; ".join(left) + ".")
+        cv.addWidget(label("Run this again any time from Home → Setup.", "cardMeta", wrap=True))
+
+
+# ==========================================================================
+# Save time machine: snapshots of each game's saves, taken as it starts, restorable from Game Mode
+# ==========================================================================
+
+class SavesPage(QWidget):
+    KEEP = [(3, "Keep 3 per game"), (5, "Keep 5 per game"), (10, "Keep 10 per game")]
+
+    def __init__(self, hub):
+        super().__init__()
+        self.hub = hub
+        self.snaps, self.undo = {}, {}
+        v = page_shell(self, "Saves",
+                       "A safety net for your progress: Ally Hub snapshots a game's saves every time it starts, so "
+                       "a corrupted save or a choice you regret is one restore away.")
+        card, cv = titled_card("save", "#22c55e", "Save time machine",
+                               "Uses Ludusavi, which knows where thousands of games keep their saves, including "
+                               "Windows games under Proton. Snapshots stay on your handheld.")
+        self.tm_cb = QCheckBox("Snapshot a game's saves every time it starts")
+        self.tm_cb.toggled.connect(self.set_on)
+        cv.addWidget(self.tm_cb)
+        kr = QHBoxLayout()
+        self.keep = QComboBox()
+        for _n, text in self.KEEP:
+            self.keep.addItem(text)
+        self.keep.currentIndexChanged.connect(self.set_keep)
+        kr.addWidget(self.keep)
+        kr.addStretch()
+        cv.addLayout(kr)
+        self.need = QHBoxLayout()
+        self.btn_ludusavi = button("Install Ludusavi", lambda: hub.on_item_action(core.LUDUSAVI_ID, "install"),
+                                   "primary")
+        self.need.addWidget(self.btn_ludusavi)
+        self.need.addStretch()
+        cv.addLayout(self.need)
+        self.status = label("", "cardMeta", wrap=True)
+        cv.addWidget(self.status)
+        v.addWidget(card)
+
+        v.addWidget(label("YOUR SNAPSHOTS", "section"))
+        lcard = card_frame()
+        self.list_box = QVBoxLayout(lcard)
+        self.list_box.setContentsMargins(20, 16, 20, 16)
+        self.list_box.setSpacing(6)
+        v.addWidget(lcard)
+        row = QHBoxLayout()
+        self.btn_reload = button("Refresh list", self.load)
+        row.addWidget(self.btn_reload)
+        row.addStretch()
+        v.addLayout(row)
+        v.addStretch()
+        self._loading = False
+
+    def refresh(self):
+        cfg = load_config().get("saves") or {}
+        self._loading = True
+        self.tm_cb.setChecked(bool(cfg.get("time_machine")))
+        keep = int(cfg.get("keep", 5) or 5)
+        self.keep.setCurrentIndex(next((i for i, (n, _t) in enumerate(self.KEEP) if n == keep), 1))
+        self._loading = False
+        have = bool(core.CATALOG_BY_ID[core.LUDUSAVI_ID].check(self.hub.state)) if core.LUDUSAVI_ID in core.CATALOG_BY_ID \
+            else False
+        self.btn_ludusavi.setVisible(not have)
+        on = bool(cfg.get("time_machine"))
+        if not have:
+            self.status.setText("Needs Ludusavi, a free app from Flathub.")
+        elif on and not core.agent_running():
+            self.status.setText("Needs the Ally Hub agent, which takes the snapshots in the background.")
+        elif on:
+            st = core.read_json(core.TM_STATE, {}) or {}
+            last = max(st.values(), key=lambda r: r.get("t", 0), default=None)
+            self.status.setText("On. " + (f"Last snapshot: {last.get('game') or 'a game'}, "
+                                          f"{time.strftime('%b %-d %H:%M', time.localtime(last['t']))}"
+                                          f"{'' if last.get('rc') == 0 else ' (failed)'}." if last else
+                                          "Start a game and its saves are snapshotted."))
+        else:
+            self.status.setText("Off.")
+        self.load()
+
+    def set_on(self, on: bool):
+        if self._loading:
+            return
+        update_config(lambda c: c.setdefault("saves", {}).__setitem__("time_machine", bool(on)))
+        if on and (not load_config()["agent"].get("enabled") or not core.agent_running()):
+            self.hub.enable_agent()
+        self.refresh()
+
+    def set_keep(self, idx: int):
+        if self._loading or idx < 0:
+            return
+        update_config(lambda c: c.setdefault("saves", {}).__setitem__("keep", self.KEEP[idx][0]))
+
+    def load(self, *_args):
+        clear_layout(self.list_box)
+        self.list_box.addWidget(label("Looking for snapshots…", "cardDesc"))
+        BackgroundTask(self, lambda: {"tm": core.tm_snapshots(), "undo": core.tm_snapshots(core.TM_BEFORE_RESTORE)},
+                       self._loaded)
+
+    def _loaded(self, res):
+        clear_layout(self.list_box)
+        if not isinstance(res, dict) or "error" in res:
+            self.list_box.addWidget(label("Couldn't read the snapshots. Is Ludusavi installed?", "cardDesc"))
+            return
+        snaps = res.get("tm") if "tm" in res else res
+        self.undo = res.get("undo") or {} if "tm" in res else {}
+        self.snaps = snaps
+        if not snaps:
+            self.list_box.addWidget(label("No snapshots yet. Turn the time machine on and play something.", "cardDesc"))
+            return
+        for title in sorted(snaps, key=lambda t: snaps[t][0].get("when", ""), reverse=True):
+            backs = snaps[title]
+            self.list_box.addWidget(button(f"{title}   ·   {len(backs)} snapshot{'s' if len(backs) != 1 else ''}, "
+                                           f"newest {core.when_text(backs[0].get('when', ''))}",
+                                           lambda _=False, t=title: self.pick(t)))
+
+    def pick(self, title: str):
+        backs = self.snaps.get(title) or []
+        if not backs:
+            return
+        undo = (self.undo.get(title) or [None])[0]
+        labels, seen = [], {}
+        for b in backs:
+            text = core.when_text(b.get("when", "")) + ("  (locked)" if b.get("locked") else "")
+            seen[text] = seen.get(text, 0) + 1
+            labels.append(text if seen[text] == 1 else f"{text} ({seen[text]})")    # every choice unique
+        undo_label = f"Undo the last restore (saves from {core.when_text(undo.get('when', ''))})" if undo else None
+        choice, ok = ask_item(self, title, "Restore the saves from which session start?",
+                              ([undo_label] if undo_label else []) + labels)
+        if not ok:
+            return
+        st = core.agent_state()
+        game = st.get("game")
+        running = core.ludusavi_title_cached(core.steam_appid_of(game), st.get("game_name") or "") if game else ""
+        if game and (running == title or str(st.get("game_name") or "").lower() == title.lower()):
+            msg_warn(self, APP_NAME, f"Quit {title} first, then restore.")
+            return
+        if choice == undo_label:
+            if ask(self, f"Put back {title}'s saves from just before the last restore?"):
+                self.hub.runner.submit(f"Undoing the last restore of {title}",
+                                       core.tm_restore_cmd(title, undo["name"], undo=True), "tm-restore")
+            return
+        b = backs[labels.index(choice)]
+        if ask(self, f"Restore {title} to {choice}?\n\nYour saves as they are now are kept first, and the restore "
+                     "only runs if that worked. “Undo the last restore” puts them back."):
+            self.hub.runner.submit(f"Restoring {title}'s saves", core.tm_restore_cmd(title, b["name"]), "tm-restore")
+
+    def job_done(self, ok: bool):
+        self.hub.toast("Saves restored ✔" if ok else "The restore didn't finish. See Settings → Activity.")
+        self.load()
+
+
+# ==========================================================================
+# Sleep guardian: battery used per sleep, what woke the handheld, sleeps that failed
+# ==========================================================================
+
+class SleepPage(QWidget):
+    def __init__(self, hub):
+        super().__init__()
+        self.hub = hub
+        v = page_shell(self, "Sleep",
+                       "Ally Hub watches every sleep: how much battery it cost, what woke the handheld, and sleeps "
+                       "that didn't work. If something's wrong, it says what and offers a fix.")
+        card, cv = titled_card("moon", "#6366f1", "Recent sleeps")
+        self.summary = label("", "cardDesc", wrap=True)
+        cv.addWidget(self.summary)
+        self.list_box = QVBoxLayout()
+        self.list_box.setSpacing(2)
+        cv.addLayout(self.list_box)
+        v.addWidget(card)
+        v.addWidget(label("WHAT ALLY HUB NOTICED", "section"))
+        self.find_box = QVBoxLayout()
+        self.find_box.setSpacing(12)
+        v.addLayout(self.find_box)
+        v.addWidget(label("WAKING THE HANDHELD", "section"))
+        wcard, wv = titled_card("power", "#64748b", "Devices that can't wake it",
+                                "USB devices you've stopped from waking the handheld. The power button always works.")
+        self.nowake_box = QVBoxLayout()
+        wv.addLayout(self.nowake_box)
+        v.addWidget(wcard)
+        row = QHBoxLayout()
+        row.addWidget(button("Send the sleep details", self.send_details))
+        row.addStretch()
+        v.addLayout(row)
+        v.addStretch()
+
+    def refresh(self):
+        log = core.sleep_log()
+        clear_layout(self.list_box)
+        if not log:
+            self.summary.setText("No sleeps recorded yet. Put the handheld to sleep once and the details show up "
+                                 "here." + ("" if core.agent_running() else " Needs the Ally Hub agent "
+                                                                            "(Customize → Automation)."))
+        else:
+            last = log[-1]
+            used = ("charging" if last.get("charging") else
+                    f"used {last['drop']:.0f}% of the battery" if last.get("drop") is not None else "battery unknown")
+            rate = f" ({last['per_hour']:.1f}% per hour)" if last.get("per_hour") is not None else ""
+            woke = f" Woken by {', '.join(last['woke_by'])}." if last.get("woke_by") else ""
+            self.summary.setText(f"Last sleep: {core.duration_text(last['slept'])}, {used}{rate}.{woke}")
+            for e in reversed(log[-8:]):
+                when = time.strftime("%b %-d %H:%M", time.localtime(e.get("end", 0)))
+                bits = [core.duration_text(e.get("slept", 0))]
+                if e.get("charging"):
+                    bits.append("charging")
+                elif e.get("drop") is not None:
+                    bits.append(f"-{e['drop']:.0f}%")
+                if e.get("failed"):
+                    bits.append("failed")
+                self.list_box.addWidget(label(f"{when}   " + " · ".join(bits), "cardMeta"))
+        clear_layout(self.find_box)
+        findings = core.sleep_findings(log)
+        if not findings:
+            self.find_box.addWidget(label("Nothing wrong with recent sleeps ✔" if log else
+                                          "Nothing to say yet.", "cardDesc"))
+        for f in findings:
+            fc, fv = titled_card("moon", "#f59e0b", f["title"], f["detail"])
+            if f.get("fix") and f["fix"].get("kind") == "nowake":
+                r = QHBoxLayout()
+                r.addWidget(button(f"Stop {f['fix']['name']} waking it", lambda _=False, fx=f["fix"]: self.stop_wake(fx),
+                                   "primary"))
+                r.addStretch()
+                fv.addLayout(r)
+            self.find_box.addWidget(fc)
+        clear_layout(self.nowake_box)
+        blocked = (load_config().get("sleep") or {}).get("no_wake") or []
+        if not blocked:
+            self.nowake_box.addWidget(label("None. Every device can wake it.", "cardDesc"))
+        for d in blocked:
+            r = QHBoxLayout()
+            r.addWidget(label(d.rsplit("/", 1)[-1], "cardDesc"), 1)
+            r.addWidget(button("Allow again", lambda _=False, dp=d: self.allow_wake(dp)))
+            self.nowake_box.addLayout(r)
+
+    def _apply_nowake(self, devpaths: list, label_text: str, allow: list = ()):
+        """Run the rule job; the saved list only changes once the job worked (see job_done)."""
+        if self.hub.needs_password():
+            return
+        cmd = core.nowake_cmd(devpaths, allow)
+        if cmd:
+            self._pending_nowake = sorted(set(devpaths))
+            self.hub.runner.submit(label_text, cmd, "sleep-nowake")
+
+    def stop_wake(self, fix: dict):
+        if not ask(self, f"Stop {fix['name']} from waking the handheld?\n\nThe power button still wakes it, and you "
+                         "can allow it again here."):
+            return
+        cur = (load_config().get("sleep") or {}).get("no_wake") or []
+        self._apply_nowake(cur + [fix["devpath"]], f"Stopping {fix['name']} from waking the handheld")
+
+    def allow_wake(self, devpath: str):
+        cur = [d for d in (load_config().get("sleep") or {}).get("no_wake") or [] if d != devpath]
+        self._apply_nowake(cur, "Letting a device wake the handheld again", allow=[devpath])
+
+    def send_details(self, *_args):
+        def send():
+            details = json.dumps({"stats": core.suspend_stats(), "findings": core.sleep_findings()}, indent=1)
+            return core.queue_report("user", "Sleep details from the Sleep page",
+                                     "Sent from Tools → Sleep.\n\n" + details,
+                                     core._fingerprint("sleep", str(time.time())),
+                                     attachments=[("Sleep log", json.dumps(core.sleep_log()[-30:], indent=1)),
+                                                  ("Wakeup sources", json.dumps(core.wakeup_sources(), indent=1))],
+                                     force=True)
+        BackgroundTask(self, send, lambda _r: self.hub.toast("Sleep details sent. They'll be looked at in the next "
+                                                             "daily run."))
+
+    def job_done(self, ok: bool):
+        pending = getattr(self, "_pending_nowake", None)
+        self._pending_nowake = None
+        if ok and pending is not None:
+            update_config(lambda c: c.setdefault("sleep", {}).__setitem__("no_wake", pending))
+        self.hub.toast("Saved ✔" if ok else "That didn't work. See Settings → Activity.")
+        self.refresh()
 
 
 # ==========================================================================
@@ -5311,11 +5810,11 @@ class ActivityPage(QWidget):
 class Hub(QMainWindow):
     # (tab, [(section name, attribute)])
     TABS = [
-        ("Home", [("Health", "health")]),
+        ("Home", [("Health", "health"), ("Setup", "setup")]),
         ("Install", [("Mods", "mods"), ("Plugin store", "store_page"), ("Apps", "apps"),
                      ("Launchers", "launchers")]),
         ("Customize", [("Lighting", "lighting_section"), ("Themes", "appearance"), ("Automation", "automation")]),
-        ("Tools", [("Performance", "performance"), ("Games", "games"), ("Storage", "storage"), ("Doctor", "doctor"), ("Connect", "connect_page"),
+        ("Tools", [("Performance", "performance"), ("Games", "games"), ("Saves", "saves"), ("Storage", "storage"), ("Sleep", "sleep"), ("Doctor", "doctor"), ("Connect", "connect_page"),
                    ("System", "system")]),
         ("Settings", [("Updates", "updates"), ("Tweaks", "tweaks"), ("Activity", "activity")]),
     ]
@@ -5341,6 +5840,7 @@ class Hub(QMainWindow):
         _HUB = self
         self._sheet = None
         self._decky_after = {}             # job key -> callback(ok) for Decky on/off jobs
+        self.qam_after_decky = False       # setup: add the Quick Access panel once Decky is installed
 
         root = QWidget()
         root.setObjectName("root")
@@ -5379,6 +5879,9 @@ class Hub(QMainWindow):
         self.launchers = LaunchersPage(self)
         self.storage = StoragePage(self)
         self.games = GamesPage(self)
+        self.saves = SavesPage(self)
+        self.sleep = SleepPage(self)
+        self.setup = SetupPage(self)
         self.doctor = DoctorPage(self)
         self.appearance = AppearancePage(self)
         self.updates = UpdatesPage(self)
@@ -5743,10 +6246,18 @@ class Hub(QMainWindow):
             self.launchers.refresh()
         elif key == "storage-clean":
             self.storage.job_done(code == 0)
+        elif key == "sleep-nowake":
+            self.sleep.job_done(code == 0)
+        elif key == "tm-restore":
+            self.saves.job_done(code == 0)
         elif key in ("qam-install", "qam-remove"):
             self.games.qam_done(code == 0, key)
         elif key == "game-reset" and code == 0:
             self.toast("Reset done. Start the game to make fresh Windows files.")
+        if key == "decky" and self.qam_after_decky:
+            self.qam_after_decky = False
+            if code == 0 and CATALOG_BY_ID["decky"].check(self.state):
+                QTimer.singleShot(1500, self.games.qam_install)
         if key == "decky" and CATALOG_BY_ID["decky"].check(self.state):
             alerts = core.read_json(core.DATA_DIR / "alerts.json", []) or []
             core.write_json(core.DATA_DIR / "alerts.json",
@@ -5943,27 +6454,18 @@ class Hub(QMainWindow):
             msg_info(self, APP_NAME, "steamos-session-select was not found.")
 
     def add_to_steam(self):
-        launcher = HOME / ".local/bin/allyhub"
-        tool = shutil.which("steamos-add-to-steam")
-        desk = HOME / ".local/share/applications/allyhub-gamemode.desktop"
-        if not launcher.exists():
-            msg_info(self, APP_NAME, "Run install.sh first so Ally Hub has a launcher.")
-            return
-        desk.parent.mkdir(parents=True, exist_ok=True)
-        desk.write_text(
-            "[Desktop Entry]\nType=Application\nName=Ally Hub\n"
-            f"Exec={launcher} --gamemode\nIcon={core.APP_DIR / 'allyhub.svg'}\n"
-            "NoDisplay=true\nTerminal=false\n")
-        if tool:
-            QProcess.startDetached(tool, [str(desk)])
+        res = core.add_to_steam()
+        if res == "already":
+            self.toast("Ally Hub is already in your Game Mode library")
+        elif res == "added":
             self.toast("Added to Steam (restart Steam if it doesn't show up)")
-            # give Steam a moment to make the tile, then dress it in Ally Hub's own art
             for delay in (12000, 45000):            # second try in case Steam was slow to add it
                 QTimer.singleShot(delay, lambda: self.launchers.fix_artwork(only=["Ally Hub"], quiet=True))
+        elif not core.LAUNCHER.exists():
+            msg_info(self, APP_NAME, "Run install.sh first so Ally Hub has a launcher.")
         else:
-            msg_info(self, APP_NAME,
-                                    f"In Steam: Games > Add a Non-Steam Game, pick Ally Hub, then set "
-                                    f"its launch options to --gamemode.")
+            msg_info(self, APP_NAME, "In Steam: Games > Add a Non-Steam Game, pick Ally Hub, then set its launch "
+                                     "options to --gamemode.")
 
     def enable_led_permissions(self, leds=None) -> bool:
         """Submit the one-time lighting permission job. Returns False if it couldn't start."""
@@ -6189,4 +6691,6 @@ def main():
         win.showMaximized()     # handheld screen: use all of it
     else:
         win.show()
+    if not (load_config().get("setup") or {}).get("done", True):      # a fresh install: walk through setup
+        QTimer.singleShot(400, lambda: win.go("Setup"))
     sys.exit(app.exec())
