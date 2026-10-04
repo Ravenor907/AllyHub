@@ -86,6 +86,8 @@ DEFAULT_CONFIG = {
         "save_backup": False, "save_backup_hours": 24,
         "save_backup_dir": str(BACKUP_DIR / "saves"),
     },
+    # Save time machine (Tools > Saves): a snapshot of a game's saves each time it starts
+    "saves": {"time_machine": False, "keep": 5},
     "game_colors": {},
     "dock": {"lights": "off", "audio_hdmi": True},
     "wol": {"name": "Gaming PC", "mac": "", "broadcast": "255.255.255.255"},
@@ -3605,6 +3607,105 @@ def emudeck_uninstall_cmd() -> str:
                                                      HOME / ".local/share/applications/EmuDeck.desktop"))
     return (f'if [ -f {u} ]; then bash {u}; '
             f'else rm -f -- {files} && echo "EmuDeck was never set up, so only its app was removed."; fi')
+
+
+
+# ==========================================================================
+# Save time machine: a snapshot of a game's saves every time it starts, restorable from Game Mode
+# Ludusavi does the work (it knows where thousands of games keep their saves, Proton prefixes included).
+# Snapshots live in their own folder with Ludusavi's per-game retention (--full-limit), so they never mix with
+# the scheduled full backups.
+# ==========================================================================
+
+TM_DIR = BACKUP_DIR / "time-machine"
+TM_BEFORE_RESTORE = BACKUP_DIR / "before-restore"     # what was there right before a restore
+TM_STATE = DATA_DIR / "time_machine.json"             # {title: {"t", "rc", "game"}}
+TM_TITLES = DATA_DIR / "ludusavi_titles.json"         # game id / name -> Ludusavi title (or "" = not known)
+TM_MIN_GAP_S = 600                                    # one snapshot per game per 10 minutes (relaunch loops)
+
+
+def ludusavi_cmd(*args) -> list:
+    return ["flatpak", "run", LUDUSAVI_ID, *args]
+
+
+def ludusavi_ready() -> bool:
+    return run_quiet(["flatpak", "info", LUDUSAVI_ID])[0] == 0
+
+
+def ludusavi_title(appid: Optional[int] = None, name: str = "") -> str:
+    """Ludusavi's title for a game ("" when Ludusavi doesn't know it). Steam games by id, others by name."""
+    key = f"steam:{appid}" if appid and appid < 0x80000000 else f"name:{name.strip().lower()}"
+    cache = read_json(TM_TITLES, {}) or {}
+    if key in cache:
+        return cache[key]
+    if key == "name:":
+        return ""
+    args = ["find", "--api"] + (["--steam-id", str(appid)] if key.startswith("steam:") else [name.strip()])
+    rc, out = run_quiet(ludusavi_cmd(*args), timeout=90)
+    title = ""
+    try:
+        games = json.loads(out).get("games") or {} if rc == 0 and out else {}
+        title = next(iter(games), "")
+    except (ValueError, AttributeError):
+        title = ""
+    cache[key] = title
+    write_json(TM_TITLES, cache)
+    return title
+
+
+def tm_backup_args(title: str, keep: int, path: Path = None) -> list:
+    return ludusavi_cmd("backup", "--force", "--no-cloud-sync", "--path", str(path or TM_DIR),
+                        "--full-limit", str(max(1, min(50, int(keep)))), "--differential-limit", "0", "--api", title)
+
+
+def tm_due(title: str) -> bool:
+    last = ((read_json(TM_STATE, {}) or {}).get(title) or {}).get("t", 0)
+    return time.time() - last > TM_MIN_GAP_S
+
+
+def tm_record(title: str, rc: int, game: str = "") -> None:
+    st = read_json(TM_STATE, {}) or {}
+    st[title] = {"t": time.time(), "rc": rc, "game": game}
+    write_json(TM_STATE, st)
+
+
+def tm_snapshots() -> dict:
+    """{title: [{"name", "when", "locked"}...] newest first} from Ludusavi's own listing of the snapshot folder."""
+    if not TM_DIR.exists():
+        return {}
+    rc, out = run_quiet(ludusavi_cmd("backups", "--api", "--path", str(TM_DIR)), timeout=120)
+    try:
+        games = json.loads(out).get("games") or {} if rc == 0 and out else {}
+    except ValueError:
+        return {}
+    res = {}
+    for title, info in games.items():
+        backs = [b for b in (info or {}).get("backups") or [] if isinstance(b, dict) and b.get("name")]
+        if backs:
+            res[title] = sorted(backs, key=lambda b: b.get("when", ""), reverse=True)
+    return res
+
+
+def tm_restore_cmd(title: str, backup: str) -> str:
+    """Restore one snapshot. What's there now is saved first (in its own folder), so a restore can be undone."""
+    before = " ".join(shlex.quote(a) for a in tm_backup_args(title, 3, TM_BEFORE_RESTORE)[:-2] + [title])
+    restore = " ".join(shlex.quote(a) for a in ludusavi_cmd("restore", "--force", "--no-cloud-sync", "--path",
+                                                            str(TM_DIR), "--backup", backup, title))
+    return (f"mkdir -p {shlex.quote(str(TM_BEFORE_RESTORE))} && {before} >/dev/null; "
+            f"{restore} && echo {shlex.quote('Restored ' + title + '.')}")
+
+
+def when_text(iso: str) -> str:
+    """'Today 14:32', 'Yesterday 21:05', 'Mar 3, 09:10' for a snapshot time."""
+    import datetime
+    try:
+        t = datetime.datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone()
+    except (ValueError, AttributeError):
+        return iso or "?"
+    now = datetime.datetime.now().astimezone()
+    days = (now.date() - t.date()).days
+    hm = t.strftime("%H:%M")
+    return f"Today {hm}" if days == 0 else f"Yesterday {hm}" if days == 1 else t.strftime("%b %-d, ") + hm
 
 
 def decky_version(item, state: dict) -> str:
