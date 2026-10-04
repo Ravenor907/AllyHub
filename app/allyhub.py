@@ -7,6 +7,7 @@ Ally Hub: a mod, theme and automation center for SteamOS on the ROG Xbox Ally X.
   allyhub --fullscreen fullscreen in Desktop Mode
   allyhub --agent      run the background agent (started by systemd)
   allyhub --apply-rgb  re-apply your saved lighting once
+  allyhub --first-install  first-run steps (run by install.sh)
 """
 
 import sys
@@ -16,6 +17,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
 def run():
+    if "--first-install" in sys.argv:             # run once by install.sh
+        import core
+        for line in core.first_install(sys.executable):
+            print("==> " + line)
+        return 0
     if "--agent" in sys.argv:
         import agent
         return agent.main()
