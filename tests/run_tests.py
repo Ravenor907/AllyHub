@@ -58,6 +58,8 @@ import py_compile, subprocess
 for f in ("allyhub.py", "core.py", "agent.py", "gui.py"):
     py_compile.compile(os.path.join({root!r}, "app", f), doraise=True, cfile=os.path.join(HOME, f + "c"))
     check(True, f"compiles: " + f)
+_un = open(os.path.join({root!r}, "scripts", "uninstall.sh")).read()
+check("homebrew/plugins/AllyHub" in _un and "cef_remove_shortcuts" in _un, "the uninstaller also removes the Quick Access panel and the library tile")
 for sh in ("install.sh", "uninstall.sh"):
     check(subprocess.run(["bash", "-n", os.path.join({root!r}, "scripts", sh)]).returncode == 0, "bash -n " + sh)
 v = open(os.path.join({root!r}, "VERSION")).read().strip()
@@ -101,6 +103,52 @@ check("deck" not in s, "scrubs username")
 check("github_pat_" not in s, "scrubs tokens")
 check("me@x.com" not in s, "scrubs emails")
 check("482913" not in s, "scrubs remote PIN")
+import shutil, subprocess
+from pathlib import Path
+if shutil.which("curl") and shutil.which("bash"):
+    _scr = Path(HOME) / "inst.sh"
+    _scr.write_text('[ "$X" = 1 ] || X=1 exec env X=1 "$0" "$@"\necho "ran as $0"\n')
+    _r = subprocess.run(["bash", "-c", core.fetch_run(_scr.as_uri())], capture_output=True, text=True)
+    check(_r.returncode == 0 and "ran as bash" in _r.stdout, "fetched installers still re-run themselves like curl | sh: " + _r.stdout + _r.stderr)
+    _r = subprocess.run(["bash", "-c", core.fetch_run((Path(HOME) / "missing.sh").as_uri())], capture_output=True, text=True)
+    check(_r.returncode != 0, "a failed download is never run")
+_zip = Path(HOME) / "plug.zip"
+import zipfile as _zf, hashlib as _hl
+with _zf.ZipFile(_zip, "w") as z:
+    z.writestr("Plug/plugin.json", "{}")
+_good = _hl.sha256(_zip.read_bytes()).hexdigest()
+check(core.store_artifact_hash({"versions": [{"hash": _good}]}) == _good and core.store_artifact_hash({"versions": [{"hash": "x"}]}) == "",
+      "store hash read")
+_c = core.decky_store_install_cmd(_zip.as_uri(), "0" * 64).split("python3 -m zipfile")[0] + "echo EXTRACTED"
+_r = subprocess.run(["bash", "-c", _c], capture_output=True, text=True)
+check(_r.returncode != 0 and "EXTRACTED" not in _r.stdout, "a plugin download that doesn't match the store's checksum is never installed")
+_c = core.decky_store_install_cmd(_zip.as_uri(), _good).split("python3 -m zipfile")[0] + "echo EXTRACTED"
+check("EXTRACTED" in subprocess.run(["bash", "-c", _c], capture_output=True, text=True).stdout, "a matching one goes ahead")
+import urllib.request as _ur, urllib.error as _ue, io as _io
+_seen_auth = []
+class _Resp(_io.BytesIO):
+    status = 200
+    def __enter__(self): return self
+    def __exit__(self, *a): pass
+def _fake_open(req, timeout=0):
+    _seen_auth.append(bool(req.get_header("Authorization")))
+    if req.get_header("Authorization"):
+        raise _ue.HTTPError(req.full_url, 401, "Bad credentials", {}, _io.BytesIO(b"{}"))
+    return _Resp(b"6.9.9")
+_uo = _ur.urlopen
+core.save_github_token("github_pat_EXPIREDEXPIREDEXPIRED123")
+check(oct(os.stat(core.TOKEN_FILE).st_mode & 0o777) == "0o600", "the access key file is private")
+_ur.urlopen = _fake_open
+check(core.remote_version("main") == "6.9.9" and _seen_auth == [True, False], "an expired access key doesn't stop updates")
+_ur.urlopen = _uo
+core.TOKEN_FILE.unlink()
+core.DATA_DIR.chmod(0o755); core.secure_data_dir()
+check(oct(core.DATA_DIR.stat().st_mode & 0o777) == "0o700", "Ally Hub's data folder is private")
+import socket as _sock
+_h = _sock.gethostname()
+_s2 = core.scrub(f"steam 76561198012345678 on {_h} ok")
+check("76561198012345678" not in _s2 and (len(_h) < 3 or _h.lower() in ("localhost", "steamdeck") or _h not in _s2),
+      "scrubs Steam ids and the device name: " + _s2)
 check(core.parse_version("3.10.0") > core.parse_version("3.9.9"), "version compare")
 check(core.queue_report("crash", "t", "d") is None, "no reports while reporting is off")
 check(core.LAST_QUEUE == "off" and "Turn on" in core.report_hint(), "explains reporting is off")
@@ -1216,8 +1264,31 @@ try:
     urllib.request.urlopen(base + "/api/status"); check(False, "status should be locked")
 except urllib.error.HTTPError as e:
     check(e.code == 403, "remote API locked without PIN")
-op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor())
-op.open(base + "/?pin=4321")
+import http.cookiejar as _cj
+_jar = _cj.CookieJar()
+op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(_jar))
+check(b"password" in op.open(base + "/?pin=4321").read(), "a PIN in the address no longer unlocks (it lands in browser history)")
+try:
+    op.open(base + "/login", data=b"pin=1111"); check(False, "wrong PIN should fail")
+except urllib.error.HTTPError as e:
+    check(e.code == 403 and b"Wrong PIN" in e.read(), "a wrong PIN is refused")
+op.open(base + "/login", data=b"pin=4321")
+check([c.name for c in _jar] == ["ahs"] and all(len(c.value) > 20 and "4321" not in c.value for c in _jar),
+      "the cookie is a random session, not the PIN")
+_codes = []
+for _pin in ["0000"] * 5 + ["4321"]:
+    try:
+        urllib.request.urlopen(base + "/login", data=f"pin={_pin}".encode()); _codes.append(200)
+    except urllib.error.HTTPError as e:
+        _codes.append(e.code)
+check(_codes == [403] * 5 + [429], "five wrong PINs, then even the right one waits: " + str(_codes))
+_rq = urllib.request.Request(base + "/api/status", headers={"Host": "evil.example.com"})
+try:
+    op.open(_rq); check(False, "foreign host should be refused")
+except urllib.error.HTTPError as e:
+    check(e.code == 403, "another domain pointed at the handheld gets nothing (DNS rebinding)")
+check(agent.remote_host_ok("192.168.1.20:8787") and agent.remote_host_ok("steamdeck.local") and agent.remote_host_ok("[fe80::1]:8787")
+      and not agent.remote_host_ok("attacker.com") and not agent.remote_host_ok(""), "remote host check")
 st = json.loads(op.open(base + "/api/status").read())
 check(st["game_name"] == "Halo Infinite", "remote status works after PIN")
 (bat / "capacity").write_text("10"); time.sleep(2.2)

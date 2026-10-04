@@ -1828,6 +1828,14 @@ def decky_match(names: tuple, state: dict) -> list:
     return dirs
 
 
+def fetch_run(url: str, shell: str = "bash") -> str:
+    """Download an installer script, then run it the way `curl url | sh` does on SteamOS (sh is bash there):
+    $0 stays the shell and stdin is the script, so Decky's `exec sudo "$0"` still works. The difference: a
+    failed or cut-off download is never run (-f, and nothing runs until curl finished)."""
+    return (f"( t=$(mktemp) && trap 'rm -f \"$t\"' EXIT && curl -fsSL {shlex.quote(url)} -o \"$t\" "
+            f"&& {shell} < \"$t\" )")
+
+
 def github_decky_install_cmd(repo: str, asset: str, plugin_names: tuple) -> str:
     """Install a Decky plugin the way Bazzite's ujust recipes do: the newest stable GitHub release
     (releases/latest never points at a pre-release). Any older copy, including a pre-release saved under
@@ -4081,8 +4089,8 @@ CATALOG = [
         desc="The plugin loader for Game Mode. Unlocks the Plugin Store page in Ally Hub "
              "and the plug icon in your Quick Access menu.",
         monogram="D", color="#8b5cf6",
-        install="curl -L https://github.com/SteamDeckHomebrew/decky-installer/releases/latest/download/install_release.sh | sh",
-        uninstall="curl -L https://github.com/SteamDeckHomebrew/decky-installer/releases/latest/download/uninstall.sh | sh",
+        install=fetch_run("https://github.com/SteamDeckHomebrew/decky-installer/releases/latest/download/install_release.sh"),
+        uninstall=fetch_run("https://github.com/SteamDeckHomebrew/decky-installer/releases/latest/download/uninstall.sh"),
         check=lambda s: DECKY_PATH.exists(),
         warn="SteamOS updates can remove Decky. Ally Hub's Update Guardian will spot it.",
         recommended=True,
@@ -4092,7 +4100,7 @@ CATALOG = [
         "Built for the ROG Ally: TDP presets, RGB effects, charge limit, battery health, "
         "temps and a screen-off download mode, all from the Quick Access menu.",
         "AC", "#e11d48",
-        "curl -L https://github.com/PixelAddictUnlocked/allycenter/raw/main/install.sh | sh",
+        fetch_run("https://github.com/PixelAddictUnlocked/allycenter/raw/main/install.sh"),
         ("ally center", "allycenter"), recommended=True,
         warn="Use one TDP tool at a time: Ally Center, SimpleDeckyTDP or the SteamOS slider.",
     ),
@@ -4123,7 +4131,7 @@ CATALOG = [
         "Per-game TDP profiles, GPU clock control and CPU boost/SMT toggles. "
         "Supports the Ally X through ASUS WMI.",
         "TDP", "#f97316",
-        "curl -L https://github.com/aarron-lee/SimpleDeckyTDP/raw/main/install.sh | sh",
+        fetch_run("https://github.com/aarron-lee/SimpleDeckyTDP/raw/main/install.sh"),
         ("simpledeckytdp",),
         warn="Overlaps with Ally Center and SteamOS's own TDP slider. Pick one.",
     ),
@@ -4132,7 +4140,7 @@ CATALOG = [
         desc="Adds Epic, GOG, EA App, Ubisoft Connect, Battle.net, Xbox Game Pass (cloud), Netflix, "
              "YouTube and more straight into your Steam library with artwork. Pick them on the Launchers page.",
         monogram="NS", color="#10b981", kind="run",
-        install="curl -Ls https://raw.githubusercontent.com/moraroy/NonSteamLaunchers-On-Steam-Deck/main/NonSteamLaunchers.sh | bash",
+        install=fetch_run("https://raw.githubusercontent.com/moraroy/NonSteamLaunchers-On-Steam-Deck/main/NonSteamLaunchers.sh", "bash"),
         check=lambda s: False,
         warn="Restart Steam afterwards to see the new shortcuts.",
     ),
@@ -4152,7 +4160,7 @@ CATALOG = [
         desc="Installs and configures dozens of emulators, builds ROM folders and adds "
              "games to Steam with artwork and controller profiles.",
         monogram="E", color="#f59e0b",
-        install="curl -L https://raw.githubusercontent.com/dragoonDorise/EmuDeck/main/install.sh | bash",
+        install=fetch_run("https://raw.githubusercontent.com/dragoonDorise/EmuDeck/main/install.sh", "bash"),
         open_cmd=shlex.quote(str(EMUDECK_PATH)),
         check=lambda s: EMUDECK_PATH.exists(),
         uninstall=emudeck_uninstall_cmd(),
@@ -4290,11 +4298,15 @@ def decky_remove_cmd(dirs: list) -> str:
     return f"sudo rm -rf {quoted} && sudo systemctl restart plugin_loader"
 
 
-def decky_store_install_cmd(url: str) -> str:
+def decky_store_install_cmd(url: str, sha256: str = "") -> str:
+    """Install a Decky store plugin. With the store's sha256 the download is checked first, like Decky does."""
     q = shlex.quote(url)
+    check = (f'echo {shlex.quote(sha256.lower() + "  ")}"$tmp/p.zip" | sha256sum -c --quiet - && '
+             if re.fullmatch(r"[0-9a-fA-F]{64}", sha256 or "") else "")
     return (
         'tmp=$(mktemp -d) && '
         f'curl -fL -o "$tmp/p.zip" {q} && '
+        + check +
         'python3 -m zipfile -e "$tmp/p.zip" "$tmp/out" && '
         'sudo mkdir -p "$HOME/homebrew/plugins" && '
         'for d in "$tmp/out"/*/; do n=$(basename "$d"); '
@@ -4314,6 +4326,13 @@ def store_latest_version(plugin: dict) -> Optional[dict]:
     return vers[0]
 
 
+def store_artifact_hash(plugin: dict) -> str:
+    """The store's sha256 for the latest version ("" when it has none)."""
+    v = store_latest_version(plugin) or {}
+    h = str(v.get("hash") or "")
+    return h if re.fullmatch(r"[0-9a-fA-F]{64}", h) else ""
+
+
 def store_artifact_url(plugin: dict) -> Optional[str]:
     v = store_latest_version(plugin)
     if not v:
@@ -4326,6 +4345,27 @@ def store_artifact_url(plugin: dict) -> Optional[str]:
 # ==========================================================================
 
 PROFILE_KEYS = ("theme", "rgb", "agent", "game_colors", "dock", "wol", "performance")
+# Never shared in a profile and never taken from one: a profile can't switch on someone's remote with a PIN the
+# sender knows, and doesn't hand out the PIN or the PC's network address.
+PROFILE_PRIVATE = {"agent": ("remote", "remote_pin", "remote_port"), "wol": ("mac", "broadcast")}
+FLATPAK_ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*(\.[A-Za-z0-9_-]+){2,}$")
+
+
+def charge_limit_ok(value) -> Optional[str]:
+    """A charge limit as a plain number 50-100, or None. Profiles are files from anywhere, so this is checked
+    before it gets near a command."""
+    v = str(value or "").strip()
+    return v if re.fullmatch(r"\d{2,3}", v) and 50 <= int(v) <= 100 else None
+
+
+def _profile_config(cfg: dict) -> dict:
+    out = {}
+    for k in PROFILE_KEYS:
+        v = cfg.get(k)
+        if isinstance(v, dict) and k in PROFILE_PRIVATE:
+            v = {kk: vv for kk, vv in v.items() if kk not in PROFILE_PRIVATE[k]}
+        out[k] = v
+    return out
 
 
 def build_profile(state: dict) -> dict:
@@ -4339,7 +4379,7 @@ def build_profile(state: dict) -> dict:
         "catalog": sorted(i.id for i in CATALOG
                           if not i.id.count(".") and i.kind == "install" and i.check(state)),
         "decky_plugins": sorted(v["name"] for v in state.get("decky", {}).values()),
-        "config": {k: cfg.get(k) for k in PROFILE_KEYS},
+        "config": _profile_config(cfg),
         "system": {"charge_limit": b.get("limit") or "", "ssh": sshd_active()},
     }
 
@@ -4353,22 +4393,29 @@ def export_profile(state: dict) -> Path:
 
 def profile_plan(profile: dict, state: dict) -> dict:
     """What importing this profile would add on this device."""
+    def strings(key):
+        v = profile.get(key)
+        return [x for x in v if isinstance(x, str)] if isinstance(v, list) else []
+    system = profile.get("system") if isinstance(profile.get("system"), dict) else {}
     return {
-        "catalog": [i for i in profile.get("catalog", [])
-                    if i in CATALOG_BY_ID and not CATALOG_BY_ID[i].check(state)],
-        "flatpaks": [f for f in profile.get("flatpaks", []) if f not in state.get("flatpaks", set())],
-        "decky_plugins": [p for p in profile.get("decky_plugins", [])
-                          if p.lower() not in state.get("decky", {})],
-        "config": profile.get("config", {}),
-        "system": profile.get("system", {}),
+        "catalog": [i for i in strings("catalog") if i in CATALOG_BY_ID and not CATALOG_BY_ID[i].check(state)],
+        "flatpaks": [f for f in strings("flatpaks") if FLATPAK_ID_RE.match(f) and f not in state.get("flatpaks", set())],
+        "decky_plugins": [p for p in strings("decky_plugins") if p.lower() not in state.get("decky", {})],
+        "config": profile.get("config") if isinstance(profile.get("config"), dict) else {},
+        "system": {"charge_limit": charge_limit_ok(system.get("charge_limit")) or "", "ssh": system.get("ssh") is True},
     }
 
 
 def apply_profile_config(conf: dict) -> None:
     def fn(cfg):
         for k in PROFILE_KEYS:
-            if conf.get(k) is not None:
-                cfg[k] = conf[k]
+            v = conf.get(k)
+            if v is None or not isinstance(v, type(DEFAULT_CONFIG[k])):
+                continue
+            if isinstance(v, dict) and k in PROFILE_PRIVATE:
+                v = {kk: vv for kk, vv in v.items() if kk not in PROFILE_PRIVATE[k]}
+                v.update({kk: cfg[k][kk] for kk in PROFILE_PRIVATE[k] if kk in cfg.get(k, {})})
+            cfg[k] = v
     update_config(fn)
 
 
@@ -4966,8 +5013,23 @@ def github_token() -> Optional[str]:
 
 def save_github_token(token: str) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    TOKEN_FILE.write_text(token.strip())
-    TOKEN_FILE.chmod(0o600)
+    tmp = TOKEN_FILE.with_suffix(".tmp")
+    tmp.unlink(missing_ok=True)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)     # private from the first byte
+    with os.fdopen(fd, "w") as f:
+        f.write(token.strip())
+    os.replace(tmp, TOKEN_FILE)
+
+
+def secure_data_dir() -> None:
+    """Logs, job output, reports and backups are only for this user (other accounts on the device can't read
+    them)."""
+    for d in (DATA_DIR, CONFIG_DIR):
+        try:
+            if d.exists() and stat.S_IMODE(d.stat().st_mode) & 0o077:
+                d.chmod(0o700)
+        except OSError:
+            pass
 
 
 def gh_request(method: str, path: str, data: dict = None, accept: str = "application/vnd.github+json",
@@ -4987,6 +5049,9 @@ def gh_request(method: str, path: str, data: dict = None, accept: str = "applica
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.status, r.read()
     except urllib.error.HTTPError as e:
+        if e.code == 401 and tok:
+            # an expired or revoked access key mustn't stop updates: public reads work without one
+            return gh_request(method, path, data, accept, timeout, auth=False)
         try:
             return e.code, e.read()
         except Exception:
@@ -5018,6 +5083,17 @@ def scrub(text: str) -> str:
     pin = (load_config()["agent"].get("remote_pin") or "")
     if len(pin) >= 4:
         text = text.replace(pin, "<pin>")
+    # Steam account ids point straight at a public Steam profile; hostnames are often a person's name
+    text = re.sub(r"\b7656119\d{10}\b", "<steam-id>", text)
+    try:
+        id3 = steam_user_id3()
+    except Exception:
+        id3 = None
+    if id3 and len(id3) >= 5:
+        text = re.sub(rf"\b{re.escape(id3)}\b", "<steam-id>", text)
+    host = socket.gethostname()
+    if host and len(host) >= 3 and host.lower() not in ("localhost", "steamdeck"):
+        text = re.sub(rf"\b{re.escape(host)}\b", "<host>", text)      # exact case: "ally" mustn't eat "Ally Hub"
     return text
 
 
