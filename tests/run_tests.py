@@ -875,6 +875,10 @@ _st = {"decky": {"allycenter": {"dir": "/h/homebrew/plugins/AllyCenter", "name":
 check(core.decky_item_names(core.CATALOG_BY_ID["allycenter"], _st) == ["Ally Center"], "finds the Decky name behind a catalog card")
 check("decky_off" in core.gather_state(), "the app knows which plugins are off")
 check("EmuDeck/backend/uninstall.sh" in core.CATALOG_BY_ID["emudeck"].uninstall, "EmuDeck can be removed with its own uninstaller")
+core.EMUDECK_PATH.parent.mkdir(parents=True, exist_ok=True); core.EMUDECK_PATH.write_text("app")
+_r = subprocess.run(["bash", "-c", core.emudeck_uninstall_cmd()], capture_output=True, text=True)
+check(_r.returncode == 0 and not core.EMUDECK_PATH.exists() and "never set up" in _r.stdout,
+      "EmuDeck that was never set up is removed cleanly (no missing-uninstaller error)")
 # ---- reports: attachments, snapshot, instant upload, per-version repeats, manual reports ----
 posts = []
 def _fake_gh(method, path, data=None, **kw):
@@ -1363,7 +1367,16 @@ core.CATALOG_BY_ID["decky"].check = _old_decky
 check(got == [("HueSync", "install")], "Install HueSync uses the Decky plugin store")
 del hub.on_store_action
 tryit("interface size", lambda: (hub.appearance.refresh(), hub.appearance.save_ui_size(3)))
-check(core.load_config()["theme"]["ui_scale"] == 1.5, "interface size saved")
+_th = core.load_config()["theme"]
+check(core.theme_size(_th, "ui_scale", gui.GAMEMODE) == 1.5 and _th["ui_scale"] == "auto"
+      and core.theme_size(_th, "ui_scale", not gui.GAMEMODE) == "auto", "interface size saved for this mode only")
+tryit("text size", lambda: (hub.appearance.scale.setValue(130), hub.appearance.save_scale()))
+check(core.load_config()["theme"][f"scale_{core.mode_key(gui.GAMEMODE)}"] is not None, "text size saved for this mode only")
+check(core.theme_size({"scale": 110}, "scale", True) == 110 and core.theme_size({"scale": 110, "scale_gamemode": 140}, "scale", True) == 140
+      and core.ui_scale({"ui_scale": "auto", "ui_scale_desktop": 1.25}, False) == 1.25,
+      "each mode uses its own size, older saved sizes still count")
+check("never set up" in core.emudeck_uninstall_cmd() and "uninstall.sh" in core.emudeck_uninstall_cmd(),
+      "EmuDeck removal works whether or not EmuDeck was ever set up")
 tryit("health", lambda: (hub.health.refresh(), hub.health.set_range(12 * 3600), hub.health.set_series("w")))
 check([s for s, _ in hub.health.RANGES] == [60, 3600, 12 * 3600], "history ranges are 1 minute, 1 hour, 12 hours")
 H = hub.health
