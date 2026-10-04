@@ -4812,7 +4812,7 @@ class AppearancePage(QWidget):
         ir = QHBoxLayout()
         self.ui_size = QComboBox()
         self.ui_sizes = [("auto", "")] + [(f, f"{int(f * 100)}%") for f in (1.0, 1.25, 1.5, 1.75, 2.0)]
-        self.ui_size.addItems([f"Auto ({int(core.auto_ui_scale() * 100)}%)"] + [t for _, t in self.ui_sizes[1:]])
+        self.ui_size.addItems([f"Auto ({int(core.auto_ui_scale(GAMEMODE) * 100)}%)"] + [t for _, t in self.ui_sizes[1:]])
         self.ui_size.activated.connect(self.save_ui_size)
         ir.addWidget(self.ui_size)
         self.ui_note = label("Scales everything to fit your screen.", "cardDesc", wrap=True)
@@ -6171,7 +6171,8 @@ def main():
     try:                                            # for reports: how this mode presents the screen
         scr = app.primaryScreen()
         core.app_log("gui", f"screen {scr.size().width()}x{scr.size().height()} dpr {scr.devicePixelRatio():.2f} "
-                            f"dpi {scr.logicalDotsPerInch():.0f} qt_scale {os.environ.get('QT_SCALE_FACTOR')}")
+                            f"dpi {scr.logicalDotsPerInch():.0f} qt_scale {os.environ.get('QT_SCALE_FACTOR')} "
+                            f"desktop_scale {core.desktop_scale() if not GAMEMODE else '-'}")
     except Exception:
         pass
     if not single_instance(app):                    # already open: it was brought to the front

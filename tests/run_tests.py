@@ -1375,6 +1375,21 @@ check(core.load_config()["theme"][f"scale_{core.mode_key(gui.GAMEMODE)}"] is not
 check(core.theme_size({"scale": 110}, "scale", True) == 110 and core.theme_size({"scale": 110, "scale_gamemode": 140}, "scale", True) == 140
       and core.ui_scale({"ui_scale": "auto", "ui_scale_desktop": 1.25}, False) == 1.25,
       "each mode uses its own size, older saved sizes still count")
+os.environ["QT_SCREEN_SCALE_FACTORS"] = "eDP-1=1.5;"
+_pr = core.panel_resolution
+core.panel_resolution = lambda: (1920, 1080)
+check(core.desktop_scale() == 1.5 and core.auto_ui_scale(False) == 1.0 and core.auto_ui_scale(True) == 1.5
+      and core.ui_scale({"ui_scale": "auto"}, False) == 1.0,
+      "Desktop Mode's own 150% scaling isn't doubled: Auto adds nothing on top of it")
+os.environ["QT_SCREEN_SCALE_FACTORS"] = "1.25"
+check(core.auto_ui_scale(False) == 1.25, "and only adds what's missing")
+os.environ.pop("QT_SCREEN_SCALE_FACTORS")
+from pathlib import Path
+(Path(HOME) / ".config").mkdir(parents=True, exist_ok=True)
+(Path(HOME) / ".config/kwinoutputconfig.json").write_text(json.dumps([{"name": "outputs", "data": [{"scale": 1.5}]}]))
+check(core.desktop_scale() == 1.5, "reads the scale from Plasma's saved display settings too")
+(Path(HOME) / ".config/kwinoutputconfig.json").unlink()
+core.panel_resolution = _pr
 check("never set up" in core.emudeck_uninstall_cmd() and "uninstall.sh" in core.emudeck_uninstall_cmd(),
       "EmuDeck removal works whether or not EmuDeck was ever set up")
 tryit("health", lambda: (hub.health.refresh(), hub.health.set_range(12 * 3600), hub.health.set_series("w")))

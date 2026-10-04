@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.3
+
+- **Desktop Mode is no longer blown up.** The automatic interface size now takes the desktop's own display scaling
+  into account instead of adding to it, so Ally Hub looks the same size in Desktop Mode and Game Mode.
+
 ## 1.2.2
 
 - **Quick Access panel:** Ally Hub in the ••• menu while you play. Battery and temperatures, switches for the game
