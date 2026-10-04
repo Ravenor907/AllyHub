@@ -3978,6 +3978,139 @@ class GamesPage(QWidget):
 
 
 # ==========================================================================
+# Save time machine: snapshots of each game's saves, taken as it starts, restorable from Game Mode
+# ==========================================================================
+
+class SavesPage(QWidget):
+    KEEP = [(3, "Keep 3 per game"), (5, "Keep 5 per game"), (10, "Keep 10 per game")]
+
+    def __init__(self, hub):
+        super().__init__()
+        self.hub = hub
+        self.snaps = {}
+        v = page_shell(self, "Saves",
+                       "A safety net for your progress: Ally Hub snapshots a game's saves every time it starts, so "
+                       "a corrupted save or a choice you regret is one restore away.")
+        card, cv = titled_card("save", "#22c55e", "Save time machine",
+                               "Uses Ludusavi, which knows where thousands of games keep their saves, including "
+                               "Windows games under Proton. Snapshots stay on your handheld.")
+        self.tm_cb = QCheckBox("Snapshot a game's saves every time it starts")
+        self.tm_cb.toggled.connect(self.set_on)
+        cv.addWidget(self.tm_cb)
+        kr = QHBoxLayout()
+        self.keep = QComboBox()
+        for _n, text in self.KEEP:
+            self.keep.addItem(text)
+        self.keep.currentIndexChanged.connect(self.set_keep)
+        kr.addWidget(self.keep)
+        kr.addStretch()
+        cv.addLayout(kr)
+        self.need = QHBoxLayout()
+        self.btn_ludusavi = button("Install Ludusavi", lambda: hub.on_item_action(core.LUDUSAVI_ID, "install"),
+                                   "primary")
+        self.need.addWidget(self.btn_ludusavi)
+        self.need.addStretch()
+        cv.addLayout(self.need)
+        self.status = label("", "cardMeta", wrap=True)
+        cv.addWidget(self.status)
+        v.addWidget(card)
+
+        v.addWidget(label("YOUR SNAPSHOTS", "section"))
+        lcard = card_frame()
+        self.list_box = QVBoxLayout(lcard)
+        self.list_box.setContentsMargins(20, 16, 20, 16)
+        self.list_box.setSpacing(6)
+        v.addWidget(lcard)
+        row = QHBoxLayout()
+        self.btn_reload = button("Refresh list", self.load)
+        row.addWidget(self.btn_reload)
+        row.addStretch()
+        v.addLayout(row)
+        v.addStretch()
+        self._loading = False
+
+    def refresh(self):
+        cfg = load_config().get("saves") or {}
+        self._loading = True
+        self.tm_cb.setChecked(bool(cfg.get("time_machine")))
+        keep = int(cfg.get("keep", 5) or 5)
+        self.keep.setCurrentIndex(next((i for i, (n, _t) in enumerate(self.KEEP) if n == keep), 1))
+        self._loading = False
+        have = bool(core.CATALOG_BY_ID[core.LUDUSAVI_ID].check(self.hub.state)) if core.LUDUSAVI_ID in core.CATALOG_BY_ID \
+            else False
+        self.btn_ludusavi.setVisible(not have)
+        on = bool(cfg.get("time_machine"))
+        if not have:
+            self.status.setText("Needs Ludusavi, a free app from Flathub.")
+        elif on and not core.agent_running():
+            self.status.setText("Needs the Ally Hub agent, which takes the snapshots in the background.")
+        elif on:
+            st = core.read_json(core.TM_STATE, {}) or {}
+            last = max(st.values(), key=lambda r: r.get("t", 0), default=None)
+            self.status.setText("On. " + (f"Last snapshot: {last.get('game') or 'a game'}, "
+                                          f"{time.strftime('%b %-d %H:%M', time.localtime(last['t']))}"
+                                          f"{'' if last.get('rc') == 0 else ' (failed)'}." if last else
+                                          "Start a game and its saves are snapshotted."))
+        else:
+            self.status.setText("Off.")
+        self.load()
+
+    def set_on(self, on: bool):
+        if self._loading:
+            return
+        update_config(lambda c: c.setdefault("saves", {}).__setitem__("time_machine", bool(on)))
+        if on and (not load_config()["agent"].get("enabled") or not core.agent_running()):
+            self.hub.enable_agent()
+        self.refresh()
+
+    def set_keep(self, idx: int):
+        if self._loading or idx < 0:
+            return
+        update_config(lambda c: c.setdefault("saves", {}).__setitem__("keep", self.KEEP[idx][0]))
+
+    def load(self, *_args):
+        clear_layout(self.list_box)
+        self.list_box.addWidget(label("Looking for snapshots…", "cardDesc"))
+        BackgroundTask(self, core.tm_snapshots, self._loaded)
+
+    def _loaded(self, snaps):
+        clear_layout(self.list_box)
+        if not isinstance(snaps, dict) or "error" in snaps:
+            self.list_box.addWidget(label("Couldn't read the snapshots. Is Ludusavi installed?", "cardDesc"))
+            return
+        self.snaps = snaps
+        if not snaps:
+            self.list_box.addWidget(label("No snapshots yet. Turn the time machine on and play something.", "cardDesc"))
+            return
+        for title in sorted(snaps, key=lambda t: snaps[t][0].get("when", ""), reverse=True):
+            backs = snaps[title]
+            self.list_box.addWidget(button(f"{title}   ·   {len(backs)} snapshot{'s' if len(backs) != 1 else ''}, "
+                                           f"newest {core.when_text(backs[0].get('when', ''))}",
+                                           lambda _=False, t=title: self.pick(t)))
+
+    def pick(self, title: str):
+        backs = self.snaps.get(title) or []
+        if not backs:
+            return
+        labels = [core.when_text(b.get("when", "")) + ("  (locked)" if b.get("locked") else "") for b in backs]
+        choice, ok = ask_item(self, title, "Restore the saves from which session start?", labels)
+        if not ok:
+            return
+        b = backs[labels.index(choice)]
+        running = str(core.agent_state().get("game_name") or "")
+        if running and running.lower() == title.lower():
+            msg_warn(self, APP_NAME, f"Quit {title} first, then restore.")
+            return
+        if ask(self, f"Restore {title} to {choice}?\n\nYour saves as they are now are kept first, in "
+                     f"{core.TM_BEFORE_RESTORE.name}, so you can go back."):
+            self.hub.runner.submit(f"Restoring {title}'s saves", core.tm_restore_cmd(title, b["name"]), "tm-restore")
+
+    def job_done(self, ok: bool):
+        self.hub.toast("Saves restored ✔" if ok else "The restore didn't finish. See Settings → Activity.")
+        self.load()
+
+
+# ==========================================================================
 # Storage saver: where the space went, and what Steam left behind
 # ==========================================================================
 
@@ -5315,7 +5448,7 @@ class Hub(QMainWindow):
         ("Install", [("Mods", "mods"), ("Plugin store", "store_page"), ("Apps", "apps"),
                      ("Launchers", "launchers")]),
         ("Customize", [("Lighting", "lighting_section"), ("Themes", "appearance"), ("Automation", "automation")]),
-        ("Tools", [("Performance", "performance"), ("Games", "games"), ("Storage", "storage"), ("Doctor", "doctor"), ("Connect", "connect_page"),
+        ("Tools", [("Performance", "performance"), ("Games", "games"), ("Saves", "saves"), ("Storage", "storage"), ("Doctor", "doctor"), ("Connect", "connect_page"),
                    ("System", "system")]),
         ("Settings", [("Updates", "updates"), ("Tweaks", "tweaks"), ("Activity", "activity")]),
     ]
@@ -5379,6 +5512,7 @@ class Hub(QMainWindow):
         self.launchers = LaunchersPage(self)
         self.storage = StoragePage(self)
         self.games = GamesPage(self)
+        self.saves = SavesPage(self)
         self.doctor = DoctorPage(self)
         self.appearance = AppearancePage(self)
         self.updates = UpdatesPage(self)
@@ -5743,6 +5877,8 @@ class Hub(QMainWindow):
             self.launchers.refresh()
         elif key == "storage-clean":
             self.storage.job_done(code == 0)
+        elif key == "tm-restore":
+            self.saves.job_done(code == 0)
         elif key in ("qam-install", "qam-remove"):
             self.games.qam_done(code == 0, key)
         elif key == "game-reset" and code == 0:

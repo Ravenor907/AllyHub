@@ -416,6 +416,7 @@ class Agent:
         self.backup_now = False
         self._ludusavi, self._ludusavi_t = False, 0.0
         self.qam_game = {}         # the running game's switches, read from Steam once per game
+        self.tm_lock = threading.Lock()   # one save snapshot at a time
 
     # ---- config ----
     def reload_config(self):
@@ -522,6 +523,37 @@ class Agent:
             except OSError as e:
                 log(f"remote failed: {e}")
                 self.server = None
+
+    # ---- Save time machine: snapshot a game's saves as it starts ----
+    def tm_snapshot(self, game):
+        if not self.tm_lock.acquire(blocking=False):
+            return
+        try:
+            if not self.ludusavi_ready():
+                log("save snapshot skipped: Ludusavi isn't installed")
+                return
+            name = self.seen.get(game) or ""
+            appid = core.steam_appid_of(game)
+            title = core.ludusavi_title(None if int(game) > 0xFFFFFFFF else appid, name)
+            if not title:
+                log(f"save snapshot skipped: Ludusavi doesn't know {name or game}")
+                return
+            if not core.tm_due(title):
+                return
+            keep = int((self.cfg.get("saves") or {}).get("keep", 5) or 5)
+            gentle = (["nice", "-n", "19"] + (["ionice", "-c3"] if shutil.which("ionice") else []))
+            core.TM_DIR.mkdir(parents=True, exist_ok=True)
+            try:
+                rc = subprocess.run(gentle + core.tm_backup_args(title, keep), stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.PIPE, timeout=900).returncode
+            except subprocess.TimeoutExpired:
+                rc = -1
+            core.tm_record(title, rc, name)
+            log(f"save snapshot for {title}: {'done' if rc == 0 else f'failed rc={rc}'}")
+        except Exception:
+            log(f"save snapshot failed: {sys.exc_info()[1]!r}")
+        finally:
+            self.tm_lock.release()
 
     # ---- Quick Access panel (a Decky plugin talks to this socket; only this user can open it) ----
     def serve_control(self):
@@ -719,6 +751,8 @@ class Agent:
             self.qam_game = {}
             if g and self.control:
                 threading.Thread(target=self.read_game_flags, args=(g,), daemon=True).start()
+            if g and (self.cfg.get("saves") or {}).get("time_machine"):
+                threading.Thread(target=self.tm_snapshot, args=(g,), daemon=True).start()
 
     # ---- Game Boost (Tools > Performance) ----
     def recover_boost(self):

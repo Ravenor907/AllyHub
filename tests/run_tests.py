@@ -879,6 +879,49 @@ core.EMUDECK_PATH.parent.mkdir(parents=True, exist_ok=True); core.EMUDECK_PATH.w
 _r = subprocess.run(["bash", "-c", core.emudeck_uninstall_cmd()], capture_output=True, text=True)
 check(_r.returncode == 0 and not core.EMUDECK_PATH.exists() and "never set up" in _r.stdout,
       "EmuDeck that was never set up is removed cleanly (no missing-uninstaller error)")
+# ---- Save time machine (Ludusavi stand-in on PATH) ----
+_fb = Path(HOME) / "fakebin"; _fb.mkdir(exist_ok=True)
+(_fb / "flatpak").write_text('''#!/usr/bin/env python3
+import sys, json, os
+log = os.path.join(os.environ["HOME"], "flatpak.log")
+open(log, "a").write(json.dumps(sys.argv[1:]) + "\\n")
+a = sys.argv[1:]
+if a[0] == "info":
+    sys.exit(0)
+a = a[2:]
+if a[0] == "find":
+    if "--steam-id" in a:
+        print(json.dumps({"games": {"Big Game": {}}} if a[a.index("--steam-id") + 1] == "100" else {"games": {}}))
+        sys.exit(0 if a[a.index("--steam-id") + 1] == "100" else 1)
+    print(json.dumps({"games": {"Battle.net Thing": {}}})); sys.exit(0)
+if a[0] == "backups":
+    print(json.dumps({"games": {"Big Game": {"backupPath": "x", "backups": [
+        {"name": "backup-1", "when": "2026-10-01T10:00:00Z", "locked": False},
+        {"name": "backup-2", "when": "2026-10-03T10:00:00Z", "locked": False}]}}}))
+    sys.exit(0)
+print(json.dumps({"overall": {}, "games": {}})); sys.exit(0)
+''')
+(_fb / "flatpak").chmod(0o755)
+os.environ["PATH"] = str(_fb) + os.pathsep + os.environ["PATH"]
+_flog = Path(HOME) / "flatpak.log"
+check(core.ludusavi_ready(), "sees Ludusavi")
+check(core.ludusavi_title(100, "Big Game") == "Big Game" and core.ludusavi_title(100) == "Big Game"
+      and sum(1 for l in _flog.read_text().splitlines() if '"find"' in l) == 1, "finds a game's Ludusavi title by Steam id, once")
+check(core.ludusavi_title(None, "Battle.net") == "Battle.net Thing" and core.ludusavi_title(555) == "", "by name for non-Steam games; unknown games are skipped")
+ba = core.tm_backup_args("Big Game", 5)
+check(ba[-1] == "Big Game" and "--full-limit" in ba and ba[ba.index("--full-limit") + 1] == "5" and "--no-cloud-sync" in ba
+      and str(core.TM_DIR) in ba, "snapshots go to their own folder with Ludusavi keeping the newest few")
+core.TM_DIR.mkdir(parents=True, exist_ok=True)
+sn = core.tm_snapshots()
+check(list(sn) == ["Big Game"] and sn["Big Game"][0]["name"] == "backup-2", "lists snapshots per game, newest first")
+_r = subprocess.run(["bash", "-c", core.tm_restore_cmd("Big Game", "backup-1")], capture_output=True, text=True)
+calls = [json.loads(l) for l in _flog.read_text().splitlines()][-2:]
+check(_r.returncode == 0 and "Restored Big Game" in _r.stdout and "backup" in calls[0] and str(core.TM_BEFORE_RESTORE) in calls[0]
+      and "restore" in calls[1] and calls[1][calls[1].index("--backup") + 1] == "backup-1",
+      "a restore saves what's there now first, then restores the chosen snapshot: " + _r.stderr[-200:])
+check(core.tm_due("Big Game") and (core.tm_record("Big Game", 0, "Big Game") or True) and not core.tm_due("Big Game"),
+      "one snapshot per game per 10 minutes")
+check(core.when_text("bad") == "bad" and core.when_text("2020-01-02T03:04:00Z").startswith("Jan"), "snapshot times read naturally")
 # ---- reports: attachments, snapshot, instant upload, per-version repeats, manual reports ----
 posts = []
 def _fake_gh(method, path, data=None, **kw):
@@ -1054,6 +1097,18 @@ check(not _ask({"op": "action", "name": "game_flag", "data": {"key": "deck", "on
       and not _ask({"op": "status"})["game_live"], "launch options the switches can't parse are never touched")
 core.game_settings, core.apply_game_settings = _gs, _ag
 check(_ask({"op": "action", "name": "backup"})["ok"], "panel can ask for a save backup")
+_fb = Path(HOME) / "fakebin"; _fb.mkdir(exist_ok=True)
+(_fb / "flatpak").write_text("#!/bin/sh\necho \"$@\" >> \"$HOME/flatpak.log\"\ncase \"$*\" in *find*) echo '{\"games\": {\"Halo Infinite\": {}}}';; esac\nexit 0\n")
+(_fb / "flatpak").chmod(0o755)
+os.environ["PATH"] = str(_fb) + os.pathsep + os.environ["PATH"]
+a._ludusavi_t = 0
+a.tm_snapshot(a.game)
+_tms = core.read_json(core.TM_STATE, {})
+check(_tms.get("Halo Infinite", {}).get("rc") == 0 and "--full-limit" in (Path(HOME) / "flatpak.log").read_text(),
+      "a game starting gets its saves snapshotted: " + str(_tms))
+a.tm_snapshot(a.game)
+check((Path(HOME) / "flatpak.log").read_text().count(" backup ") == 1, "but not again right away")
+
 _spec = _iu.spec_from_loader("qam_main", loader=None)
 qam = _iu.module_from_spec(_spec)
 exec(core.QAM_MAIN_PY, qam.__dict__)
@@ -1824,6 +1879,25 @@ check(hub.launchers.restorable(["Youtube"]) and not hub.launchers.restorable(["B
       "web launchers and installed stores can come back without reinstalling")
 tryit("launchers quick restore", hub.launchers.add)
 hub.runner.submit = _sub3
+hub.go("Saves")
+check(hub.current_page() is hub.saves, "Saves live under Tools")
+tryit("saves refresh", hub.saves.refresh)
+tryit("saves on", lambda: hub.saves.set_on(True))
+check(core.load_config()["saves"]["time_machine"], "the time machine can be turned on")
+tryit("saves keep", lambda: hub.saves.set_keep(2))
+check(core.load_config()["saves"]["keep"] == 10, "and told how many to keep")
+_snaps = {"Big Game": [{"name": "b2", "when": "2026-10-03T10:00:00Z"}, {"name": "b1", "when": "2026-10-01T10:00:00Z"}]}
+tryit("saves loaded", lambda: hub.saves._loaded(_snaps))
+tryit("saves empty", lambda: hub.saves._loaded({}))
+hub.saves.snaps = _snaps
+_ai3, _sub4 = gui.ask_item, hub.runner.submit
+_tm = []
+hub.runner.submit = lambda label, cmd, key="": _tm.append((key, cmd))
+gui.ask_item = lambda *a, **k: (core.when_text("2026-10-01T10:00:00Z"), True)
+tryit("saves restore", lambda: hub.saves.pick("Big Game"))
+check(_tm and _tm[-1][0] == "tm-restore" and "b1" in _tm[-1][1], "picking a snapshot restores that one")
+gui.ask_item, hub.runner.submit = _ai3, _sub4
+tryit("saves restore done", lambda: hub.on_job_finished("tm-restore", 0, ""))
 tryit("NSL card opens the page", lambda: hub.on_item_action("nonsteamlaunchers", "install"))
 check(hub.current_page() is hub.launchers, "the catalog card opens the themed page, not the script's windows")
 # header/footer on the sides
