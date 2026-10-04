@@ -11,6 +11,7 @@ import shutil
 import struct
 import sys
 import time
+import traceback
 from pathlib import Path
 from typing import Optional
 
@@ -18,9 +19,9 @@ import core
 from core import (APP_NAME, CATALOG, CATALOG_BY_ID, HOME, USER, VERSION, Item, load_config,
                   update_config)
 
-from PySide6.QtCore import (QEvent, QObject, QPoint, QPointF, QProcess, QProcessEnvironment, QRectF, QSize,
+from PySide6.QtCore import (QBuffer, QByteArray, QEvent, QIODevice, QObject, QPoint, QPointF, QProcess, QProcessEnvironment, QRectF, QSize,
                             QSocketNotifier, Qt, QTimer, QUrl, Signal)
-from PySide6.QtGui import (QColor, QDesktopServices, QFont, QIcon, QKeyEvent, QPainter,
+from PySide6.QtGui import (QColor, QDesktopServices, QFont, QIcon, QImage, QImageReader, QKeyEvent, QPainter,
                            QPainterPath, QPen, QPixmap, QTextCursor)
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
@@ -3060,6 +3061,69 @@ class HealthPage(QWidget):
 # Launchers: NonSteamLaunchers in Ally Hub's own theme, controller friendly
 # ==========================================================================
 
+# Library art: core draws each picture as SVG, Qt turns it into a PNG here.
+ART_GLYPHS = {"Game stores": ("store", "#3b82f6"), "Cloud gaming": ("cloud", "#16a34a"),
+              "TV and video": ("tv", "#e11d48")}
+
+
+def image_png(img) -> bytes:
+    """A QImage as PNG bytes (empty when Qt couldn't make it)."""
+    if img is None or img.isNull():
+        return b""
+    ba = QByteArray()
+    buf = QBuffer(ba)
+    buf.open(QIODevice.WriteOnly)
+    img.save(buf, "PNG")
+    buf.close()
+    return bytes(ba.data())
+
+
+def rasterize_svg(svg: str, w: int, h: int) -> bytes:
+    """Render an SVG at w x h as PNG bytes, through the same SVG image plugin the icons use."""
+    img = QImage()
+    if not img.loadFromData(svg.encode(), "SVG") or img.isNull():
+        return b""
+    if img.width() != w or img.height() != h:
+        img = img.scaled(w, h, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+    return image_png(img.convertToFormat(QImage.Format_ARGB32))
+
+
+def cover_png(path: str, w: int, h: int) -> bytes:
+    """A picture of the owner's own, scaled to fill w x h and cropped in the middle."""
+    reader = QImageReader(path)
+    reader.setAutoTransform(True)                 # phone photos: follow their rotation tag
+    img = reader.read()
+    if img.isNull():
+        return b""
+    img = img.scaled(w, h, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+    return image_png(img.copy(max(0, (img.width() - w) // 2), max(0, (img.height() - h) // 2), w, h))
+
+
+def art_glyph(name: str) -> tuple:
+    """(Lucide icon body, color) for a tile without an icon of its own."""
+    group = next((g for g, items in core.NSL_GROUPS.items() if any(n == name for n, _ in items)), "")
+    icon, color = ART_GLYPHS.get(group, ("gamepad-2", "#8b5cf6"))
+    return ICONS.get(icon, ""), color
+
+
+def self_icon_png() -> bytes:
+    svg = core.read_text(core.APP_DIR / "allyhub.svg")
+    return rasterize_svg(svg.replace('viewBox="0 0 256 256"', 'width="512" height="512" viewBox="0 0 256 256"', 1),
+                         512, 512) if svg else b""
+
+
+def make_art(t: dict) -> tuple:
+    """(pngs by kind, icon png) for one tile planned by core.art_plan."""
+    icon, color = t.get("icon_png"), t.get("color")
+    if t.get("self"):
+        icon, color = self_icon_png() or None, "#e11d48"
+    glyph, glyph_color = art_glyph(t["name"])
+    svgs = core.art_svgs(t["name"], icon, color or (None if icon else glyph_color), glyph)
+    pngs = {k: rasterize_svg(svg, w, h) for k, (svg, w, h) in svgs.items()}
+    icon = icon or pngs.get("icon") or None
+    return {k: v for k, v in pngs.items() if v and k != "icon"}, (None if t.get("has_icon") else icon)
+
+
 class LaunchersPage(QWidget):
     def __init__(self, hub):
         super().__init__()
@@ -3101,6 +3165,19 @@ class LaunchersPage(QWidget):
         v.addLayout(row)
         self.status = label("", "cardMeta", wrap=True)
         v.addWidget(self.status)
+
+        v.addWidget(label("LIBRARY ART", "section"))
+        ac, av = titled_card("images", "#8b5cf6", "Library art",
+                             "Blank blue tiles get a cover, banner and icon made right here on your handheld from "
+                             "each program's own icon. Nothing is downloaded. New launchers get theirs "
+                             "automatically.")
+        arow = QHBoxLayout()
+        self.btn_art = button("Fix artwork", self.fix_artwork, "primary")
+        arow.addWidget(self.btn_art)
+        arow.addWidget(button("Use my own picture", self.own_picture))
+        arow.addStretch()
+        av.addLayout(arow)
+        v.addWidget(ac)
 
         v.addWidget(label("CLEAN UP", "section"))
         cc, cv = titled_card("trash", "#ef4444", "Leftover data",
@@ -3176,6 +3253,9 @@ class LaunchersPage(QWidget):
         if not isinstance(r, dict) or "res" not in r:
             return
         res = r["res"]
+        landed = [n for n in names if n not in res["missing"] and n not in res["no_shortcut"]]
+        if landed:
+            self.fix_artwork(only=landed, quiet=True)
         if not res["missing"] and not res["no_shortcut"]:
             msg_info(self, APP_NAME, "In your Steam library now: " + ", ".join(names) +
                                     ".\n\nFind them under Non-Steam in your library.")
@@ -3194,6 +3274,143 @@ class LaunchersPage(QWidget):
             self.hub.send_reports_now()
         msg_warn(self, APP_NAME, "\n\n".join(lines) +
                             ("\n\nThis was reported automatically with the full log." if reported else ""))
+
+    # ---- library art ----
+    def fix_artwork(self, *_args, only: list = None, quiet: bool = False, redo: bool = False):
+        """Make art for tiles that still show Steam's blank blue (only=[names] after an install). One run at
+        a time: requests that arrive meanwhile wait their turn."""
+        if getattr(self, "_art_busy", False):
+            self._art_queue = getattr(self, "_art_queue", []) + [(only, quiet, redo)]
+            return
+        self._art_busy = True
+        self._art_quiet = quiet
+        self.btn_art.setEnabled(False)
+        self.btn_art.setText("Looking at your library…")
+        BackgroundTask(self, lambda: core.art_plan(only=only, redo=redo),
+                       lambda plan: self._art_planned(plan, quiet, redo))
+
+    def _art_ready(self):
+        self._art_busy = False
+        self.btn_art.setEnabled(True)
+        self.btn_art.setText("Fix artwork")
+        queue = getattr(self, "_art_queue", [])
+        if queue:
+            only, quiet, redo = queue.pop(0)
+            self._art_queue = queue
+            QTimer.singleShot(0, lambda: self.fix_artwork(only=only, quiet=quiet, redo=redo))
+
+    def _art_planned(self, plan, quiet: bool, redo: bool):
+        if not isinstance(plan, dict) or "error" in plan:
+            self._art_ready()
+            if not quiet:
+                msg_warn(self, APP_NAME, "Ally Hub couldn't read your Steam library just now. Try again in a "
+                                         "moment.")
+            return
+        todo = plan.get("todo") or []
+        if not todo:
+            self._art_ready()
+            if quiet:
+                return
+            if not plan.get("tiles"):
+                msg_info(self, APP_NAME, "There are no non-Steam games in your library yet.")
+            elif plan.get("ours") and not redo:
+                if ask(self, "Every non-Steam tile has art already.\n\nRemake the art Ally Hub made earlier? "
+                             "Pictures you chose yourself are kept."):
+                    self.fix_artwork(redo=True)
+            else:
+                msg_info(self, APP_NAME, "Every non-Steam tile has art already ✔")
+            return
+        self._art_made, self._art_todo = [], list(todo)
+        self._art_total = len(todo)
+        QTimer.singleShot(0, self._art_step)
+
+    def _art_step(self):
+        """Draw one tile per turn of the event loop, so the window stays responsive."""
+        if self._art_todo:
+            t = self._art_todo.pop(0)
+            done = self._art_total - len(self._art_todo)
+            self.btn_art.setText(f"Making art {done} of {self._art_total}…")
+            try:
+                pngs, icon = make_art(t)
+                if pngs:
+                    self._art_made.append((t, pngs, icon))
+            except Exception:
+                core.app_log("art", f"drawing failed for {t.get('name')}: {traceback.format_exc()[-400:]}")
+            QTimer.singleShot(0, self._art_step)
+            return
+        made, quiet = self._art_made, self._art_quiet
+        if not made:
+            self._art_ready()
+            core.queue_report("install-failure", "Library art: couldn't draw the pictures",
+                              "Qt returned no image for any tile (is the SVG image plugin missing?).",
+                              core._fingerprint("art-draw"))
+            if not quiet:
+                msg_warn(self, APP_NAME, "Ally Hub couldn't draw the pictures on this system. This was "
+                                         "reported so it can be fixed.")
+            return
+        self.btn_art.setText("Sending to Steam…")
+
+        def send():
+            return [(t["name"], core.apply_art(t["appid"], pngs, icon, t["name"])) for t, pngs, icon in made]
+        BackgroundTask(self, send, lambda res: self._art_sent(res, quiet))
+
+    def _art_sent(self, res, quiet: bool):
+        self._art_ready()
+        if not isinstance(res, list):
+            if not quiet:
+                msg_warn(self, APP_NAME, "Something went wrong while adding the art. Details are in Settings → "
+                                         "Activity.")
+            return
+        live = [n for n, r in res if r.get("live")]
+        saved = [n for n, r in res if not r.get("live") and r.get("files")]
+        failed = [n for n, r in res if not r.get("live") and not r.get("files") and not r.get("kept")]
+        if failed:
+            core.queue_report("install-failure", "Library art: Steam didn't take the pictures",
+                              "Failed: " + ", ".join(failed) + f"\nGrid folder: {core.steam_grid_dir()}",
+                              core._fingerprint("art-apply", *sorted(failed)))
+        if quiet and not failed:
+            if live or saved:
+                self.hub.toast("Library art added ✔" if live else "Library art saved. It shows after Steam restarts.")
+            return
+        parts = []
+        if live:
+            parts.append("New art in your library: " + ", ".join(live) + ".")
+        if saved:
+            parts.append("Saved for " + ", ".join(saved) + ". It shows after Steam restarts (the icon needs "
+                         "Steam's connection for plugins, which Decky Loader turns on).")
+        if failed:
+            parts.append("Couldn't add art for " + ", ".join(failed) + ". This was reported automatically.")
+        if not parts:
+            parts.append("Nothing to change: those tiles already have pictures you chose.")
+        (msg_warn if failed else msg_info)(self, APP_NAME, "\n\n".join(parts))
+
+    def own_picture(self, *_args):
+        tiles = core.steam_shortcuts()
+        if not tiles:
+            msg_info(self, APP_NAME, "There are no non-Steam games in your library yet.")
+            return
+        names = sorted({t["name"] for t in tiles}, key=str.lower)
+        name, ok = ask_item(self, "Use my own picture", "Which tile?", names)
+        if not ok:
+            return
+        path, _ = QFileDialog.getOpenFileName(self, "Choose a picture", str(HOME / "Pictures"),
+                                              "Pictures (*.png *.jpg *.jpeg)", options=file_dialog_options())
+        if not path:
+            return
+        tile = next(t for t in tiles if t["name"] == name)
+        pngs = {"portrait": cover_png(path, 600, 900), "wide": cover_png(path, 920, 430),
+                "hero": cover_png(path, 1920, 620)}
+        pngs = {k: v for k, v in pngs.items() if v}
+        if not pngs:
+            msg_warn(self, APP_NAME, "That picture couldn't be opened. Try a PNG or JPG.")
+            return
+        if getattr(self, "_art_busy", False):
+            msg_info(self, APP_NAME, "Ally Hub is making library art right now. Try again in a moment.")
+            return
+        self._art_busy = True
+        self.btn_art.setEnabled(False)
+        BackgroundTask(self, lambda: [(name, core.apply_art(tile["appid"], pngs, None, name, mine=True))],
+                       lambda res: self._art_sent(res, False))
 
     # ---- uninstall ----
     def uninstall(self):
@@ -4985,6 +5202,9 @@ class Hub(QMainWindow):
         if tool:
             QProcess.startDetached(tool, [str(desk)])
             self.toast("Added to Steam (restart Steam if it doesn't show up)")
+            # give Steam a moment to make the tile, then dress it in Ally Hub's own art
+            for delay in (12000, 45000):            # second try in case Steam was slow to add it
+                QTimer.singleShot(delay, lambda: self.launchers.fix_artwork(only=["Ally Hub"], quiet=True))
         else:
             msg_info(self, APP_NAME,
                                     f"In Steam: Games > Add a Non-Steam Game, pick Ally Hub, then set "

@@ -112,6 +112,18 @@ Leftovers: `nsl_leftovers` / `nsl_clean_cmd` (home-folder paths only; the shared
 left in it, unticked by default because games live there). Battle.net through Launchers still needs the
 owner's confirmation that it shows up in Game Mode.
 
+**Library art (the owner's call: no SteamGridDB):** Install → Launchers → Library art. `core.art_plan`
+lists tiles (`steam_shortcuts`: CEF `appStore` ids merged with shortcuts.vdf) whose grid folder has no portrait.
+Icons come out of the tile's .exe (`pe_icon_entries`, `_dib_to_png`, stdlib PE/PNG code); `art_svgs` draws
+portrait/wide/hero/logo as SVG using only QtSvg-safe features (no filters, no nested svg); the GUI rasterizes them
+one tile per event-loop turn (`_art_step`) and `apply_art` writes `{id}p.png`, `{id}.png`, `{id}_hero.png`,
+`{id}_logo.png` to the grid folder and sends them live (`SetCustomArtworkForApp`, asset types 0 portrait,
+1 hero, 2 logo, 3 wide; `SetShortcutIcon` with a PNG in `ART_DIR`). Ownership: `art_made` stores a hash per
+picture; Ally Hub only replaces a picture while the file still matches its hash (`art_is_ours`), never the
+owner's own art, kind by kind. "Use my own picture" passes `mine=True` (always written, never remembered).
+Runs after a successful launcher install and after "Add Ally Hub to Steam". Brand logos are never drawn:
+the only real artwork used is the program's own icon from the owner's installed copy.
+
 **Bar position (the owner's call):** `config["theme"]["bars"]` = "top" (default) or "sides".
 `Hub.arrange_bars` rebuilds only the layouts of `top_frame` / `footer_frame` / the central widget (widgets are
 kept), so it switches live. In "sides" GamepadNav enters pages with RIGHT and returns to tabs with LEFT.

@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.0.0-e11d48?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.1.0-e11d48?style=flat-square">
   <img alt="SteamOS" src="https://img.shields.io/badge/SteamOS-3.8%2B-1a9fff?style=flat-square&logo=steam&logoColor=white">
   <img alt="Device" src="https://img.shields.io/badge/ROG%20Xbox%20Ally%20X-tested-8b5cf6?style=flat-square">
   <img alt="License" src="https://img.shields.io/github/license/Ravenor907/AllyHub?color=22c55e&style=flat-square">
@@ -32,7 +32,7 @@ and a phone remote. Works in Desktop Mode, and fully in Game Mode with just the 
 | 🎮 **Made for Game Mode** | Five console-style tabs, every button, list and dropdown works with the controller, and pop-ups open inside the app instead of new windows |
 | 🧩 **Mods & plugins** | Decky Loader, Ally Center, SimpleDeckyTDP, Lossless Scaling and OptiScaler frame gen (Bazzite's builds), EmuDeck and the full Decky Plugin Store |
 | 📦 **30 curated apps** | Heroic, Greenlight (Xbox Cloud), Moonlight, ProtonPlus, Discord, Spotify and more, each with install, update and remove |
-| 🕹️ **PC launchers** | Battle.net, Epic, EA, Ubisoft, GOG and 10 more added straight to your Steam library, with uninstall and a leftover cleaner |
+| 🕹️ **PC launchers** | Battle.net, Epic, EA, Ubisoft, GOG and 10 more added straight to your Steam library with their own cover art, plus uninstall and a leftover cleaner |
 | 🚀 **Performance** | Game Boost while you play, a one-tap system tune-up and FSR 4 for every game, ideas from CachyOS and Bazzite, all undoable |
 | 🌈 **Ring lighting** | Smooth animated effects, a customizable RGB Spiral, battery and per-game colors, or hand the rings to HueSync |
 | 🎨 **Themes** | 8 themes, custom accent colors, interface size, and tabs on the top or as icons down the sides |
@@ -108,6 +108,10 @@ Pick the PC stores you want and Ally Hub installs them with
 [NonSteamLaunchers](https://github.com/moraroy/NonSteamLaunchers-On-Steam-Deck) in the background, then adds
 them to your Steam library so they show up in Game Mode. Remove them the same way, and **Find leftovers**
 cleans up what's left behind.
+
+Each new tile gets a cover, banner and icon made on your handheld from the program's own icon, so nothing
+shows up as a blank blue box. **Fix artwork** does the same for any non-Steam tile, and **Use my own picture**
+sets one you like. Pictures you chose are never replaced.
 
 </details>
 

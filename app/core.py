@@ -19,6 +19,7 @@ import stat
 import subprocess
 import tarfile
 import tempfile
+import threading
 import time
 import traceback
 import urllib.error
@@ -2022,7 +2023,10 @@ def _ws_send(sock, text: str):
     else:
         head += bytes([0x80 | 127]) + n.to_bytes(8, "big")
     mask = os.urandom(4)
-    sock.sendall(bytes(head) + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(data)))
+    if n:                                   # whole-buffer XOR: art payloads are megabytes
+        full = (mask * (n // 4 + 1))[:n]
+        data = (int.from_bytes(data, "big") ^ int.from_bytes(full, "big")).to_bytes(n, "big")
+    sock.sendall(bytes(head) + mask + data)
 
 
 def _recv_exact(sock, n: int) -> bytes:
@@ -2180,6 +2184,566 @@ def cef_remove_shortcuts(names: list) -> Optional[list]:
         return json.loads(v) if v else None
     except ValueError:
         return None
+
+
+# ----- Library art: covers, banners and icons for non-Steam tiles, made on the handheld -----
+# No downloads. The icon comes out of the program's own .exe (its icon resources); the art is drawn as SVG
+# here (stdlib) and turned into PNGs by the GUI's Qt. Steam gets it live through the same debugger
+# connection as the shortcuts (SetCustomArtworkForApp / SetShortcutIcon); the grid-folder copies make it
+# show after a Steam restart when that connection is off.
+
+ART_DIR = DATA_DIR / "art"
+_ART_LOCK = threading.Lock()
+ART_MADE = DATA_DIR / "art_made.json"
+# Steam's library asset types for SetCustomArtworkForApp, and the grid-folder file each one uses
+ART_KINDS = {"portrait": (0, "{id}p.png", 600, 900), "hero": (1, "{id}_hero.png", 1920, 620),
+             "logo": (2, "{id}_logo.png", 1200, 300), "wide": (3, "{id}.png", 920, 430)}
+ART_GRID_EXTS = (".png", ".jpg", ".jpeg", ".webp")
+ART_FALLBACK_COLOR = "#3b82f6"
+ART_FONT = "Inter, Noto Sans, DejaVu Sans, sans-serif"
+
+
+def steam_grid_dir(id3: str = None) -> Optional[Path]:
+    id3 = id3 or steam_user_id3()
+    return HOME / ".steam/root/userdata" / id3 / "config/grid" if id3 else None
+
+
+def _vdf_shortcuts(data: bytes) -> list:
+    """Loose reader for binary shortcuts.vdf: [{appid, name, exe, icon}] (appid as Steam's unsigned id)."""
+    out = []
+    starts = [m.start() for m in re.finditer(rb"\x02appid\x00", data, re.I)]
+    for i, s in enumerate(starts):
+        seg = data[s:starts[i + 1] if i + 1 < len(starts) else len(data)]
+        if len(seg) < 11:
+            continue
+        ent = {"appid": int.from_bytes(seg[7:11], "little")}
+        for key, field_name in ((rb"appname", "name"), (rb"exe", "exe"), (rb"icon", "icon")):
+            m = re.search(rb"\x01" + key + rb"\x00([^\x00]*)\x00", seg, re.I)
+            ent[field_name] = m.group(1).decode("utf-8", "replace") if m else ""
+        if ent["name"]:
+            out.append(ent)
+    return out
+
+
+def steam_shortcuts() -> list:
+    """Non-Steam tiles: Steam's live list when its debugger is on (exact ids), merged with shortcuts.vdf."""
+    f = shortcuts_vdf()
+    try:
+        disk = _vdf_shortcuts(f.read_bytes()) if f and f.exists() else []
+    except OSError:
+        disk = []
+    v = cef_eval("JSON.stringify((window.appStore?.allApps||[]).filter(a=>a?.app_type===%d)"
+                 ".map(a=>({appid:a.appid,name:a.display_name})))" % SHORTCUT_APP_TYPE)
+    try:
+        live = json.loads(v) if v else None
+    except ValueError:
+        live = None
+    live = [a for a in live if isinstance(a, dict)] if isinstance(live, list) else None
+    if not live:
+        return disk
+    by_id = {d["appid"]: d for d in disk}
+    by_name = {d["name"].lower(): d for d in disk}
+    out = []
+    for a in live:
+        d = by_id.get(a.get("appid")) or by_name.get(str(a.get("name", "")).lower()) or {}
+        out.append({"appid": int(a.get("appid") or 0), "name": a.get("name") or d.get("name", ""),
+                    "exe": d.get("exe", ""), "icon": d.get("icon", "")})
+    return [s for s in out if s["appid"] and s["name"]]
+
+
+def _grid_files(appid: int, kind: str, grid: Path) -> list:
+    stem = ART_KINDS[kind][1].format(id=appid)[:-4]
+    return [grid / f"{stem}{e}" for e in ART_GRID_EXTS if (grid / f"{stem}{e}").exists()] if grid else []
+
+
+def has_grid_art(appid: int, grid: Path = None) -> bool:
+    return bool(_grid_files(appid, "portrait", grid or steam_grid_dir()))
+
+
+def _sha(data: bytes) -> str:
+    return hashlib.sha1(data).hexdigest()
+
+
+def art_is_ours(appid: int, kind: str, grid: Path = None) -> bool:
+    """The picture on disk is still the one Ally Hub made (the owner hasn't replaced it since)."""
+    grid = grid or steam_grid_dir()
+    want = ((art_made().get(str(appid)) or {}).get("hashes") or {}).get(kind)
+    files = _grid_files(appid, kind, grid)
+    if not want or len(files) != 1:
+        return False
+    try:
+        return _sha(files[0].read_bytes()) == want
+    except OSError:
+        return False
+
+
+def art_made() -> dict:
+    return read_json(ART_MADE, {}) or {}
+
+
+def art_targets(include_all: bool = False) -> list:
+    """Tiles that still show Steam's blank blue art (or every tile with include_all)."""
+    grid = steam_grid_dir()
+    return [s for s in steam_shortcuts() if include_all or not has_grid_art(s["appid"], grid)]
+
+
+def is_self_shortcut(s: dict) -> bool:
+    return s.get("name", "").strip().lower() == "ally hub" or "allyhub" in s.get("exe", "").lower()
+
+
+# --- icons out of Windows programs (PE resources) ---
+
+def _u16(b, o):
+    return int.from_bytes(b[o:o + 2], "little")
+
+
+def _u32(b, o):
+    return int.from_bytes(b[o:o + 4], "little")
+
+
+def pe_icon_entries(data: bytes) -> list:
+    """The images of a Windows program's first icon group: [(size, bpp, image bytes)], biggest first."""
+    try:
+        if data[:2] != b"MZ":
+            return []
+        pe = _u32(data, 0x3C)
+        if data[pe:pe + 4] != b"PE\0\0":
+            return []
+        coff = pe + 4
+        nsec, optsz = _u16(data, coff + 2), _u16(data, coff + 16)
+        opt = coff + 20
+        magic = _u16(data, opt)
+        dd = opt + (96 if magic == 0x10B else 112 if magic == 0x20B else 0)
+        if dd == opt:
+            return []
+        res_rva = _u32(data, dd + 16)
+        secs = []
+        for i in range(nsec):
+            s = opt + optsz + 40 * i
+            secs.append((_u32(data, s + 12), max(_u32(data, s + 8), _u32(data, s + 16)), _u32(data, s + 20)))
+
+        def off(rva):
+            for va, size, raw in secs:
+                if va <= rva < va + size:
+                    return rva - va + raw
+            return None
+
+        base = off(res_rva)
+        if base is None:
+            return []
+
+        def entries(d):
+            n = _u16(data, d + 12) + _u16(data, d + 14)
+            return [(_u32(data, d + 16 + 8 * k), _u32(data, d + 20 + 8 * k)) for k in range(min(n, 4096))]
+
+        def leaf(o):                 # follow subdirectories down to the first data entry
+            for _ in range(4):
+                if not o & 0x80000000:
+                    e = base + o
+                    start = off(_u32(data, e))
+                    return data[start:start + _u32(data, e + 4)] if start is not None else b""
+                sub = entries(base + (o & 0x7FFFFFFF))
+                if not sub:
+                    return b""
+                o = sub[0][1]
+            return b""
+
+        icons, groups = {}, []
+        for tid, toff in entries(base):
+            if tid in (3, 14) and toff & 0x80000000:
+                for nid, noff in entries(base + (toff & 0x7FFFFFFF)):
+                    blob = leaf(noff)
+                    if tid == 3 and not nid & 0x80000000:
+                        icons[nid] = blob
+                    elif tid == 14:
+                        groups.append(blob)
+        for g in groups:
+            out = []
+            for k in range(_u16(g, 4)):
+                e = 6 + 14 * k
+                if e + 14 > len(g):
+                    break
+                size = g[e] or 256
+                img = icons.get(_u16(g, e + 12))
+                if img:
+                    out.append((size, _u16(g, e + 6), img))
+            if out:
+                return sorted(out, key=lambda t: (t[0], t[1]), reverse=True)
+    except (IndexError, ValueError):
+        pass
+    return []
+
+
+def _png_encode(w: int, h: int, rgba: bytes) -> bytes:
+    import struct
+    import zlib
+    raw = b"".join(b"\0" + rgba[y * w * 4:(y + 1) * w * 4] for y in range(h))
+
+    def chunk(t, d):
+        return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xFFFFFFFF)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0)) +
+            chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b""))
+
+
+def _dib_to_png(dib: bytes) -> Optional[bytes]:
+    """A classic icon bitmap (1/4/8/24/32-bit, bottom-up, AND mask for transparency) as a PNG."""
+    try:
+        hsize = _u32(dib, 0)
+        w = int.from_bytes(dib[4:8], "little", signed=True)
+        h = abs(int.from_bytes(dib[8:12], "little", signed=True)) // 2
+        bpp = _u16(dib, 14)
+        if not (0 < w <= 512 and 0 < h <= 512) or bpp not in (1, 4, 8, 24, 32):
+            return None
+        ncol = (_u32(dib, 32) or (1 << bpp)) if bpp <= 8 else 0
+        pal = dib[hsize:hsize + 4 * ncol]
+        px = hsize + 4 * ncol
+        stride = ((w * bpp + 31) // 32) * 4
+        mstride = ((w + 31) // 32) * 4
+        mask = px + stride * h
+        out = bytearray(w * h * 4)
+        any_alpha = False
+        for y in range(h):
+            row = px + (h - 1 - y) * stride
+            for x in range(w):
+                if bpp == 32:
+                    b, g, r, a = dib[row + 4 * x:row + 4 * x + 4]
+                    any_alpha |= a > 0
+                elif bpp == 24:
+                    b, g, r = dib[row + 3 * x:row + 3 * x + 3]
+                    a = 255
+                else:
+                    bit = x * bpp
+                    idx = (dib[row + bit // 8] >> (8 - bpp - bit % 8)) & ((1 << bpp) - 1)
+                    b, g, r = pal[4 * idx:4 * idx + 3] if 4 * idx + 3 <= len(pal) else (0, 0, 0)
+                    a = 255
+                o = (y * w + x) * 4
+                out[o:o + 4] = bytes((r, g, b, a))
+        if bpp != 32 or not any_alpha:          # transparency lives in the AND mask
+            for y in range(h):
+                row = mask + (h - 1 - y) * mstride
+                for x in range(w):
+                    if row + x // 8 < len(dib) and dib[row + x // 8] >> (7 - x % 8) & 1:
+                        out[(y * w + x) * 4 + 3] = 0
+                    elif bpp == 32:
+                        out[(y * w + x) * 4 + 3] = 255
+        return _png_encode(w, h, bytes(out))
+    except (IndexError, ValueError):
+        return None
+
+
+def exe_icon_png(exe) -> Optional[bytes]:
+    """The biggest icon inside a Windows .exe as PNG bytes, or None."""
+    p = Path(str(exe).strip().strip('"'))
+    try:
+        if not p.is_file() or p.stat().st_size > 150 * 1024 * 1024:
+            return None
+        data = p.read_bytes()
+    except OSError:
+        return None
+    for _size, _bpp, img in pe_icon_entries(data):
+        if img.startswith(b"\x89PNG"):
+            return img
+        png = _dib_to_png(img)
+        if png:
+            return png
+    return None
+
+
+def _png_pixels(png: bytes):
+    """(w, h, rgba) for plain 8-bit PNGs (what icons are), or None."""
+    import struct
+    import zlib
+    try:
+        if not png.startswith(b"\x89PNG"):
+            return None
+        pos, idat, pal, trns = 8, b"", b"", b""
+        w = h = depth = ctype = interlace = 0
+        while pos + 8 <= len(png):
+            n, t = struct.unpack(">I4s", png[pos:pos + 8])
+            d = png[pos + 8:pos + 8 + n]
+            if t == b"IHDR":
+                w, h, depth, ctype, _c, _f, interlace = struct.unpack(">IIBBBBB", d)
+            elif t == b"PLTE":
+                pal = d
+            elif t == b"tRNS":
+                trns = d
+            elif t == b"IDAT":
+                idat += d
+            pos += 12 + n
+        chans = {6: 4, 2: 3, 3: 1, 0: 1, 4: 2}.get(ctype)
+        if depth != 8 or interlace or not chans or w * h > 1024 * 1024:
+            return None
+        raw = zlib.decompress(idat)
+        stride = w * chans
+        prev = bytearray(stride)
+        out = bytearray()
+        for y in range(h):
+            f = raw[y * (stride + 1)]
+            line = bytearray(raw[y * (stride + 1) + 1:(y + 1) * (stride + 1)])
+            for i in range(stride):
+                a = line[i - chans] if i >= chans else 0
+                b = prev[i]
+                c = prev[i - chans] if i >= chans else 0
+                if f == 1:
+                    line[i] = (line[i] + a) & 255
+                elif f == 2:
+                    line[i] = (line[i] + b) & 255
+                elif f == 3:
+                    line[i] = (line[i] + (a + b) // 2) & 255
+                elif f == 4:
+                    pa, pb, pc = abs(b - c), abs(a - c), abs(a + b - 2 * c)
+                    line[i] = (line[i] + (a if pa <= pb and pa <= pc else b if pb <= pc else c)) & 255
+            for x in range(w):
+                px = line[x * chans:(x + 1) * chans]
+                if ctype == 6:
+                    out += px
+                elif ctype == 2:
+                    out += px + b"\xff"
+                elif ctype == 4:
+                    out += bytes((px[0], px[0], px[0], px[1]))
+                elif ctype == 0:
+                    out += bytes((px[0], px[0], px[0], 255))
+                else:
+                    i = px[0]
+                    rgb = pal[3 * i:3 * i + 3] or b"\0\0\0"
+                    out += rgb + bytes((trns[i] if i < len(trns) else 255,))
+            prev = line
+        return w, h, bytes(out)
+    except Exception:
+        return None
+
+
+def icon_color(png: Optional[bytes]) -> str:
+    """The icon's main color (saturated, opaque pixels count most), for the art's background."""
+    px = _png_pixels(png) if png else None
+    if not px:
+        return ART_FALLBACK_COLOR
+    w, h, rgba = px
+    step = max(1, (w * h) // 4096)
+    tot = r_s = g_s = b_s = 0.0
+    for i in range(0, w * h, step):
+        r, g, b, a = rgba[4 * i:4 * i + 4]
+        if a < 160:
+            continue
+        _hh, s, v = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+        wgt = (s * v) ** 2 + 0.002
+        tot += wgt
+        r_s, g_s, b_s = r_s + r * wgt, g_s + g * wgt, b_s + b * wgt
+    if tot <= 0:
+        return ART_FALLBACK_COLOR
+    r, g, b = r_s / tot, g_s / tot, b_s / tot
+    hh, s, v = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+    if s < 0.15:                                      # grey or black icons: keep them on a calm slate
+        return "#475569"
+    r, g, b = colorsys.hsv_to_rgb(hh, max(s, 0.55), min(max(v, 0.75), 0.95))
+    return "#%02x%02x%02x" % (int(r * 255), int(g * 255), int(b * 255))
+
+
+# --- the art itself, as SVG (only features Qt's SVG renderer supports: no filters, no nested <svg>) ---
+
+def _mix(c1: str, c2: str, t: float) -> str:
+    a = [int(c1[i:i + 2], 16) for i in (1, 3, 5)]
+    b = [int(c2[i:i + 2], 16) for i in (1, 3, 5)]
+    return "#%02x%02x%02x" % tuple(int(x + (y - x) * t) for x, y in zip(a, b))
+
+
+def _xml(s: str) -> str:
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
+def _wrap_title(name: str, width: float, size: int, lines: int = 2):
+    """Pick a font size and line breaks so the name fits (rough width: 0.56 em per character)."""
+    for sz in range(size, 22, -2):
+        per = max(1, int(width / (sz * 0.56)))
+        out, cur = [], ""
+        for word in name.split():
+            if cur and len(cur) + 1 + len(word) > per:
+                out.append(cur)
+                cur = word
+            else:
+                cur = (cur + " " + word).strip()
+        out.append(cur)
+        if len(out) <= lines and all(len(x) <= per for x in out):
+            return sz, out
+    return 22, [name[:40]]
+
+
+def _icon_svg(x, y, size, icon_png: Optional[bytes], glyph: str, color: str) -> str:
+    if icon_png:
+        data = base64.b64encode(icon_png).decode()
+        return (f'<image x="{x}" y="{y}" width="{size}" height="{size}" '
+                f'xlink:href="data:image/png;base64,{data}"/>')
+    s = size / 24
+    return (f'<rect x="{x}" y="{y}" width="{size}" height="{size}" rx="{size * 0.22:.0f}" fill="{color}"/>'
+            f'<g transform="translate({x + size * 0.2:.1f},{y + size * 0.2:.1f}) scale({s * 0.6:.3f})" fill="none" '
+            f'stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{glyph}</g>')
+
+
+def _title_svg(lines, x, y, size, anchor="middle", gap=1.15) -> str:
+    out = ""
+    for i, line in enumerate(lines):
+        yy = y + i * size * gap
+        out += (f'<text x="{x}" y="{yy + 3:.0f}" font-family="{ART_FONT}" font-size="{size}" font-weight="700" '
+                f'text-anchor="{anchor}" fill="#000000" fill-opacity="0.35">{_xml(line)}</text>'
+                f'<text x="{x}" y="{yy:.0f}" font-family="{ART_FONT}" font-size="{size}" font-weight="700" '
+                f'text-anchor="{anchor}" fill="#ffffff">{_xml(line)}</text>')
+    return out
+
+
+def art_svgs(name: str, icon_png: Optional[bytes] = None, color: str = None, glyph: str = "") -> dict:
+    """{kind: (svg, width, height)} for a tile: tall cover, wide banner, hero and logo, plus the icon tile
+    when the program has no icon of its own."""
+    c = color or icon_color(icon_png)
+    deep, mid = _mix(c, "#05070d", 0.82), _mix(c, "#0b1020", 0.55)
+    head = '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" '
+
+    def defs(gx1, gy1, gx2, gy2, cx, cy, r):
+        return (f'<defs><linearGradient id="bg" x1="{gx1}" y1="{gy1}" x2="{gx2}" y2="{gy2}">'
+                f'<stop offset="0" stop-color="{mid}"/><stop offset="1" stop-color="{deep}"/></linearGradient>'
+                f'<radialGradient id="glow" cx="{cx}" cy="{cy}" r="{r}">'
+                f'<stop offset="0" stop-color="{c}" stop-opacity="0.55"/>'
+                f'<stop offset="1" stop-color="{c}" stop-opacity="0"/></radialGradient></defs>')
+
+    out = {}
+    w, h = 600, 900
+    sz, lines = _wrap_title(name, 520, 66)
+    ty = 640 if len(lines) == 1 else 610
+    out["portrait"] = (head + f'width="{w}" height="{h}" viewBox="0 0 {w} {h}">' + defs(0, 0, 0.3, 1, 0.5, 0.36, 0.5) +
+                       f'<rect width="{w}" height="{h}" fill="url(#bg)"/><rect width="{w}" height="{h}" fill="url(#glow)"/>'
+                       + _icon_svg(170, 190, 260, icon_png, glyph, c) +
+                       f'<rect x="250" y="{ty - sz - 34}" width="100" height="6" rx="3" fill="{c}"/>'
+                       + _title_svg(lines, 300, ty, sz) + '</svg>', w, h)
+    w, h = 920, 430
+    sz, lines = _wrap_title(name, 500, 64)
+    ty = 215 + sz * 0.35 - (len(lines) - 1) * sz * 0.57
+    out["wide"] = (head + f'width="{w}" height="{h}" viewBox="0 0 {w} {h}">' + defs(0, 0, 1, 1, 0.2, 0.5, 0.55) +
+                   f'<rect width="{w}" height="{h}" fill="url(#bg)"/><rect width="{w}" height="{h}" fill="url(#glow)"/>'
+                   + _icon_svg(80, 105, 220, icon_png, glyph, c) +
+                   f'<rect x="360" y="{ty - sz - 26:.0f}" width="90" height="6" rx="3" fill="{c}"/>'
+                   + _title_svg(lines, 360, ty, sz, "start") + '</svg>', w, h)
+    w, h = 1920, 620
+    out["hero"] = (head + f'width="{w}" height="{h}" viewBox="0 0 {w} {h}">' + defs(0, 0, 1, 0.4, 0.74, 0.5, 0.42) +
+                   f'<rect width="{w}" height="{h}" fill="url(#bg)"/><rect width="{w}" height="{h}" fill="url(#glow)"/>'
+                   f'<g opacity="0.9">' + _icon_svg(1250, 110, 400, icon_png, glyph, c) + '</g></svg>', w, h)
+    w, h = 1200, 300
+    sz, lines = _wrap_title(name, 860, 110, lines=1)
+    out["logo"] = (head + f'width="{w}" height="{h}" viewBox="0 0 {w} {h}">'
+                   + _icon_svg(20, 50, 200, icon_png, glyph, c)
+                   + _title_svg(lines, 260, 150 + sz * 0.35, sz, "start") + '</svg>', w, h)
+    if not icon_png:
+        out["icon"] = (head + 'width="256" height="256" viewBox="0 0 256 256">'
+                       + _icon_svg(0, 0, 256, None, glyph, c) + '</svg>', 256, 256)
+    return out
+
+
+def shortcut_icon_png(s: dict) -> Optional[bytes]:
+    """The tile's own icon: from its .exe (NonSteamLaunchers stores run their Windows launcher), or an icon
+    file Steam already points at."""
+    for exe in (nsl_exe(s.get("name", "")), s.get("exe", "")):
+        if exe and str(exe).strip().strip('"').lower().endswith(".exe"):
+            png = exe_icon_png(exe)
+            if png:
+                return png
+    icon = Path(str(s.get("icon", "")).strip('"'))
+    if icon.suffix.lower() == ".png" and icon.is_file() and ART_DIR not in icon.parents:
+        try:
+            return icon.read_bytes()[:8 * 1024 * 1024]
+        except OSError:
+            return None
+    if icon.suffix.lower() == ".exe":
+        return exe_icon_png(icon)
+    return None
+
+
+
+def has_own_icon(s: dict) -> bool:
+    """The tile already shows an icon someone chose (Steam can't draw .exe icons, and ours get replaced)."""
+    icon = Path(str(s.get("icon", "")).strip().strip('"'))
+    return (icon.suffix.lower() in (".png", ".ico", ".jpg", ".jpeg") and icon.is_file()
+            and ART_DIR not in icon.parents)
+
+
+def art_plan(only: list = None, redo: bool = False) -> dict:
+    """What Fix artwork will do: {"tiles": n, "ours": n, "todo": [{appid, name, icon_png, color, self}]}.
+    Never touches art the owner set himself: without redo only blank tiles; with redo only Ally Hub's own art."""
+    tiles = steam_shortcuts()
+    grid = steam_grid_dir()
+    want = [n.lower() for n in only] if only else None
+    todo, ours = [], 0
+    for s in tiles:
+        low = s["name"].lower()
+        mine = art_is_ours(s["appid"], "portrait", grid)
+        ours += mine
+        if want is not None and not any(w == low or w in low for w in want):   # same matching as nsl_results
+            continue
+        if (redo and mine) or (not redo and not has_grid_art(s["appid"], grid)):
+            png = None if is_self_shortcut(s) else shortcut_icon_png(s)
+            todo.append({"appid": s["appid"], "name": s["name"], "icon_png": png, "self": is_self_shortcut(s),
+                         "color": icon_color(png) if png else None, "has_icon": has_own_icon(s)})
+    return {"tiles": len(tiles), "ours": ours, "todo": todo}
+
+CEF_ART_JS = """(async () => {
+  const id = %d, arts = %s, icon = %s, done = [];
+  for (const [t, b64] of arts) {
+    try { await SteamClient.Apps.ClearCustomArtworkForApp(id, t); } catch (e) {}
+    try { await SteamClient.Apps.SetCustomArtworkForApp(id, b64, 'png', t); done.push(t); }
+    catch (e) { console.error('Ally Hub art', id, t, e); }
+  }
+  if (icon) { try { await SteamClient.Apps.SetShortcutIcon(id, icon); done.push('icon'); } catch (e) {} }
+  return JSON.stringify(done);
+})()"""
+
+
+def apply_art(appid: int, pngs: dict, icon_png: Optional[bytes] = None, name: str = "", mine: bool = False) -> dict:
+    """Save the art to Steam's grid folder and hand it to Steam live. {"files": n, "live": bool}.
+    Ally Hub's own art (mine=False) never replaces a picture the owner set himself, kind by kind;
+    mine=True is the owner's own picture: it always goes in and isn't remembered as Ally Hub's."""
+    grid = steam_grid_dir()
+    pngs = {k: v for k, v in pngs.items() if k in ART_KINDS and v}
+    if not mine and grid:
+        pngs = {k: v for k, v in pngs.items() if not _grid_files(appid, k, grid) or art_is_ours(appid, k, grid)}
+    files = 0
+    if grid:
+        try:
+            grid.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            grid = None
+    for kind, png in pngs.items():
+        if not grid:
+            break
+        try:
+            for old in _grid_files(appid, kind, grid):      # Steam picks one: don't leave a .jpg next to ours
+                old.unlink()
+            (grid / ART_KINDS[kind][1].format(id=appid)).write_bytes(png)
+            files += 1
+        except OSError:
+            pass
+    icon_path = ""
+    if icon_png:
+        ART_DIR.mkdir(parents=True, exist_ok=True)
+        p = ART_DIR / f"{appid}_icon.png"
+        try:
+            p.write_bytes(icon_png)
+            icon_path = str(p)
+        except OSError:
+            pass
+    arts = [[ART_KINDS[k][0], base64.b64encode(v).decode()] for k, v in pngs.items()]
+    v = cef_eval(CEF_ART_JS % (int(appid), json.dumps(arts), json.dumps(icon_path)), timeout=60)
+    try:
+        live = json.loads(v) if v else None
+    except ValueError:
+        live = None
+    with _ART_LOCK:
+        made = art_made()
+        if mine:
+            made.pop(str(appid), None)
+        else:
+            rec = made.get(str(appid)) or {"hashes": {}}
+            rec["name"], rec["t"] = name, int(time.time())
+            rec.setdefault("hashes", {}).update({k: _sha(v) for k, v in pngs.items()})
+            made[str(appid)] = rec
+        write_json(ART_MADE, made)
+    return {"files": files, "live": bool(live), "done": live or [], "kept": not pngs and not icon_path}
 
 
 def nsl_results(names: list, shortcuts: set = None) -> dict:
