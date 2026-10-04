@@ -1,0 +1,25 @@
+name: Suggestion
+description: An idea for a feature, app, plugin or tweak
+labels: ["suggestion"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Ally Hub is a personal project, so not every idea will make it in, but every suggestion gets read and answered.
+  - type: textarea
+    id: idea
+    attributes:
+      label: Your idea
+      description: What should Ally Hub do?
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why it would help
+      description: What problem does it solve on your handheld?
+  - type: input
+    id: links
+    attributes:
+      label: Related links (optional)
+      description: Project pages, install instructions, etc.

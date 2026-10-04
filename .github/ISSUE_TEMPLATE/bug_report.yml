@@ -1,0 +1,39 @@
+name: Bug report
+description: Something in Ally Hub isn't working
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time! Tip: **Ally Doctor** (in the app) can fix many common problems on its own.
+  - type: input
+    id: version
+    attributes:
+      label: Ally Hub version
+      description: Shown on Settings → Updates.
+      placeholder: "1.0.0"
+    validations:
+      required: true
+  - type: input
+    id: steamos
+    attributes:
+      label: SteamOS version and device
+      placeholder: "SteamOS 3.9.2, ROG Xbox Ally X"
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Where did it happen?
+      options: ["Desktop Mode", "Game Mode", "Both", "Not sure"]
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Activity log (optional)
+      description: Copy the relevant part of the Activity page. Remove anything personal first.
+      render: text

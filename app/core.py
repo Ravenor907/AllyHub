@@ -1,0 +1,3646 @@
+"""
+Ally Hub core: everything that doesn't need Qt.
+Shared by the GUI (gui.py) and the background agent (agent.py).
+"""
+
+import base64
+import colorsys
+import fcntl
+import getpass
+import hashlib
+import json
+import math
+import os
+import re
+import shlex
+import shutil
+import socket
+import stat
+import subprocess
+import tarfile
+import tempfile
+import time
+import traceback
+import urllib.error
+import urllib.request
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable, Optional
+
+APP_NAME = "Ally Hub"
+
+HOME = Path.home()
+USER = os.environ.get("USER") or getpass.getuser()
+APP_DIR = Path(__file__).resolve().parent
+# Installed copies are flat (~/.local/share/allyhub). A repo checkout keeps the code in app/ and
+# VERSION at the top, so look one level up too.
+try:
+    VERSION = next((p.read_text().strip() for p in (APP_DIR / "VERSION", APP_DIR.parent / "VERSION")
+                    if p.exists()), "") or "0.0.0"
+except OSError:
+    VERSION = "0.0.0"
+REPO_DEFAULT = "Ravenor907/AllyHub"
+DATA_DIR = HOME / ".local/share/allyhub"
+CONFIG_DIR = HOME / ".config/allyhub"
+CONFIG_FILE = CONFIG_DIR / "config.json"
+AGENT_STATE = DATA_DIR / "agent_state.json"
+HEALTH_FILE = DATA_DIR / "health.jsonl"
+LED_ROOT = Path("/sys/class/leds")
+UDEV_LED_RULE = "/etc/udev/rules.d/99-allyhub-leds.rules"
+UDEV_CHARGE_RULE = "/etc/udev/rules.d/99-allyhub-charge.rules"
+AGENT_UNIT = HOME / ".config/systemd/user/allyhub-agent.service"
+DECKY_PATH = HOME / "homebrew/services/PluginLoader"
+DECKY_PLUGINS = HOME / "homebrew/plugins"
+DECKY_STORE_API = "https://plugins.deckbrew.xyz/plugins"
+DECKY_CDN = "https://cdn.tzatzikiweeb.moe/file/steam-deck-homebrew/versions/{}.zip"
+STEAM_ROOT = HOME / ".local/share/Steam"
+BOOT_VIDEO = HOME / ".steam/root/config/uioverrides/movies/deck_startup.webm"
+SHADER_CACHE = STEAM_ROOT / "steamapps/shadercache"
+BACKUP_DIR = HOME / "AllyHub-Backups"
+EMUDECK_PATH = HOME / "Applications/EmuDeck.AppImage"
+TAILSCALE_BIN = "/opt/tailscale/tailscale"
+
+REFUSAL_PATTERNS = re.compile(
+    r"not canon|not supported|unsupported|aborting|refus|did you mean", re.I)
+
+
+# ==========================================================================
+# Config (shared by GUI and agent; always read-modify-write)
+# ==========================================================================
+
+DEFAULT_CONFIG = {
+    "theme": {"preset": "ROG Crimson", "accent": None, "accent2": None,
+              "scale": 100, "controller_nav": "auto", "ui_scale": "auto",
+              "bars": "top",            # "sides": header/footer as icon columns
+              "footer": False},         # bottom bar off by default (the owner's call)
+    "rgb": None,
+    "agent": {
+        "enabled": False, "battery_rings": False, "low_battery_flash": True,
+        "game_colors": True, "dock_mode": False, "health_log": True,
+        "guardian": True, "remote": False, "remote_port": 8787, "remote_pin": "",
+        "save_backup": False, "save_backup_hours": 24,
+        "save_backup_dir": str(BACKUP_DIR / "saves"),
+    },
+    "game_colors": {},
+    "dock": {"lights": "off", "audio_hdmi": True},
+    "wol": {"name": "Gaming PC", "mac": "", "broadcast": "255.255.255.255"},
+    "guardian": {"decky_expected": False, "last_build": ""},
+    # controller "huesync": Ally Hub leaves the rings alone and points to the HueSync Decky plugin
+    # (the owner's call). "allyhub" turns on the Lighting studio and agent lighting.
+    "lighting": {"effect": None, "fps": 20, "on_battery": "slow", "custom": {}, "controller": "huesync"},
+    "updates": {"repo": REPO_DEFAULT, "auto_update": True, "reporting": False},
+    # Tools > Performance. The tune-up itself lives in /etc, so only Game Boost's switch is here.
+    "performance": {"boost": False},
+}
+
+
+def _merge(defaults: dict, data: dict) -> dict:
+    out = {}
+    for k, v in defaults.items():
+        if isinstance(v, dict) and isinstance(data.get(k), dict):
+            out[k] = _merge(v, data[k])
+        elif k in data:
+            out[k] = data[k]
+        else:
+            out[k] = json.loads(json.dumps(v))
+    for k, v in data.items():
+        if k not in out:
+            out[k] = v
+    return out
+
+
+def load_config() -> dict:
+    try:
+        data = json.loads(CONFIG_FILE.read_text())
+    except Exception:
+        data = {}
+    return _merge(DEFAULT_CONFIG, data)
+
+
+def save_config(cfg: dict) -> None:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = CONFIG_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(cfg, indent=2))
+    os.replace(tmp, CONFIG_FILE)
+
+
+def update_config(fn: Callable[[dict], None]) -> dict:
+    cfg = load_config()
+    fn(cfg)
+    save_config(cfg)
+    return cfg
+
+
+def read_json(path: Path, default=None):
+    try:
+        return json.loads(Path(path).read_text())
+    except Exception:
+        return default
+
+
+def write_json(path: Path, data) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data))
+    os.replace(tmp, path)
+
+
+# ==========================================================================
+# System helpers
+# ==========================================================================
+
+def run_quiet(cmd: list, timeout: int = 8) -> tuple:
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return p.returncode, p.stdout.strip()
+    except Exception:
+        return 1, ""
+
+
+def read_text(path, default: str = "") -> str:
+    try:
+        return Path(path).read_text().strip()
+    except Exception:
+        return default
+
+
+def read_int(path, default=None):
+    try:
+        return int(read_text(path))
+    except (TypeError, ValueError):
+        return default
+
+
+def os_release() -> dict:
+    info = {}
+    for line in read_text("/etc/os-release").splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            info[k] = v.strip('"')
+    return info
+
+
+def device_name() -> str:
+    vendor = read_text("/sys/class/dmi/id/sys_vendor")
+    product = read_text("/sys/class/dmi/id/product_name")
+    return f"{vendor} {product}".strip() or "Unknown device"
+
+
+def in_game_mode() -> bool:
+    return (os.environ.get("XDG_CURRENT_DESKTOP", "").lower() == "gamescope"
+            or "GAMESCOPE_WAYLAND_DISPLAY" in os.environ)
+
+
+def battery_dir() -> Optional[Path]:
+    for bat in sorted(Path("/sys/class/power_supply").glob("BAT*")):
+        return bat
+    return None
+
+
+def health_now() -> dict:
+    """One health reading right now (the same fields the agent logs once a minute)."""
+    b = battery_info()
+    s = sensors()
+    w = battery_power_w()
+    return {"t": time.time(), "pct": read_int(b["path"] / "capacity") if b else None,
+            "w": round(w, 2) if w else None,
+            "cpu": round(s["cpu_temp"], 1) if s.get("cpu_temp") else None,
+            "gpu": round(s["gpu_temp"], 1) if s.get("gpu_temp") else None}
+
+
+def battery_info() -> dict:
+    bat = battery_dir()
+    if not bat:
+        return {}
+    info = {"path": bat, "capacity": read_text(bat / "capacity"),
+            "status": read_text(bat / "status"), "cycles": read_text(bat / "cycle_count")}
+    full = read_int(bat / "energy_full") or read_int(bat / "charge_full")
+    design = read_int(bat / "energy_full_design") or read_int(bat / "charge_full_design")
+    info["health"] = round(100 * full / design) if full and design else None
+    limit_file = bat / "charge_control_end_threshold"
+    info["limit_file"] = limit_file if limit_file.exists() else None
+    info["limit"] = read_text(limit_file) if limit_file.exists() else ""
+    return info
+
+
+def battery_percent() -> str:
+    b = battery_info()
+    if not b.get("capacity"):
+        return "n/a"
+    s = f"{b['capacity']}%"
+    if b.get("status"):
+        s += f" ({b['status'].lower()})"
+    return s
+
+
+def sudo_password_set() -> Optional[bool]:
+    rc, out = run_quiet(["passwd", "-S", USER])
+    if rc != 0 or not out:
+        return None
+    parts = out.split()
+    return parts[1] == "P" if len(parts) >= 2 else None
+
+
+def installed_flatpaks() -> set:
+    if not shutil.which("flatpak"):
+        return set()
+    rc, out = run_quiet(["flatpak", "list", "--app", "--columns=application"], timeout=20)
+    return set(out.split()) if rc == 0 else set()
+
+
+def installed_decky_plugins() -> dict:
+    """Map lowercase plugin name -> {dir, name, version}."""
+    found = {}
+    try:
+        dirs = list(DECKY_PLUGINS.iterdir()) if DECKY_PLUGINS.exists() else []
+    except OSError:
+        return found
+    for d in dirs:
+        meta = read_json(d / "plugin.json", {}) or {}
+        name = meta.get("name", d.name)
+        version = (read_json(d / "package.json", {}) or {}).get("version", "")
+        found[name.lower()] = {"dir": str(d), "name": name, "version": version}
+    return found
+
+
+def service_active(name: str, user: bool = False) -> bool:
+    cmd = ["systemctl"] + (["--user"] if user else []) + ["is-active", name]
+    return run_quiet(cmd)[1] == "active"
+
+
+def sshd_active() -> bool:
+    return service_active("sshd")
+
+
+def local_ips() -> list:
+    rc, out = run_quiet(["ip", "-4", "-o", "addr", "show", "scope", "global"])
+    ips = re.findall(r"inet (\d+\.\d+\.\d+\.\d+)", out) if rc == 0 else []
+    return [ip for ip in ips if not ip.startswith("100.")] + [ip for ip in ips if ip.startswith("100.")]
+
+
+def flatpak_sd_access() -> bool:
+    rc, out = run_quiet(["flatpak", "override", "--user", "--show"])
+    return rc == 0 and "/run/media" in out
+
+
+def human_size(n: float) -> str:
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return f"{n:.1f} {unit}" if unit != "B" else f"{int(n)} B"
+        n /= 1024
+    return f"{n} B"
+
+
+def disk_usage(path: str) -> str:
+    try:
+        u = shutil.disk_usage(path)
+        return f"{human_size(u.free)} free of {human_size(u.total)}"
+    except OSError:
+        return "n/a"
+
+
+def disk_free_ratio(path: str) -> float:
+    try:
+        u = shutil.disk_usage(path)
+        return u.free / u.total
+    except OSError:
+        return 1.0
+
+
+def sd_cards() -> list:
+    base = Path("/run/media")
+    out = []
+    if base.exists():
+        for p in base.rglob("*"):
+            try:
+                if p.is_dir() and os.path.ismount(p):
+                    out.append(p)
+            except OSError:
+                pass
+    return out
+
+
+def dir_size(path: Path) -> int:
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for f in files:
+            try:
+                total += os.lstat(os.path.join(root, f)).st_size
+            except OSError:
+                pass
+    return total
+
+
+def internet_ok(timeout: float = 2.0) -> bool:
+    for host in (("1.1.1.1", 443), ("8.8.8.8", 53)):
+        try:
+            with socket.create_connection(host, timeout=timeout):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+# ==========================================================================
+# Sensors (hwmon) and power
+# ==========================================================================
+
+def hwmon_by_name() -> dict:
+    out = {}
+    for h in Path("/sys/class/hwmon").glob("hwmon*"):
+        out.setdefault(read_text(h / "name"), h)
+    return out
+
+
+def sensors() -> dict:
+    hw = hwmon_by_name()
+    data = {"cpu_temp": None, "gpu_temp": None, "fan_rpm": None, "gpu_power": None}
+    if "k10temp" in hw:
+        t = read_int(hw["k10temp"] / "temp1_input")
+        data["cpu_temp"] = t / 1000 if t else None
+    if "amdgpu" in hw:
+        t = read_int(hw["amdgpu"] / "temp1_input")
+        data["gpu_temp"] = t / 1000 if t else None
+        p = read_int(hw["amdgpu"] / "power1_average") or read_int(hw["amdgpu"] / "power1_input")
+        data["gpu_power"] = p / 1e6 if p else None
+    for h in hw.values():
+        rpm = read_int(h / "fan1_input")
+        if rpm is not None:
+            data["fan_rpm"] = rpm
+            break
+    return data
+
+
+def battery_power_w() -> Optional[float]:
+    bat = battery_dir()
+    if not bat:
+        return None
+    p = read_int(bat / "power_now")
+    if p:
+        return p / 1e6
+    cur, volt = read_int(bat / "current_now"), read_int(bat / "voltage_now")
+    if cur and volt:
+        return cur * volt / 1e12
+    return None
+
+
+def battery_energy_wh() -> tuple:
+    """(energy_now, energy_full) in Wh if available."""
+    bat = battery_dir()
+    if not bat:
+        return None, None
+    now, full = read_int(bat / "energy_now"), read_int(bat / "energy_full")
+    if now is None:
+        cn, cf, v = read_int(bat / "charge_now"), read_int(bat / "charge_full"), \
+            read_int(bat / "voltage_min_design") or read_int(bat / "voltage_now")
+        if cn and cf and v:
+            return cn * v / 1e12, cf * v / 1e12
+        return None, None
+    return now / 1e6, (full or 0) / 1e6
+
+
+def time_left_text() -> str:
+    b = battery_info()
+    if b.get("status") == "Charging":
+        return "charging"
+    p = battery_power_w()
+    now, _ = battery_energy_wh()
+    if not p or not now or p < 0.5:
+        return "n/a"
+    hours = now / p
+    return f"{int(hours)}h {int((hours % 1) * 60):02d}m"
+
+
+# ==========================================================================
+# Displays (dock detection) and audio
+# ==========================================================================
+
+def external_display_connected() -> bool:
+    for conn in Path("/sys/class/drm").glob("card*-*"):
+        name = conn.name.split("-", 1)[1]
+        if name.startswith("eDP") or name.startswith("Writeback"):
+            continue
+        if read_text(conn / "status") == "connected":
+            return True
+    return False
+
+
+DRM_ROOT = Path("/sys/class/drm")
+
+
+def panel_resolution() -> Optional[tuple]:
+    """(width, height) of the built-in screen, from the kernel's mode list."""
+    for conn in sorted(DRM_ROOT.glob("card*-eDP-*")) + sorted(DRM_ROOT.glob("card*-DSI-*")):
+        first = read_text(conn / "modes").splitlines()[:1]
+        m = re.match(r"(\d+)x(\d+)", first[0]) if first else None
+        if m:
+            w, h = int(m.group(1)), int(m.group(2))
+            return (max(w, h), min(w, h))     # some panels report portrait
+    return None
+
+
+def auto_ui_scale() -> float:
+    """Interface scale for the built-in screen: 1.5 on a 1080p 7-8 inch handheld."""
+    res = panel_resolution()
+    if not res:
+        return 1.0
+    factor = round(res[1] / 720 * 4) / 4
+    return max(1.0, min(2.0, factor))
+
+
+def ui_scale(theme_cfg: dict) -> float:
+    v = theme_cfg.get("ui_scale", "auto")
+    if v == "auto":
+        return auto_ui_scale()
+    try:
+        return max(0.75, min(2.5, float(v)))
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def set_hdmi_audio(on: bool) -> None:
+    rc, out = run_quiet(["pactl", "list", "short", "sinks"])
+    if rc != 0:
+        return
+    sinks = [ln.split("\t")[1] for ln in out.splitlines() if "\t" in ln]
+    hdmi = [s for s in sinks if "hdmi" in s.lower() or "displayport" in s.lower()]
+    internal = [s for s in sinks if s not in hdmi]
+    target = (hdmi if on else internal)[:1]
+    if target:
+        run_quiet(["pactl", "set-default-sink", target[0]])
+
+
+# ==========================================================================
+# Steam games (running game detection + names)
+# ==========================================================================
+
+def steam_library_dirs() -> list:
+    libs = [STEAM_ROOT / "steamapps"]
+    vdf = read_text(STEAM_ROOT / "steamapps/libraryfolders.vdf")
+    for path in re.findall(r'"path"\s+"([^"]+)"', vdf):
+        p = Path(path) / "steamapps"
+        if p not in libs:
+            libs.append(p)
+    return libs
+
+
+_shortcut_names = {}
+_shortcut_mtime = 0.0
+
+
+def _load_shortcuts():
+    global _shortcut_names, _shortcut_mtime
+    files = list((STEAM_ROOT / "userdata").glob("*/config/shortcuts.vdf"))
+    mtime = max((f.stat().st_mtime for f in files), default=0)
+    if mtime == _shortcut_mtime:
+        return
+    names = {}
+    for f in files:
+        try:
+            data = f.read_bytes()
+        except OSError:
+            continue
+        appids = [(m.start(), int.from_bytes(m.group(1), "little"))
+                  for m in re.finditer(rb"\x02appid\x00(.{4})", data, re.S | re.I)]
+        for m in re.finditer(rb"\x01appname\x00([^\x00]*)\x00", data, re.I):
+            prior = [a for pos, a in appids if pos < m.start()]
+            if prior:
+                names[prior[-1]] = m.group(1).decode("utf-8", "replace")
+    _shortcut_names, _shortcut_mtime = names, mtime
+
+
+def game_name(appid: str) -> str:
+    try:
+        n = int(appid)
+    except ValueError:
+        return f"Game {appid}"
+    if n > 0xFFFFFFFF:            # non-Steam shortcut game id
+        _load_shortcuts()
+        short = n >> 32
+        return _shortcut_names.get(short, f"Non-Steam game {short}")
+    for lib in steam_library_dirs():
+        acf = read_text(lib / f"appmanifest_{n}.acf")
+        m = re.search(r'"name"\s+"([^"]+)"', acf)
+        if m:
+            return m.group(1)
+    return f"Steam game {n}"
+
+
+def is_self_game(appid: Optional[str]) -> bool:
+    """Ally Hub launched from the Steam library shows up as a "game"; it isn't one."""
+    return bool(appid) and game_name(appid).strip().lower().startswith("ally hub")
+
+
+class GameWatcher:
+    """Finds the running Steam game by scanning process environments."""
+
+    IGNORE = {"0", "769"}   # 769 = Steam's own client id
+
+    def __init__(self):
+        self.cache = {}     # pid -> appid or None
+        self.uid = os.getuid()
+
+    @staticmethod
+    def _zombie(pid: int) -> bool:
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text()
+            return stat[stat.rindex(")") + 2] in "ZX"
+        except (OSError, ValueError, IndexError):
+            return True
+
+    def scan(self) -> Optional[str]:
+        live = {}
+        try:
+            pids = [int(p) for p in os.listdir("/proc") if p.isdigit()]
+        except OSError:
+            return None
+        for pid in pids:
+            if pid in self.cache:
+                appid = self.cache[pid]
+                if appid and self._zombie(pid):
+                    appid = None            # exited but not reaped yet
+                live[pid] = appid
+                continue
+            appid = None
+            try:
+                if os.stat(f"/proc/{pid}").st_uid == self.uid:
+                    cmd = Path(f"/proc/{pid}/cmdline").read_bytes()
+                    if b"allyhub" not in cmd:
+                        env = Path(f"/proc/{pid}/environ").read_bytes().split(b"\x00")
+                        vals = {}
+                        for kv in env:
+                            if kv.startswith(b"SteamGameId=") or kv.startswith(b"SteamAppId="):
+                                k, v = kv.split(b"=", 1)
+                                vals[k] = v.decode()
+                        appid = vals.get(b"SteamGameId") or vals.get(b"SteamAppId")
+                        if appid in self.IGNORE:
+                            appid = None
+            except OSError:
+                appid = None
+            live[pid] = appid
+        self.cache = live
+        running = [(pid, a) for pid, a in live.items() if a]
+        return max(running)[1] if running else None
+
+
+# ==========================================================================
+# RGB lighting
+# ==========================================================================
+
+@dataclass
+class LedDevice:
+    path: Path
+    channels: list
+    max_brightness: int
+    enums: dict = field(default_factory=dict)
+    channel_max: list = field(default_factory=list)   # from multi_max_intensity, if present
+
+    @property
+    def name(self) -> str:
+        return self.path.name
+
+    @property
+    def pretty(self) -> str:
+        return self.name.split(":")[-1].replace("_", " ").title()
+
+
+def find_leds() -> list:
+    leds = []
+    if not LED_ROOT.exists():
+        return leds
+    for d in sorted(LED_ROOT.iterdir()):
+        if not (d / "multi_intensity").exists():
+            continue
+        channels = read_text(d / "multi_index").split() or ["red", "green", "blue"]
+        maxb = read_int(d / "max_brightness", 255) or 255
+        enums = {}
+        for idx_file in d.glob("*_index"):
+            attr = idx_file.name[: -len("_index")]
+            if attr == "multi" or not (d / attr).exists():
+                continue
+            options = [o.strip("[]") for o in read_text(idx_file).split()]
+            current = read_text(d / attr)
+            if current.isdigit() and int(current) < len(options):
+                current = options[int(current)]
+            if options:
+                enums[attr] = (options, current.strip("[]"))
+        cmax = [int(x) for x in read_text(d / "multi_max_intensity").split() if x.isdigit()]
+        leds.append(LedDevice(d, channels, maxb, enums, cmax))
+    return leds
+
+
+def hex_to_rgb(h: str) -> tuple:
+    h = h.lstrip("#")
+    return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def rgb_to_hex(rgb) -> str:
+    return "#{:02x}{:02x}{:02x}".format(*[max(0, min(255, int(c))) for c in rgb])
+
+
+# Hardware effect modes that let software set the color frame by frame. If the rings are left
+# in a hardware mode such as rainbow or breathe (for example from Armoury Crate on Windows),
+# the colors Ally Hub writes are ignored and the rings look like nothing happened.
+STATIC_MODE_NAMES = ("monocolor", "static", "solid", "direct", "custom", "single", "fixed", "steady")
+MODE_ATTRS = ("effect", "mode")
+
+
+def static_mode(led: "LedDevice") -> dict:
+    """{attr: option} that puts each hardware effect/mode attribute in its plain-color mode."""
+    out = {}
+    for attr, (options, _cur) in (led.enums or {}).items():
+        if attr not in MODE_ATTRS:
+            continue
+        for want in STATIC_MODE_NAMES:
+            hit = next((o for o in options if o.lower() == want), None)
+            if hit:
+                out[attr] = hit
+                break
+    return out
+
+
+# Channel names that carry a whole color packed as 0xRRGGBB in one number. The ROG Xbox Ally X
+# kernel driver exposes its rings as four zones named "rgb" (multi_index "rgb rgb rgb rgb").
+PACKED_CHANNELS = ("rgb", "color", "colour")
+
+
+# How a packed "rgb" channel wants its color. The guided light test finds the right one on the
+# real hardware and saves it as config["lighting"]["encoding"].
+#   packed     0xRRGGBB, ignore multi_max_intensity (default)
+#   packed_bgr 0xBBGGRR
+#   clamped    0xRRGGBB capped at multi_max_intensity (red/green come out blue on the owner's Ally X)
+#   hex        0xRRGGBB written as hex text ("0xff0000"), the way HueSync writes these zones
+LIGHT_ENCODINGS = ("packed", "packed_bgr", "clamped", "hex")
+# Encodings the guided test tries (clamped is known to be wrong, kept only so saved configs still load)
+TEST_ENCODINGS = ("hex", "packed", "packed_bgr")
+# "hid" means: skip sysfs and talk to the controller's lighting chip directly (see "Direct HID")
+
+
+def channel_value(ch: str, rgb: tuple, cmax: int = 0, encoding: str = None) -> int:
+    r, g, b = (max(0, min(255, int(c))) for c in rgb)
+    ch = ch.lower()
+    if ch in PACKED_CHANNELS:
+        enc = encoding if encoding in LIGHT_ENCODINGS else "packed"
+        if enc == "packed_bgr":
+            return (b << 16) | (g << 8) | r
+        packed = (r << 16) | (g << 8) | b
+        return min(packed, cmax) if (enc == "clamped" and cmax) else packed
+    comp = {"red": r, "green": g, "blue": b}.get(ch, 0)
+    if cmax and cmax != 255:
+        comp = round(comp * cmax / 255)
+    return comp
+
+
+def led_intensities(led: LedDevice, rgb: tuple, encoding: str = None) -> str:
+    cmax = led.channel_max if len(led.channel_max) == len(led.channels) else [0] * len(led.channels)
+    out = []
+    for ch, m in zip(led.channels, cmax):
+        v = channel_value(ch, rgb, m, encoding)
+        out.append(f"0x{v:06x}" if encoding == "hex" and ch.lower() in PACKED_CHANNELS else str(v))
+    return " ".join(out)
+
+
+def _numbers(text: str) -> Optional[list]:
+    try:
+        return [int(x, 0) for x in text.split()]
+    except ValueError:
+        return None
+
+
+def has_packed_channels(leds: list) -> bool:
+    return any(ch.lower() in PACKED_CHANNELS for led in leds for ch in led.channels)
+
+
+def rgb_writes(led: LedDevice, rgb: tuple, brightness: int, enum_values: dict, encoding: str = None) -> list:
+    intensities = led_intensities(led, rgb, encoding)
+    writes = []
+    # the user's own hardware choices win; otherwise force plain-color mode so writes show up
+    values = dict(static_mode(led))
+    values.update({k: v for k, v in (enum_values or {}).items() if v})
+    for attr, value in values.items():
+        if attr in led.enums:
+            options = led.enums[attr][0]
+            fallback = str(options.index(value)) if value in options else None
+            writes.append((str(led.path / attr), value, fallback))
+    writes.append((str(led.path / "multi_intensity"), intensities, None))
+    writes.append((str(led.path / "brightness"), str(brightness), None))
+    return writes
+
+
+REQUIRED_LED_FILES = ("multi_intensity", "brightness")
+
+
+def try_direct_writes(writes: list) -> bool:
+    """Write sysfs values. Color and brightness must succeed; mode attributes are best effort
+    (a udev rule may not cover them, and that alone shouldn't stop the color from changing)."""
+    required = [p for p, _, _ in writes if Path(p).name in REQUIRED_LED_FILES]
+    if not all(os.access(p, os.W_OK) for p in required):
+        return False
+    for path, value, fallback in writes:
+        must = Path(path).name in REQUIRED_LED_FILES
+        if not must and not os.access(path, os.W_OK):
+            continue
+        try:
+            Path(path).write_text(value)
+        except OSError:
+            if fallback is not None:
+                try:
+                    Path(path).write_text(fallback)
+                    continue
+                except OSError:
+                    pass
+            if must:
+                return False
+    return True
+
+
+def writes_as_shell(writes: list) -> str:
+    parts = []
+    for path, value, fallback in writes:
+        p = shlex.quote(path)
+        cmd = f"echo {shlex.quote(value)} > {p}"
+        if fallback is not None:
+            cmd = f"{{ {cmd}; }} 2>/dev/null || echo {shlex.quote(fallback)} > {p}"
+        parts.append(cmd)
+    return "sudo sh -c " + shlex.quote("; ".join(parts))
+
+
+def leds_writable(leds: list) -> bool:
+    return bool(leds) and all(os.access(l.path / "multi_intensity", os.W_OK) for l in leds)
+
+
+def apply_lighting(rgb: tuple, brightness: int, enums: dict = None, leds: list = None,
+                   encoding: str = None) -> bool:
+    leds = leds if leds is not None else find_leds()
+    if not leds:
+        return False
+    writes = []
+    for led in leds:
+        b = min(brightness, led.max_brightness)
+        w = rgb_writes(led, rgb, b, enums or {}, encoding)
+        # mode attributes only need writing when they change (this runs up to 30 times a second)
+        keep = []
+        for path, value, fb in w:
+            attr = Path(path).name
+            if attr in led.enums and led.enums[attr][1] == value:
+                continue
+            keep.append((path, value, fb))
+        writes += keep
+    ok = try_direct_writes(writes)
+    if ok:
+        for led in leds:
+            for path, value, _ in writes:
+                attr = Path(path).name
+                if Path(path).parent == led.path and attr in led.enums:
+                    led.enums[attr] = (led.enums[attr][0], value)
+    return ok
+
+
+def write_test_color(leds: list, rgb: tuple, encoding: str) -> dict:
+    """Write one test color straight to the LEDs and record exactly what happened."""
+    out = {"wrote": [], "readback": [], "errors": []}
+    for led in leds:
+        for attr, value in static_mode(led).items():      # leave any hardware animation mode
+            try:
+                (led.path / attr).write_text(value)
+            except OSError:
+                pass
+        vals = led_intensities(led, rgb, encoding)
+        for name, value in (("brightness", str(led.max_brightness)), ("multi_intensity", vals)):
+            try:
+                (led.path / name).write_text(value)
+            except OSError as e:
+                out["errors"].append(f"{name}: {e.strerror or e}")
+        out["wrote"].append(vals)
+        out["readback"].append(read_text(led.path / "multi_intensity"))
+    out["ok"] = not out["errors"]
+    # did the kernel keep what we wrote? A capped driver turns every color into 255.
+    pairs = [(_numbers(w), _numbers(r)) for w, r in zip(out["wrote"], out["readback"])]
+    out["matches"] = None if any(w is None or r is None for w, r in pairs) else all(w == r for w, r in pairs)
+    return out
+
+
+# --------------------------------------------------------------------------
+# Direct HID: the ASUS lighting protocol (same commands Armoury Crate and Handheld Daemon send)
+# Needed on kernels that cap each zone of ally:rgb:joystick_rings at 255, which leaves sysfs
+# able to show only blue. Effects map onto the chip's built-in modes and are sent
+# once per change, never per frame: some of these commands are saved to the chip's memory.
+#
+# The sequence follows HueSync (github.com/honjow/HueSync, BSD-3-Clause, Copyright (c) 2024
+# honjow), which drives the Xbox Ally X rings from Decky:
+#   1. pick the hidraw interface whose HID usage is 0xFF31/0x0080 (not just any node)
+#   2. turn off the Xbox Ally X "Dynamic Lighting" interface (usage 0x59/0x01): report [0x06, 0x01].
+#      Left on, it overrides custom colors, and it comes back after sleep.
+#   3. send "RGB enable" [0x5A, 0xD1, 0x09, 0x01, 0x02] before anything else. After Windows
+#      turns the rings off, the chip ignores every color command until it gets this.
+# --------------------------------------------------------------------------
+
+DEV_ROOT = Path("/dev")
+HIDRAW_ROOT = Path("/sys/class/hidraw")
+HID_REPORT = 0x5A
+HID_MODES = {"solid": 0x00, "pulse": 0x01, "rainbow": 0x02, "spiral": 0x03}
+HID_SPEEDS = {"slow": 0xE1, "medium": 0xEB, "fast": 0xF5}
+HID_ZONES = {"all": 0x00, "left_left": 0x01, "left_right": 0x02, "right_left": 0x03, "right_right": 0x04}
+HID_PERMISSION_RULE = "/etc/udev/rules.d/70-allyhub-hid.rules"
+RULES_MARKER = "# allyhub-lighting v2"
+ASUS_VID = 0x0B05
+HID_APP_LIGHTING = (0xFF31, 0x0080)      # the ASUS config interface that takes 0x5A packets
+HID_APP_DYNAMIC = (0x0059, 0x0001)       # Windows Dynamic Lighting (LampArray)
+HID_RGB_ENABLE = [HID_REPORT, 0xD1, 0x09, 0x01, 0x02]   # on while awake
+HID_DYNAMIC_OFF = bytes([0x06, 0x01])
+
+
+def _hid_buf(data: list) -> bytes:
+    return bytes(data) + bytes(64 - len(data))
+
+
+def hid_collections(desc: bytes) -> list:
+    """Top-level application collections in a HID report descriptor, as (usage page, usage).
+    The same numbers hidapi reports as usage_page/usage, which is what HueSync matches on."""
+    out, page, usage, depth, i = [], 0, 0, 0, 0
+    while i < len(desc):
+        b = desc[i]
+        if b == 0xFE:                                  # long item: skip it
+            i += 3 + (desc[i + 1] if i + 1 < len(desc) else 0)
+            continue
+        size = (0, 1, 2, 4)[b & 3]
+        data = int.from_bytes(desc[i + 1:i + 1 + size], "little")
+        tag = b & 0xFC
+        if tag == 0x04:                                # Usage Page (global)
+            page = data
+        elif tag == 0x08:                              # Usage (local)
+            usage = data
+        elif tag == 0xA0:                              # Collection
+            if depth == 0 and data == 0x01:
+                p, u = (usage >> 16, usage & 0xFFFF) if size == 4 or usage > 0xFFFF else (page, usage)
+                out.append((p, u))
+            depth += 1
+        elif tag == 0xC0:                              # End Collection
+            depth = max(0, depth - 1)
+        if tag in (0x80, 0x90, 0xA0, 0xB0, 0xC0):      # main items clear the local usage
+            usage = 0
+        i += 1 + size
+    return out
+
+
+def hidraw_devices() -> list:
+    """Every hidraw node with its USB ids and HID usages."""
+    out = []
+    if not HIDRAW_ROOT.exists():
+        return out
+    for d in sorted(HIDRAW_ROOT.glob("hidraw*")):
+        m = re.search(r"HID_ID=([0-9A-Fa-f]+):([0-9A-Fa-f]+):([0-9A-Fa-f]+)", read_text(d / "device" / "uevent"))
+        if not m:
+            continue
+        try:
+            desc = (d / "device" / "report_descriptor").read_bytes()
+        except OSError:
+            desc = b""
+        out.append({"node": DEV_ROOT / d.name, "vid": int(m.group(2), 16), "pid": int(m.group(3), 16),
+                    "apps": hid_collections(desc)})
+    return out
+
+
+def led_hid_device(led: "LedDevice") -> Optional[Path]:
+    """The HID device directory behind an LED (e.g. .../0003:0B05:1B4C.0005)."""
+    try:
+        p = (led.path / "device").resolve()
+    except OSError:
+        return None
+    for _ in range(4):
+        if (p / "hidraw").is_dir():
+            return p
+        p = p.parent
+    return None
+
+
+def led_hidraw(led: "LedDevice") -> Optional[Path]:
+    dev = led_hid_device(led)
+    if not dev:
+        return None
+    nodes = sorted((dev / "hidraw").glob("hidraw*"))
+    return DEV_ROOT / nodes[0].name if nodes else None
+
+
+def led_usb_ids(led: "LedDevice") -> Optional[tuple]:
+    dev = led_hid_device(led)
+    m = re.match(r"[0-9A-Fa-f]{4}:([0-9A-Fa-f]{4}):([0-9A-Fa-f]{4})\.", dev.name) if dev else None
+    return (m.group(1).lower(), m.group(2).lower()) if m else None
+
+
+def ally_hid_nodes(leds: list = None) -> dict:
+    """{"lighting": node, "dynamic": node, "ids": {(vid, pid)}} for the controller behind the rings.
+    Matches on HID usage like HueSync; falls back to the node behind the LED on older kernels."""
+    leds = leds if leds is not None else find_leds()
+    pids = {int(ids[1], 16) for ids in (led_usb_ids(l) for l in leds) if ids}
+    asus = [d for d in hidraw_devices() if d["vid"] == ASUS_VID]
+    if pids and any(d["pid"] in pids for d in asus):
+        asus = [d for d in asus if d["pid"] in pids]
+    light = next((d for d in asus if HID_APP_LIGHTING in d["apps"]), None)
+    dyn = next((d for d in asus if HID_APP_DYNAMIC in d["apps"]), None)
+    out = {"lighting": light["node"] if light else None, "dynamic": dyn["node"] if dyn else None,
+           "ids": {(f"{d['vid']:04x}", f"{d['pid']:04x}") for d in (light, dyn) if d}}
+    if out["lighting"] is None:
+        out["lighting"] = next((n for n in (led_hidraw(l) for l in leds) if n), None)
+    out["ids"] |= {ids for ids in (led_usb_ids(l) for l in leds) if ids}
+    return out
+
+
+def hid_available(leds: list = None) -> bool:
+    return ally_hid_nodes(leds)["lighting"] is not None
+
+
+def hid_writable(leds: list) -> bool:
+    nodes = ally_hid_nodes(leds)
+    want = [n for n in (nodes["lighting"], nodes["dynamic"]) if n]
+    return bool(want) and all(os.access(n, os.W_OK) for n in want)
+
+
+def lighting_access_ok(leds: list) -> bool:
+    """Ally Hub can drive the rings without a password: sysfs, plus the lighting chip if there is one."""
+    if not leds_writable(leds):
+        return False
+    return not hid_available(leds) or hid_writable(leds)
+
+
+def hid_rules(leds: list) -> list:
+    return sorted({f'KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{{idVendor}}=="{v}", '
+                   f'ATTRS{{idProduct}}=="{p}", MODE:="0666", RUN+="/bin/chmod 0666 /dev/%k"'
+                   for v, p in ally_hid_nodes(leds)["ids"]})
+
+
+def hid_permission_cmd(leds: list) -> Optional[str]:
+    rules = hid_rules(leds)
+    if not rules:
+        return None
+    body = "\n".join([RULES_MARKER] + rules)
+    return (f"printf '%s\\n' {shlex.quote(body)} | sudo tee {HID_PERMISSION_RULE} >/dev/null && "
+            "sudo udevadm control --reload && "
+            "sudo udevadm trigger --subsystem-match=hidraw --action=change && sleep 1 && "
+            "echo 'Ally Hub can now talk to the lighting chip directly.'")
+
+
+def lighting_rules_current(leds: list) -> bool:
+    """The permission rules from this version are in place. Informational only: never use this to
+    skip asking: a stale rule file would leave the owner stuck in a restart loop."""
+    if not Path(UDEV_LED_RULE).exists():
+        return False
+    return not hid_rules(leds) or RULES_MARKER in read_text(Path(HID_PERMISSION_RULE))
+
+
+def _file_access(p: Path) -> str:
+    try:
+        st = os.stat(p)
+    except OSError as e:
+        return f"{p}: missing ({e.strerror})"
+    return (f"{p}: mode {stat.S_IMODE(st.st_mode):o} uid {st.st_uid} "
+            f"{'writable' if os.access(p, os.W_OK) else 'NOT writable'}")
+
+
+def lighting_access_details(leds: list = None) -> str:
+    """Exactly which lighting file or device isn't writable, for reports when permission won't stick."""
+    leds = leds if leds is not None else find_leds()
+    lines = [f"user uid {os.getuid()}"]
+    for led in leds:
+        lines += [_file_access(led.path / f) for f in ("multi_intensity", "brightness")]
+    nodes = ally_hid_nodes(leds)
+    lines.append(f"lighting chip: {nodes['lighting']}  dynamic lighting: {nodes['dynamic']}  ids: {sorted(nodes['ids'])}")
+    lines += [_file_access(n) for n in (nodes["lighting"], nodes["dynamic"]) if n]
+    for h in hidraw_devices():
+        if h["vid"] == ASUS_VID:
+            lines.append(_file_access(h["node"]) + f" ({h['pid']:04x} {h['apps']})")
+    for rule in (UDEV_LED_RULE, HID_PERMISSION_RULE):
+        body = read_text(Path(rule))
+        lines.append(f"{rule}: " + (body.replace(chr(10), " | ")[:400] if body else "missing"))
+    for other in ("/dev/inputplumber", "/run/udev/rules.d"):
+        p = Path(other)
+        if p.is_dir():
+            lines.append(f"{other}: " + ", ".join(sorted(x.name for x in p.iterdir())[:20]))
+    lines.append(f"sysfs ok: {leds_writable(leds)}  chip found: {hid_available(leds)}  chip ok: {hid_writable(leds)}")
+    return "\n".join(lines)
+
+
+def hid_brightness_level(brightness: int) -> int:
+    if brightness <= 0:
+        return 0
+    return 1 if brightness < 85 else 2 if brightness < 170 else 3
+
+
+ZONE_NAMES = ("left_left", "left_right", "right_left", "right_right")
+
+# Routes the guided test tries one after another ("Method 1, Method 2, ..."). On the owner's Ally X the
+# chip packets can arrive without errors while the rings stay blue: the kernel's own LED driver
+# probably re-sends its capped (blue) value over ours. Each route varies one suspect.
+#   kernel_off  switch the rings off through sysfs first, so the kernel driver has nothing to re-send
+#   init        send the "ASUS Tech.Inc." handshake (HueSync only does this on a full reset)
+#   each        set the four zones one by one (HueSync's custom-color path) instead of zone "all"
+#   feature     send as HID feature reports instead of output reports
+HID_METHODS = {
+    "m1": {"name": "Chip only, kernel lights off", "kernel_off": True, "init": False, "each": False, "feature": False},
+    "m2": {"name": "Chip only, zone by zone", "kernel_off": True, "init": False, "each": True, "feature": False},
+    "m3": {"name": "Full handshake", "kernel_off": True, "init": True, "each": True, "feature": False},
+    "m4": {"name": "Feature reports", "kernel_off": True, "init": True, "each": True, "feature": True},
+    "m5": {"name": "Kernel lights left on", "kernel_off": False, "init": True, "each": False, "feature": False},
+    # m2-m4 can get red right, then the next color sticks or comes out mixed (left and right
+    # different). Partial updates point at packets sent too fast, and at switching the kernel's lights
+    # off before EVERY color, which makes its driver send its own packets at the same moment.
+    #   kernel_off "once"  only on the first send of a session, then wait `settle` seconds
+    #   commit "first"     set+apply (0xB5/0xB4) only on the first send or a mode change, like
+    #                      HueSync's custom-color path; later colors are just zone commands
+    #   gap / repeat       seconds between packets / send the whole sequence again after 0.2 s
+    "m6": {"name": "HueSync custom colors", "kernel_off": "once", "settle": 1.0, "init": False, "each": True,
+           "feature": False, "commit": "first", "gap": 0.02},
+    "m7": {"name": "Slow and steady", "kernel_off": "once", "settle": 1.0, "init": True, "each": True,
+           "feature": False, "gap": 0.03, "repeat": 2},
+    "m8": {"name": "Zone by zone, system lights untouched", "kernel_off": False, "init": False, "each": True,
+           "feature": False, "commit": "first", "gap": 0.02},
+}
+DEFAULT_HID_METHOD = "m3"      # used when no method is saved
+# what the guided test tries, in order (m1, m4 and m5 fail outright on the owner's Ally X)
+TEST_HID_METHODS = ("m6", "m7", "m8", "m2", "m3")
+_HID_SESSION = {}              # per method: kernel already switched off, last committed mode
+
+
+def hid_reset_session():
+    """Forget what was sent, so the next send does the full first-time sequence (new test, wake-up)."""
+    _HID_SESSION.clear()
+    _STREAM_CACHE.clear()
+
+
+def hid_method(name: str = None) -> dict:
+    return HID_METHODS.get(name or DEFAULT_HID_METHOD, HID_METHODS[DEFAULT_HID_METHOD])
+
+
+def hid_packets(mode: str, color: tuple, color2: tuple = (0, 0, 0), speed: str = "medium",
+                brightness: int = 255, zones: list = None, init: bool = True, each: bool = False,
+                direction: int = 0) -> list:
+    """64-byte packets that set the rings. zones: [(zone name, (r, g, b))] for per-zone solid colors."""
+    def c(v):
+        return [max(0, min(255, int(x))) for x in v]
+    if each and not zones:
+        zones = [(z, color) for z in ZONE_NAMES]
+    packets = ([_hid_buf([HID_REPORT] + list(b"ASUS Tech.Inc."))] if init else []) + [
+               _hid_buf(HID_RGB_ENABLE),
+               _hid_buf([HID_REPORT, 0xBA, 0xC5, 0xC4, hid_brightness_level(brightness)])]
+    for zone, col in (zones or [("all", color)]):
+        r, g, b = c(col)
+        r2, g2, b2 = c(color2)
+        packets.append(_hid_buf([HID_REPORT, 0xB3, HID_ZONES[zone], HID_MODES[mode], r, g, b,
+                                 HID_SPEEDS[speed] if mode != "solid" else 0x00, direction, 0x00, r2, g2, b2]))
+    packets += [_hid_buf([HID_REPORT, 0xB5]), _hid_buf([HID_REPORT, 0xB4])]
+    return packets
+
+
+def _shape_packets(packets: list, m: dict, mode: str, key: str) -> list:
+    """Apply a method's commit rule: drop set+apply when the mode was already committed."""
+    if m.get("commit") != "first":
+        return packets
+    sess = _HID_SESSION.setdefault(key, {})
+    if sess.get("mode") == mode:
+        return [p for p in packets if p[1] not in (0xB5, 0xB4, 0xBA)]
+    sess["mode"] = mode
+    return packets
+
+
+def _dynamic_off_for(m: dict, nodes: dict, key: str) -> Optional[str]:
+    """Windows Dynamic Lighting off: once per session for the gentle methods (HueSync does it once)."""
+    sess = _HID_SESSION.setdefault(key, {})
+    gentle = m.get("commit") == "first" or m.get("kernel_off") == "once"
+    if gentle and sess.get("dynamic_off"):
+        return None
+    sess["dynamic_off"] = True
+    return hid_dynamic_lighting_off(nodes)
+
+
+def _kernel_off_for(m: dict, leds: list, key: str) -> Optional[str]:
+    k = m.get("kernel_off")
+    if not k:
+        return None
+    sess = _HID_SESSION.setdefault(key, {})
+    if k == "once" and sess.get("kernel_off"):
+        return None
+    note = kernel_lights_off(leds)
+    sess["kernel_off"] = True
+    if m.get("settle"):
+        time.sleep(m["settle"])          # let the kernel driver finish its own packets first
+    return note
+
+
+def hid_effect_packets(effect: dict, brightness: int, init: bool = True, each: bool = False) -> list:
+    """Map an Ally Hub effect onto the chip's built-in modes."""
+    e = normalize_effect(effect)
+    cols = [hex_to_rgb(x) for x in e["colors"]] or [(255, 255, 255)]
+    speed = "slow" if e["speed"] < 0.7 else "medium" if e["speed"] < 1.5 else "fast"
+    kind = e["type"]
+    kw = {"init": init, "each": each}
+    if kind == "spiral":
+        # the chip's own spiral: rainbow only, speed and direction (hhd: 0x01 = turning left)
+        return hid_packets("spiral", (0, 0, 0), speed=speed, brightness=brightness, init=init,
+                           direction=0x01 if e.get("direction") == "ccw" else 0x00)
+    if kind == "static":
+        return hid_packets("solid", cols[0], brightness=brightness, **kw)
+    if kind == "cycle":
+        return hid_packets("rainbow", cols[0], speed=speed, brightness=brightness, **kw)
+    if kind in ("breathe", "pulse"):
+        return hid_packets("pulse", cols[0], (0, 0, 0), speed, brightness, **kw)
+    if kind == "strobe":
+        return hid_packets("pulse", cols[0], cols[1] if len(cols) > 1 else (0, 0, 0), "fast", brightness, **kw)
+    # wave, candle and twinkle: the chip's two-color pulse is the closest match
+    return hid_packets("pulse", cols[0], cols[1] if len(cols) > 1 else cols[0], speed, brightness, **kw)
+
+
+HIDIOCSFEATURE_64 = (3 << 30) | (64 << 16) | (ord("H") << 8) | 0x06
+
+
+def hid_send(node: Path, packets: list, feature: bool = False, gap: float = 0.004) -> tuple:
+    """Send packets to a hidraw node. Returns (ok, error text)."""
+    try:
+        fd = os.open(str(node), os.O_RDWR)
+    except OSError as e:
+        return False, f"open {node.name}: {e.strerror or e}"
+    try:
+        for pk in packets:
+            if feature:
+                fcntl.ioctl(fd, HIDIOCSFEATURE_64, pk)
+                time.sleep(gap)
+                continue
+            try:
+                os.write(fd, pk)
+            except OSError:
+                fcntl.ioctl(fd, HIDIOCSFEATURE_64, pk)     # some firmware only takes feature reports
+            time.sleep(gap)
+        return True, ""
+    except OSError as e:
+        return False, f"write {node.name}: {e.strerror or e}"
+    finally:
+        os.close(fd)
+
+
+def hid_dynamic_lighting_off(nodes: dict) -> str:
+    """Best effort: stop Windows Dynamic Lighting from overriding our colors. Returns a note."""
+    node = nodes.get("dynamic")
+    if not node:
+        return "no dynamic lighting interface"
+    try:
+        fd = os.open(str(node), os.O_RDWR)
+        try:
+            os.write(fd, HID_DYNAMIC_OFF)
+        finally:
+            os.close(fd)
+        return f"dynamic lighting off ({node.name})"
+    except OSError as e:
+        return f"dynamic lighting {node.name}: {e.strerror or e}"
+
+
+def kernel_lights_off(leds: list) -> str:
+    """Turn the rings off through the kernel driver, so it has no color of its own to re-send."""
+    done = []
+    for led in leds or []:
+        try:
+            (led.path / "brightness").write_text("0")
+            done.append(led.name)
+        except OSError as e:
+            return f"kernel off failed: {e.strerror or e}"
+    return f"kernel lights off ({', '.join(done)})" if done else "no kernel LED"
+
+
+def hid_streams(method: str = None) -> bool:
+    """Methods that commit once and then take bare zone commands can be animated frame by frame,
+    the way HueSync animates its custom effects (no chip-memory writes per frame)."""
+    return hid_method(method).get("commit") == "first"
+
+
+def uses_chip_effect(effect: dict) -> bool:
+    e = normalize_effect(effect)
+    return e["type"] == "spiral" and e.get("engine") == "chip"
+
+
+STREAM_FPS_MAX = 30          # HueSync's rate for HID devices like the Ally
+_STREAM_CACHE = {}
+
+
+def _stream_nodes(leds: list) -> dict:
+    """ally_hid_nodes, cached for a few seconds: frames go out up to 30 times a second."""
+    ck = (tuple(str(l.path) for l in leds), str(HIDRAW_ROOT), str(DEV_ROOT))
+    hit = _STREAM_CACHE.get(ck)
+    if hit and time.monotonic() - hit[1] < 10 and hit[0]["lighting"] and hit[0]["lighting"].exists():
+        return hit[0]
+    nodes = ally_hid_nodes(leds)
+    _STREAM_CACHE.clear()
+    if nodes["lighting"]:
+        _STREAM_CACHE[ck] = (nodes, time.monotonic())
+    return nodes
+
+
+def hid_zone_frame(zones: list, brightness: int, leds: list = None, method: str = None) -> bool:
+    """Send one frame (four zone colors) to the chip. Brightness is folded into the colors, which
+    dims smoothly instead of the chip's four brightness steps."""
+    leds = leds if leds is not None else find_leds()
+    m = hid_method(method)
+    key = method or DEFAULT_HID_METHOD
+    nodes = _stream_nodes(leds)
+    if not nodes["lighting"]:
+        return False
+    _kernel_off_for(m, leds, key)
+    _dynamic_off_for(m, nodes, key)
+    k = max(0, min(255, int(brightness))) / 255
+    scaled = [tuple(int(round(c * k)) for c in z) for z in zones]
+    packets = hid_packets("solid", scaled[0], zones=list(zip(ZONE_NAMES, scaled)), init=m["init"])
+    packets = _shape_packets(packets, m, "static:255", key)
+    gap = m.get("stream_gap", 0.006)
+    return hid_send(nodes["lighting"], packets, feature=m["feature"], gap=gap)[0]
+
+
+def hid_apply_effect(effect: dict, brightness: int, leds: list = None, method: str = None) -> bool:
+    leds = leds if leds is not None else find_leds()
+    if hid_streams(method) and not uses_chip_effect(effect):
+        # one still frame; the agent animates it (GUI previews, --apply-rgb, static colors)
+        return hid_zone_frame(zone_frames(effect, 0.0), brightness, leds, method)
+    m = hid_method(method)
+    key = method or DEFAULT_HID_METHOD
+    nodes = ally_hid_nodes(leds)
+    if not nodes["lighting"]:
+        return False
+    _kernel_off_for(m, leds, key)
+    _dynamic_off_for(m, nodes, key)
+    e = normalize_effect(effect)
+    packets = hid_effect_packets(e, brightness, init=m["init"], each=m["each"])
+    packets = _shape_packets(packets, m, f"{e['type']}:{brightness}", key)
+    return _send_method(nodes["lighting"], packets, m)[0]
+
+
+def _send_method(node: Path, packets: list, m: dict) -> tuple:
+    res = (True, "")
+    for i in range(max(1, int(m.get("repeat", 1)))):
+        if i:
+            time.sleep(0.2)
+        res = hid_send(node, packets, feature=m["feature"], gap=m.get("gap", 0.004))
+        if not res[0]:
+            break
+    return res
+
+
+def hid_test_color(leds: list, rgb: tuple, method: str = None) -> dict:
+    out = {"wrote": [], "readback": [], "errors": []}
+    m = hid_method(method)
+    key = method or DEFAULT_HID_METHOD
+    nodes = ally_hid_nodes(leds)
+    if nodes["lighting"]:
+        note = _kernel_off_for(m, leds, key)
+        if note:
+            out["readback"].append(note)
+        note = _dynamic_off_for(m, nodes, key)
+        if note:
+            out["readback"].append(note)
+        packets = _shape_packets(hid_packets("solid", rgb, init=m["init"], each=m["each"]), m, "static:255", key)
+        ok, err = _send_method(nodes["lighting"], packets, m)
+        out["wrote"].append(f"{nodes['lighting'].name} {method or DEFAULT_HID_METHOD} solid {rgb}")
+        if not ok:
+            out["errors"].append(err)
+    else:
+        out["errors"].append("no hidraw device for the lighting chip")
+    out["ok"] = not out["errors"]
+    return out
+
+
+def sysfs_color_capped(leds: list) -> bool:
+    """True when the kernel caps packed zones at 255, so sysfs can only make blue."""
+    return any(ch.lower() in PACKED_CHANNELS and 0 < m <= 255
+               for led in leds for ch, m in zip(led.channels, led.channel_max))
+
+
+def lighting_diagnostics() -> str:
+    """Plain-text inventory of every LED the kernel exposes, for bug reports and Ally Doctor."""
+    lines = []
+    if not LED_ROOT.exists():
+        return "no /sys/class/leds"
+    for d in sorted(LED_ROOT.iterdir()):
+        files = {}
+        for f in ("multi_index", "multi_intensity", "brightness", "max_brightness", "trigger"):
+            if (d / f).exists():
+                files[f] = read_text(d / f)[:120]
+        extra = {}
+        for x in sorted(d.iterdir())[:30]:
+            if x.is_file() and x.name not in files and x.name != "uevent":
+                extra[x.name] = read_text(x)[:120] if os.access(x, os.R_OK) else "(unreadable)"
+        w = "writable" if os.access(d / "multi_intensity", os.W_OK) else "read-only"
+        if "multi_intensity" in files:
+            probe = LedDevice(d, [], 255)
+            node = led_hidraw(probe)
+            extra["_hidraw"] = (f"{node} ids={led_usb_ids(probe)} "
+                                f"{'writable' if node and os.access(node, os.W_OK) else 'not writable'}"
+                                if node else "none found")
+        lines.append(f"{d.name}: {files} {w if 'multi_intensity' in files else 'not multicolor'} "
+                     f"other={extra}")
+    # every ASUS hidraw interface and its HID usage, so the right one can be picked from a report
+    for h in hidraw_devices():
+        if h["vid"] == ASUS_VID:
+            apps = ", ".join(f"{p:04x}/{u:04x}" for p, u in h["apps"]) or "?"
+            acc = "writable" if os.access(h["node"], os.W_OK) else "not writable"
+            lines.append(f"hid {h['node'].name} {h['vid']:04x}:{h['pid']:04x} usages {apps} {acc}")
+    return "\n".join(lines) or "no LEDs"
+
+
+# ==========================================================================
+# Lighting effects (rendered by the agent, previewed by the GUI)
+# ==========================================================================
+
+EFFECT_TYPES = {
+    #           display name     colors (min, max)  extra setting label
+    "static":  {"name": "Static",       "colors": (1, 1), "param": None},
+    "breathe": {"name": "Breathe",      "colors": (1, 1), "param": "Lowest brightness"},
+    "pulse":   {"name": "Heartbeat",    "colors": (1, 1), "param": None},
+    "cycle":   {"name": "Color cycle",  "colors": (0, 0), "param": "Color strength"},
+    "wave":    {"name": "Wave",         "colors": (2, 4), "param": None},
+    "strobe":  {"name": "Strobe",       "colors": (1, 2), "param": None},
+    "flicker": {"name": "Candle",       "colors": (1, 2), "param": "Flicker strength"},
+    "twinkle": {"name": "Twinkle",      "colors": (2, 2), "param": "Sparkle amount"},
+    "spiral":  {"name": "Spiral",       "colors": (0, 4), "param": "Color spread"},
+}
+EFFECT_DEFAULT_PARAM = {"breathe": 0.12, "cycle": 1.0, "flicker": 0.55, "twinkle": 0.45, "spiral": 0.75}
+# Spiral-only settings (other effect types never carry these keys, so saved effects stay as they were)
+SPIRAL_OPTIONS = {
+    "direction": (("cw", "Clockwise"), ("ccw", "Counter-clockwise")),
+    "layout": (("linked", "Flows across both sticks"), ("mirror", "Sticks mirror each other"),
+               ("same", "Both sticks match")),
+    "engine": (("smooth", "Smooth (Ally Hub)"), ("chip", "Built-in chip spiral")),
+}
+SPIRAL_DEFAULTS = {"direction": "cw", "layout": "linked", "engine": "smooth", "rainbow": True}
+# The rings have four lighting zones: the left and right half of each stick (ASUS zone order)
+ZONE_POS = ((0, 0), (0, 1), (1, 0), (1, 1))     # (stick, half) for left_left, left_right, right_left, right_right
+DEFAULT_COLORS = ["#e11d48", "#8b5cf6", "#06b6d4", "#22c55e"]
+
+PRESETS = {
+    "ROG Pulse":  {"type": "breathe", "colors": ["#ff0033"], "speed": 1.0, "param": 0.08},
+    "Xbox Glow":  {"type": "breathe", "colors": ["#22c55e"], "speed": 0.6, "param": 0.3},
+    "Rainbow":    {"type": "cycle", "colors": [], "speed": 1.0, "param": 1.0},
+    "Aurora":     {"type": "wave", "colors": ["#22c55e", "#14b8a6", "#6366f1", "#a855f7"], "speed": 0.55},
+    "Synthwave":  {"type": "wave", "colors": ["#ff2a6d", "#05d9e8"], "speed": 0.8},
+    "Ocean":      {"type": "wave", "colors": ["#0057ff", "#00d5ff", "#0033aa"], "speed": 0.35},
+    "Sakura":     {"type": "wave", "colors": ["#ff5fa2", "#ffd6e7"], "speed": 0.45},
+    "Ember":      {"type": "flicker", "colors": ["#ff5a00", "#ff1a00"], "speed": 1.0, "param": 0.6},
+    "Heartbeat":  {"type": "pulse", "colors": ["#ff0022"], "speed": 1.0},
+    "Starlight":  {"type": "twinkle", "colors": ["#2b1d8f", "#ffffff"], "speed": 1.0, "param": 0.5},
+    "RGB Spiral": {"type": "spiral", "colors": [], "speed": 1.0, "param": 0.75, "rainbow": True,
+                   "direction": "cw", "layout": "linked", "engine": "smooth"},
+    "Neon Vortex": {"type": "spiral", "colors": ["#ff2a6d", "#05d9e8", "#a855f7"], "speed": 1.4,
+                    "param": 1.0, "rainbow": False, "direction": "ccw", "layout": "mirror", "engine": "smooth"},
+}
+
+
+def _valid_hex(c) -> bool:
+    return isinstance(c, str) and re.fullmatch(r"#[0-9a-fA-F]{6}", c) is not None
+
+
+def normalize_effect(e) -> dict:
+    """Fill in defaults and clamp values so any stored effect is safe to render."""
+    e = dict(e or {})
+    etype = e.get("type") if e.get("type") in EFFECT_TYPES else "static"
+    lo, hi = EFFECT_TYPES[etype]["colors"]
+    colors = [c.lower() for c in (e.get("colors") or []) if _valid_hex(c)][:hi]
+    extra = {}
+    if etype == "spiral":
+        for k, opts in SPIRAL_OPTIONS.items():
+            extra[k] = e.get(k) if e.get(k) in [o for o, _ in opts] else SPIRAL_DEFAULTS[k]
+        extra["rainbow"] = bool(e.get("rainbow", SPIRAL_DEFAULTS["rainbow"]))
+        if not extra["rainbow"]:
+            lo = 2                                # a color spiral needs at least two colors
+    while len(colors) < lo:
+        colors.append(DEFAULT_COLORS[len(colors) % len(DEFAULT_COLORS)])
+    try:
+        speed = max(0.1, min(4.0, float(e.get("speed", 1.0))))
+    except (TypeError, ValueError):
+        speed = 1.0
+    try:
+        param = max(0.0, min(1.0, float(e.get("param", EFFECT_DEFAULT_PARAM.get(etype, 0.5)))))
+    except (TypeError, ValueError):
+        param = EFFECT_DEFAULT_PARAM.get(etype, 0.5)
+    return {"type": etype, "colors": colors, "speed": speed, "param": param, **extra}
+
+
+def is_animated(e: dict) -> bool:
+    return normalize_effect(e)["type"] != "static"
+
+
+def _hash01(i: int, seed: int) -> float:
+    x = (i * 374761393 + seed * 668265263) & 0xFFFFFFFF
+    x = ((x ^ (x >> 13)) * 1274126177) & 0xFFFFFFFF
+    return (x ^ (x >> 16)) / 0xFFFFFFFF
+
+
+def _noise(x: float, seed: int) -> float:
+    i = math.floor(x)
+    f = x - i
+    f = f * f * (3 - 2 * f)
+    return _hash01(i, seed) * (1 - f) + _hash01(i + 1, seed) * f
+
+
+def _lerp(a: tuple, b: tuple, t: float) -> tuple:
+    return tuple(a[k] + (b[k] - a[k]) * t for k in range(3))
+
+
+def render_effect(e: dict, t: float) -> tuple:
+    """Color and brightness factor of an effect at time t (seconds).
+    Returns ((r, g, b) floats 0..255, factor 0..1)."""
+    e = normalize_effect(e)
+    kind, sp, p = e["type"], e["speed"], e["param"]
+    cols = [hex_to_rgb(c) for c in e["colors"]]
+    if kind == "static":
+        return cols[0], 1.0
+    if kind == "breathe":
+        ph = (t * sp / 4.0) % 1.0
+        return cols[0], p + (1 - p) * (0.5 - 0.5 * math.cos(2 * math.pi * ph))
+    if kind == "pulse":
+        ph = (t * sp / 1.2) % 1.0
+        beat = max(math.exp(-((ph - 0.08) / 0.05) ** 2), 0.7 * math.exp(-((ph - 0.3) / 0.05) ** 2))
+        return cols[0], 0.06 + 0.94 * beat
+    if kind == "cycle":
+        r, g, b = colorsys.hsv_to_rgb((t * sp * 0.08) % 1.0, max(0.05, p), 1.0)
+        return (r * 255, g * 255, b * 255), 1.0
+    if kind == "wave":
+        n = len(cols)
+        pos = (t * sp / 3.0) % n
+        i = int(pos)
+        f = pos - i
+        f = f * f * (3 - 2 * f)
+        return _lerp(cols[i], cols[(i + 1) % n], f), 1.0
+    if kind == "strobe":
+        rate = sp * 2.0
+        idx = int(t * rate)
+        on = (t * rate) % 1.0 < (0.5 if len(cols) == 1 else 0.85)
+        return cols[idx % len(cols)], 1.0 if on else 0.0
+    if kind == "flicker":
+        n = 0.6 * _noise(t * 7 * sp, 1) + 0.4 * _noise(t * 19 * sp, 2)
+        color = _lerp(cols[0], cols[-1], _noise(t * 1.5 * sp, 3))
+        return color, (1 - p) + p * n
+    if kind == "twinkle":
+        slot_rate = 3.0 * sp
+        k = math.floor(t * slot_rate)
+        spike = 0.0
+        if _hash01(k, 7) < 0.15 + 0.7 * p:
+            spike = math.sin(math.pi * ((t * slot_rate) % 1.0)) ** 2
+        return _lerp(cols[0], cols[1], spike), 0.75 + 0.25 * spike
+    return cols[0], 1.0
+
+
+def effect_frame(e: dict, t: float) -> tuple:
+    """Integer RGB intensities for an LED at time t (brightness folded in)."""
+    e = normalize_effect(e)
+    if e["type"] == "spiral":
+        return zone_frames(e, t)[0]
+    color, f = render_effect(e, t)
+    return tuple(max(0, min(255, int(round(c * f)))) for c in color)
+
+
+def _spiral_color(e: dict, u: float) -> tuple:
+    if e.get("rainbow"):
+        r, g, b = colorsys.hsv_to_rgb(u % 1.0, 1.0, 1.0)
+        return (r * 255, g * 255, b * 255)
+    cols = [hex_to_rgb(c) for c in e["colors"]]
+    x = (u % 1.0) * len(cols)
+    i = int(x)
+    f = x - i
+    f = f * f * (3 - 2 * f)
+    return _lerp(cols[i % len(cols)], cols[(i + 1) % len(cols)], f)
+
+
+def zone_frames(e: dict, t: float) -> list:
+    """RGB for each of the four ring zones at time t. Only Spiral differs per zone; every other
+    effect shows the same color on all zones, exactly like its preview."""
+    e = normalize_effect(e)
+    if e["type"] != "spiral":
+        return [effect_frame(e, t)] * 4
+    turn = 1 if e["direction"] == "cw" else -1
+    phase = t * e["speed"] * 0.35
+    out = []
+    for stick, half in ZONE_POS:
+        d, pos = turn, half / 2
+        if e["layout"] == "linked":
+            pos = (stick * 2 + half) / 4
+        elif e["layout"] == "mirror" and stick == 1:
+            d, pos = -turn, (1 - half) / 2
+        c = _spiral_color(e, d * phase + pos * e["param"])
+        out.append(tuple(max(0, min(255, int(round(v)))) for v in c))
+    return out
+
+
+def effect_label(e: dict) -> str:
+    e = normalize_effect(e)
+    for name, p in PRESETS.items():
+        if normalize_effect(p) == e:
+            return name
+    return EFFECT_TYPES[e["type"]]["name"]
+
+
+def lookup_effect(ref, cfg: dict = None) -> Optional[dict]:
+    """Resolve '#rrggbb', 'preset:Name' or an effect dict to an effect."""
+    if isinstance(ref, dict):
+        return normalize_effect(ref)
+    if _valid_hex(ref):
+        return normalize_effect({"type": "static", "colors": [ref]})
+    if isinstance(ref, str) and ref.startswith("preset:"):
+        name = ref[7:]
+        custom = ((cfg or load_config()).get("lighting") or {}).get("custom") or {}
+        if name in PRESETS:
+            return normalize_effect(PRESETS[name])
+        if name in custom:
+            return normalize_effect(custom[name])
+    return None
+
+
+def base_effect(cfg: dict) -> Optional[dict]:
+    """The user's chosen lighting: an effect, or their static color."""
+    eff = (cfg.get("lighting") or {}).get("effect")
+    if eff:
+        return normalize_effect(eff)
+    rgb = cfg.get("rgb")
+    if rgb:
+        return normalize_effect({"type": "static", "colors": [rgb_to_hex(rgb.get("rgb", (225, 29, 72)))]})
+    return None
+
+
+def lighting_shelved(cfg: dict = None) -> bool:
+    """True when ring lighting is left to HueSync and Ally Hub must not touch the LEDs."""
+    return ((cfg or load_config()).get("lighting") or {}).get("controller", "huesync") != "allyhub"
+
+
+def led_permission_cmd(leds: list = None) -> str:
+    """One password prompt that covers everything lighting needs: the sysfs ring files and,
+    when the controller has one, the lighting chip's hidraw interfaces."""
+    rule = ('ACTION=="add|change", SUBSYSTEM=="leds", KERNEL=="*:rgb:*", '
+            'RUN+="/bin/sh -c \'chmod a+w /sys%p/brightness /sys%p/multi_intensity '
+            '/sys%p/effect /sys%p/direction /sys%p/speed 2>/dev/null; true\'"')
+    parts = [f"echo {shlex.quote(rule)} | tee {UDEV_LED_RULE} >/dev/null"]
+    hid = hid_rules(leds) if leds is not None else []
+    if hid:
+        body = "\n".join([RULES_MARKER] + hid)
+        parts.append(f"printf '%s\\n' {shlex.quote(body)} | tee {HID_PERMISSION_RULE} >/dev/null")
+    parts += ["udevadm control --reload",
+              "udevadm trigger --subsystem-match=leds --action=change",
+              "udevadm trigger --subsystem-match=hidraw --action=change", "sleep 1"]
+    # also open them up right now, so it works this session even if udev is slow or overridden
+    now = []
+    for led in leds or []:
+        now += [str(led.path / f) for f in ("brightness", "multi_intensity", "effect", "mode")
+                if (led.path / f).exists()]
+    if now:
+        parts.append("{ chmod a+w " + " ".join(shlex.quote(x) for x in now) + " 2>/dev/null; true; }")
+    if leds is not None:
+        nodes = ally_hid_nodes(leds)
+        hid_now = [str(n) for n in (nodes["lighting"], nodes["dynamic"]) if n]
+        if hid_now:
+            parts.append("{ chmod 0666 " + " ".join(shlex.quote(x) for x in hid_now) + " 2>/dev/null; true; }")
+    return ("sudo sh -c " + shlex.quote(" && ".join(parts)) +
+            " && echo 'Lighting is now allowed without a password.'")
+
+
+def battery_color(pct: int) -> tuple:
+    """Red at 0%, yellow at 50%, green at 100%."""
+    pct = max(0, min(100, pct))
+    if pct < 50:
+        return (255, int(255 * pct / 50), 0)
+    return (int(255 * (100 - pct) / 50), 255, 0)
+
+
+# ==========================================================================
+# Wake-on-LAN
+# ==========================================================================
+
+def normalize_mac(mac: str) -> Optional[str]:
+    hexes = re.sub(r"[^0-9a-fA-F]", "", mac or "")
+    return hexes.lower() if len(hexes) == 12 else None
+
+
+def send_wol(mac: str, broadcast: str = "255.255.255.255") -> bool:
+    m = normalize_mac(mac)
+    if not m:
+        return False
+    packet = b"\xff" * 6 + bytes.fromhex(m) * 16
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            for port in (9, 7):
+                s.sendto(packet, (broadcast or "255.255.255.255", port))
+        return True
+    except OSError:
+        return False
+
+
+# ==========================================================================
+# Health log
+# ==========================================================================
+
+def read_health(since: float = 0) -> list:
+    rows = []
+    try:
+        with open(HEALTH_FILE) as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if r.get("t", 0) >= since:
+                    rows.append(r)
+    except OSError:
+        pass
+    return rows
+
+
+def per_game_drain(rows: list) -> list:
+    """[(appid, avg_watts, samples)] for rows logged on battery during a game."""
+    acc = {}
+    for r in rows:
+        g, w = r.get("game"), r.get("w")
+        if g and w and r.get("st") == "Discharging":
+            s = acc.setdefault(g, [0.0, 0])
+            s[0] += w
+            s[1] += 1
+    return sorted(((g, s[0] / s[1], s[1]) for g, s in acc.items() if s[1] >= 3),
+                  key=lambda x: -x[1])
+
+
+# ==========================================================================
+# Themes
+# ==========================================================================
+
+THEMES = {
+    "ROG Crimson": dict(bg="#0e1016", side="#13151d", surface="#171a24", surface2="#232838",
+                        border="#2e3448", text="#e7e9f0", muted="#8a91a6",
+                        accent="#e11d48", accent2="#8b5cf6",
+                        hero=("#3b0a1e", "#2a0f4a", "#0f1a3a"), on_accent="#ffffff"),
+    "Xbox Green": dict(bg="#0a0f0b", side="#0f1510", surface="#141c15", surface2="#1d2a1f",
+                       border="#2a3b2c", text="#e8f0e9", muted="#8aa18f",
+                       accent="#107c10", accent2="#5dc21e",
+                       hero=("#0b3d0b", "#14361a", "#0b1f14"), on_accent="#ffffff"),
+    "Midnight Blue": dict(bg="#0a0f1e", side="#0e1427", surface="#131a30", surface2="#1c2542",
+                          border="#2a3557", text="#e6ebf7", muted="#8792b3",
+                          accent="#3b82f6", accent2="#06b6d4",
+                          hero=("#0f2350", "#14305e", "#0a3a4a"), on_accent="#ffffff"),
+    "Synthwave": dict(bg="#120b1f", side="#170e28", surface="#1d1232", surface2="#2a1a47",
+                      border="#3d2763", text="#f6e9ff", muted="#a68cc7",
+                      accent="#ff2a6d", accent2="#05d9e8",
+                      hero=("#4a0d3a", "#2d1060", "#0b3b5c"), on_accent="#ffffff"),
+    "Sunset": dict(bg="#140d0c", side="#1a1110", surface="#211614", surface2="#2f201c",
+                   border="#45302a", text="#fbeee8", muted="#b39187",
+                   accent="#f97316", accent2="#ec4899",
+                   hero=("#5a1e08", "#4a1131", "#2a0f2a"), on_accent="#ffffff"),
+    "OLED Black": dict(bg="#000000", side="#050505", surface="#0b0b0d", surface2="#16161a",
+                       border="#24242a", text="#f2f2f5", muted="#86868f",
+                       accent="#f2f2f5", accent2="#7c7c88",
+                       hero=("#121214", "#0a0a0c", "#000000"), on_accent="#000000"),
+    "Matrix": dict(bg="#020a04", side="#041007", surface="#07160b", surface2="#0c2213",
+                   border="#14361e", text="#d6ffe0", muted="#6fae80",
+                   accent="#22c55e", accent2="#84cc16",
+                   hero=("#063314", "#0a2a10", "#021a08"), on_accent="#02140a"),
+    "Frost Light": dict(bg="#f3f4f8", side="#e9ebf2", surface="#ffffff", surface2="#eceef5",
+                        border="#d5d9e5", text="#151826", muted="#5d6479",
+                        accent="#6366f1", accent2="#ec4899",
+                        hero=("#e0e3ff", "#f3e1f5", "#dff1ff"), on_accent="#ffffff"),
+}
+
+
+def theme_palette(theme_cfg: dict) -> dict:
+    pal = dict(THEMES.get(theme_cfg.get("preset"), THEMES["ROG Crimson"]))
+    if theme_cfg.get("accent"):
+        pal["accent"] = theme_cfg["accent"]
+    if theme_cfg.get("accent2"):
+        pal["accent2"] = theme_cfg["accent2"]
+    pal["light"] = theme_cfg.get("preset") == "Frost Light"
+    return pal
+
+
+# ==========================================================================
+# Catalog
+# ==========================================================================
+
+@dataclass
+class Item:
+    id: str
+    name: str
+    category: str
+    desc: str
+    monogram: str
+    color: str
+    install: str
+    check: Callable[[dict], bool]
+    uninstall: Optional[str] = None
+    open_cmd: Optional[str] = None
+    warn: str = ""
+    requires: tuple = ()
+    recommended: bool = False
+    kind: str = "install"
+    decky_names: tuple = ()
+
+
+def flatpak_install_cmd(app_id: str) -> str:
+    return ("flatpak remote-add --user --if-not-exists flathub "
+            "https://dl.flathub.org/repo/flathub.flatpakrepo && "
+            f"flatpak install --user -y --noninteractive flathub {app_id}")
+
+
+def flatpak_item(app_id, name, category, desc, monogram, color, recommended=False, warn="") -> Item:
+    return Item(
+        id=app_id, name=name, category=category, desc=desc, monogram=monogram, color=color,
+        install=flatpak_install_cmd(app_id),
+        uninstall=f"flatpak uninstall -y --noninteractive {app_id} || "
+                  f"flatpak uninstall --user -y --noninteractive {app_id}",
+        open_cmd=f"flatpak run {app_id}",
+        check=lambda s, a=app_id: a in s["flatpaks"],
+        recommended=recommended, warn=warn,
+    )
+
+
+def decky_match(names: tuple, state: dict) -> list:
+    dirs = []
+    for key, info in state.get("decky", {}).items():
+        base = Path(info["dir"]).name.lower()
+        if any(n in key or n in base for n in names):
+            dirs.append(info["dir"])
+    return dirs
+
+
+def github_decky_install_cmd(repo: str, asset: str, plugin_names: tuple) -> str:
+    """Install a Decky plugin the way Bazzite's ujust recipes do: the newest stable GitHub release
+    (releases/latest never points at a pre-release). Any older copy, including a pre-release saved under
+    another folder name, is removed first, but only after the download worked. Plugin settings live in
+    ~/homebrew/settings, so they're kept."""
+    url = shlex.quote(f"https://github.com/{repo}/releases/latest/download/{asset}")
+    names = "|".join(re.escape(n) for n in plugin_names)
+    match = shlex.quote(f'"name"[[:space:]]*:[[:space:]]*"({names})"')
+    return (
+        'tmp=$(mktemp -d) && '
+        f'curl -fL -o "$tmp/p.zip" {url} && '
+        'python3 -m zipfile -e "$tmp/p.zip" "$tmp/out" && '
+        'ls -d "$tmp/out"/*/ >/dev/null && '
+        'sudo mkdir -p "$HOME/homebrew/plugins" && '
+        '{ for d in "$HOME/homebrew/plugins"/*/; do '
+        f'grep -qiE {match} "$d/plugin.json" 2>/dev/null && sudo rm -rf "$d"; done; true; }} && '
+        'for d in "$tmp/out"/*/; do n=$(basename "$d"); '
+        'sudo rm -rf "$HOME/homebrew/plugins/$n"; '
+        'sudo cp -r "$d" "$HOME/homebrew/plugins/$n"; '
+        'sudo chown -R "$USER:$USER" "$HOME/homebrew/plugins/$n"; done && '
+        'sudo systemctl restart plugin_loader; rc=$?; rm -rf "$tmp"; exit $rc'
+    )
+
+
+# ---------- NonSteamLaunchers, driven from Ally Hub's own page ----------
+# NSL's script installs launchers silently when given their names as arguments (its Decky plugin's method).
+# A stand-in `zenity` turns its windows into Activity log lines and answers "no" to questions.
+# NSL works out the Steam account ID from loginusers.vdf and can get it wrong, and then its NSLGameScanner
+# (which adds the Steam shortcuts) exits with "shortcuts.vdf does not exist" every time.
+# So Ally Hub fixes the ID in NSL's env_vars before scanning, runs the scanner itself, and if a
+# shortcut still isn't there, adds it the same way the scanner does: SteamClient.Apps through Steam's local
+# CEF debugger (127.0.0.1:8080, the port Decky Loader already opens).
+NSL_SCRIPT_URL = "https://raw.githubusercontent.com/moraroy/NonSteamLaunchers-On-Steam-Deck/main/NonSteamLaunchers.sh"
+COMPATDATA = STEAM_ROOT / "steamapps/compatdata"
+NSL_SHARED = "NonSteamLaunchers"
+NSL_PREFIX = COMPATDATA / NSL_SHARED / "pfx/drive_c"
+NSL_SEPARATE = "SEPARATE APP IDS - CHECK THIS TO SEPARATE YOUR PREFIX"
+NSL_USER_DIR = HOME / ".config/systemd/user"
+NSL_ENV = NSL_USER_DIR / "env_vars"
+NSL_SCANNER = NSL_USER_DIR / "NSLGameScanner.py"
+NSL_LOG = DATA_DIR / "nonsteamlaunchers.log"
+NSL_DOWNLOADS = HOME / "Downloads/NonSteamLaunchersInstallation"
+SHORTCUT_APP_TYPE = 1073741824           # Steam's app_type for non-Steam shortcuts
+STEAM_ID64_BASE = 76561197960265728
+CEF_PORT = 8080
+
+# Stores: name -> (exe inside drive_c, own-prefix folder when "separate" is used, extra args, NSL uninstall name)
+NSL_STORES = {
+    "Epic Games": ("Program Files/Epic Games/Launcher/Portal/Binaries/Win64/EpicGamesLauncher.exe",
+                   "EpicGamesLauncher", "-opengl", "Epic Games"),
+    "GOG Galaxy": ("Program Files (x86)/GOG Galaxy/GalaxyClient.exe", "GogGalaxyLauncher", "", "GOG Galaxy"),
+    "Ubisoft Connect": ("Program Files (x86)/Ubisoft/Ubisoft Game Launcher/upc.exe", "UplayLauncher", "", "Uplay"),
+    "Battle.net": ("Program Files (x86)/Battle.net/Battle.net Launcher.exe", "Battle.netLauncher", "", "Battle.net"),
+    "EA App": ("Program Files/Electronic Arts/EA Desktop/EA Desktop/EALauncher.exe", "TheEAappLauncher", "",
+               "EA App"),
+    "Amazon Games": ("users/steamuser/AppData/Local/Amazon Games/App/Amazon Games.exe", "AmazonGamesLauncher", "",
+                     "Amazon Games"),
+    "Rockstar Games Launcher": ("Program Files/Rockstar Games/Launcher/Launcher.exe", "RockstarGamesLauncher", "",
+                                "Rockstar Games Launcher"),
+    "itch.io": ("users/steamuser/AppData/Local/itch/itch.exe", "itchioLauncher", "", "itch.io"),
+    "Humble Games Collection": ("Program Files/Humble App/Humble App.exe", "HumbleGamesLauncher", "",
+                                "Humble Games Collection"),
+    "Legacy Games": ("Program Files/Legacy Games/Legacy Games Launcher/Legacy Games Launcher.exe",
+                     "LegacyGamesLauncher", "", "Legacy Games"),
+    "IndieGala": ("Program Files/IGClient/IGClient.exe", "IndieGalaLauncher", "", "IndieGala"),
+    "Minecraft Launcher": ("Program Files (x86)/Minecraft Launcher/MinecraftLauncher.exe", "MinecraftLauncher", "",
+                           "Minecraft Launcher"),
+    "Playstation Plus": ("Program Files (x86)/PlayStationPlus/pspluslauncher.exe", "PlaystationPlusLauncher", "",
+                         "Playstation Plus"),
+    "HoYoPlay": ("Program Files/HoYoPlay/launcher.exe", "HoYoPlayLauncher", "", "HoYoPlay"),
+    "Game Jolt Client": ("users/steamuser/AppData/Local/GameJoltClient/GameJoltClient.exe", "GameJoltLauncher", "",
+                         "Game Jolt Client"),
+}
+# Web and cloud: opened in Chrome (Flatpak), exactly like NSL's own shortcuts
+NSL_WEB = {
+    "Xbox Game Pass": "https://www.xbox.com/play", "Better xCloud": "https://better-xcloud.github.io",
+    "GeForce Now": "https://play.geforcenow.com", "Amazon Luna": "https://luna.amazon.com",
+    "Boosteroid Cloud Gaming": "https://cloud.boosteroid.com", "Youtube": "https://www.youtube.com",
+    "Netflix": "https://www.netflix.com", "Twitch": "https://www.twitch.tv", "Disney+": "https://www.disneyplus.com",
+    "Amazon Prime Video": "https://www.amazon.com/primevideo", "Crunchyroll": "https://www.crunchyroll.com",
+    "Plex": "https://app.plex.tv/desktop/#!", "Hulu": "https://www.hulu.com/welcome",
+}
+CHROME_OPTIONS = ("run --branch=stable --arch=x86_64 --command=/app/bin/chrome --file-forwarding "
+                  "com.google.Chrome @@u @@ --window-size=1280,800 --force-device-scale-factor=1.00 "
+                  "--device-scale-factor=1.00 --start-fullscreen --no-first-run --enable-features=OverlayScrollbar")
+NSL_GROUPS = {
+    "Game stores": [(n, v[0]) for n, v in NSL_STORES.items()],
+    "Cloud gaming": [(n, "") for n in ("Xbox Game Pass", "Better xCloud", "GeForce Now", "Amazon Luna",
+                                       "Boosteroid Cloud Gaming", "Moonlight Game Streaming")],
+    "TV and video": [(n, "") for n in ("Youtube", "Netflix", "Twitch", "Disney+", "Amazon Prime Video",
+                                       "Crunchyroll", "Plex", "Hulu")],
+}
+NSL_NAMES = {name for group in NSL_GROUPS.values() for name, _ in group}
+
+# Bash stand-in for zenity, used only for these jobs: progress text -> log lines, questions -> "no".
+NSL_ZENITY = r"""#!/bin/sh
+mode=""; text=""
+for a in "$@"; do
+  case "$a" in
+    --progress|--question|--info|--warning|--error|--list|--entry|--file-selection) mode="$a" ;;
+    --text=*) text="${a#--text=}" ;;
+  esac
+done
+case "$mode" in
+  --progress) while IFS= read -r line; do case "$line" in "#"*) echo "${line#\# }" ;; esac; done; exit 0 ;;
+  --info|--warning|--error) [ -n "$text" ] && echo "$text"; exit 0 ;;
+  *) [ -n "$text" ] && echo "(skipped question: $text)"; exit 1 ;;
+esac
+"""
+
+
+# ----- where things are -----
+
+def nsl_exe(name: str) -> Optional[Path]:
+    """The installed launcher's .exe (shared prefix first, then its own prefix), or None."""
+    info = NSL_STORES.get(name)
+    if not info:
+        return None
+    rel, own, _args, _u = info
+    for drive in (NSL_PREFIX, COMPATDATA / own / "pfx/drive_c"):
+        p = drive / rel
+        if p.exists():
+            return p
+        if name == "EA App":                 # EA moves EALauncher.exe around between versions
+            hits = list((drive / "Program Files/Electronic Arts").rglob("EALauncher.exe")) \
+                if (drive / "Program Files/Electronic Arts").exists() else []
+            if hits:
+                return hits[0]
+    return None
+
+
+def nsl_installed(name: str) -> bool:
+    return nsl_exe(name) is not None
+
+
+def nsl_compatdata_for(exe: Path) -> Path:
+    """compatdata/<prefix> that holds this exe."""
+    parts = exe.parts
+    i = parts.index("compatdata")
+    return Path(*parts[:i + 2])
+
+
+def steam_user_id3() -> Optional[str]:
+    """The signed-in Steam account's userdata folder name. NSL's own guess can be wrong."""
+    best, best_key = None, None
+    for f in (STEAM_ROOT / "config/loginusers.vdf", HOME / ".steam/root/config/loginusers.vdf"):
+        text = read_text(f)
+        for sid, body in re.findall(r'"(\d{17})"\s*\{([^{}]*)\}', text):
+            recent = 1 if re.search(r'"MostRecent"\s*"1"', body, re.I) else 0
+            m = re.search(r'"Timestamp"\s*"(\d+)"', body, re.I)
+            key = (recent, int(m.group(1)) if m else 0)
+            id3 = str(int(sid) - STEAM_ID64_BASE)
+            if (HOME / ".steam/root/userdata" / id3).exists() and (best_key is None or key > best_key):
+                best, best_key = id3, key
+        if best:
+            return best
+    # no usable loginusers.vdf: the userdata folder Steam touched last
+    dirs = [d for d in (HOME / ".steam/root/userdata").glob("*") if d.name.isdigit() and d.name != "0"]
+    dirs.sort(key=lambda d: max((p.stat().st_mtime for p in (d / "config").glob("*.vdf")), default=0),
+              reverse=True)
+    return dirs[0].name if dirs else None
+
+
+def shortcuts_vdf(id3: str = None) -> Optional[Path]:
+    id3 = id3 or steam_user_id3()
+    return HOME / ".steam/root/userdata" / id3 / "config/shortcuts.vdf" if id3 else None
+
+
+def steam_shortcut_names() -> set:
+    """App names in every Steam user's non-Steam shortcuts (binary shortcuts.vdf, read loosely)."""
+    names = set()
+    for f in (HOME / ".steam/root/userdata").glob("*/config/shortcuts.vdf"):
+        try:
+            data = f.read_bytes()
+        except OSError:
+            continue
+        for m in re.finditer(rb"\x01(?:appname|AppName)\x00([^\x00]*)\x00", data):
+            names.add(m.group(1).decode("utf-8", "replace"))
+    return names
+
+
+# ----- shell pieces -----
+
+def _nsl_prep_shell(id3: Optional[str]) -> str:
+    """Give NSL's scanner the right Steam account and a shortcuts.vdf it won't wipe (it empties the file
+    when it isn't executable). The real file is backed up first."""
+    if not id3:
+        return "echo 'Could not find your Steam account folder.'"
+    vdf_path = shlex.quote(str(shortcuts_vdf(id3)))
+    env = shlex.quote(str(NSL_ENV))
+    backup = shlex.quote(str(DATA_DIR / "shortcuts.vdf.bak"))
+    return (
+        f'mkdir -p "$(dirname {vdf_path})" {shlex.quote(str(NSL_USER_DIR))} && touch {env} && '
+        f'sed -i "/^export steamid3=/d" {env} && echo "export steamid3={id3}" >> {env} && '
+        f'grep -q "^export logged_in_home=" {env} || echo "export logged_in_home={HOME}" >> {env}; '
+        f'if [ -s {vdf_path} ]; then cp {vdf_path} {backup}; '
+        f"else printf '\\000shortcuts\\000\\010\\010' > {vdf_path}; fi; chmod 755 {vdf_path}"
+    )
+
+
+def _shim_shell() -> str:
+    return ('shim=$(mktemp -d) && '
+            f"printf '%s' {shlex.quote(NSL_ZENITY)} > \"$shim/zenity\" && chmod +x \"$shim/zenity\" && "
+            f'curl -fsSL {shlex.quote(NSL_SCRIPT_URL)} -o "$shim/nsl.sh"')
+
+
+def _scan_shell() -> str:
+    log = shlex.quote(str(NSL_LOG))
+    return (
+        'echo "Adding the new launchers to your Steam library..."; '
+        'systemctl --user stop nslgamescanner.service 2>/dev/null; '
+        f'if [ -f {shlex.quote(str(NSL_SCANNER))} ]; then '
+        f'timeout 600 python3 {shlex.quote(str(NSL_SCANNER))} > "$shim/scan.log" 2>&1; '
+        f'echo "scanner exit $?" >> "$shim/scan.log"; tail -n 60 "$shim/scan.log" | tee -a {log}; fi; '
+        'systemctl --user start nslgamescanner.service 2>/dev/null; true'
+    )
+
+
+def nsl_install_cmd(names: list, separate: bool = False, id3: str = None) -> Optional[str]:
+    """One job: run NonSteamLaunchers for the chosen launchers, fix its Steam account, then scan."""
+    picked = [n for n in names if n in NSL_NAMES]
+    if not picked:
+        return None
+    if any(n in NSL_WEB for n in picked):
+        picked.append("Google Chrome")       # NSL builds web shortcuts only when a browser is chosen
+    args = ([NSL_SEPARATE] if separate else []) + picked
+    id3 = id3 if id3 is not None else steam_user_id3()
+    log = shlex.quote(str(NSL_LOG))
+    return (
+        _shim_shell() + ' && ' + f'mkdir -p {shlex.quote(str(DATA_DIR))} && ' +
+        f'{{ PATH="$shim:$PATH" bash "$shim/nsl.sh" ' + " ".join(shlex.quote(a) for a in args) +
+        f' 2>&1; echo "nsl exit $?"; }} | tee {log}; '
+        f'rc=$(grep "^nsl exit " {log} | tail -n1 | sed "s/^nsl exit //"); ' +
+        _nsl_prep_shell(id3) + '; ' + _scan_shell() + '; '
+        'rm -rf "$shim"; [ "${rc:-1}" = 0 ] && echo "Done."; exit "${rc:-1}"'
+    )
+
+
+def nsl_uninstall_cmd(names: list) -> Optional[str]:
+    """Remove launchers with NSL's own uninstaller (program files and own prefix). Steam tiles are removed
+    separately through Steam (cef_remove_shortcuts)."""
+    stores = [NSL_STORES[n][3] for n in names if n in NSL_STORES]
+    if not stores:
+        return None
+    args = " ".join(shlex.quote(f"Uninstall {u}") for u in stores)
+    return (_shim_shell() + ' && ' + f'mkdir -p {shlex.quote(str(DATA_DIR))} && '
+            f'{{ PATH="$shim:$PATH" bash "$shim/nsl.sh" {args} 2>&1; echo "nsl exit $?"; }} '
+            f'| tee {shlex.quote(str(NSL_LOG))}; rm -rf "$shim"; echo "Uninstall finished."')
+
+
+# ----- Steam's own API through its local debugger (what NSL's scanner and Decky use) -----
+
+def _ws_send(sock, text: str):
+    data = text.encode()
+    head = bytearray([0x81])
+    n = len(data)
+    if n < 126:
+        head.append(0x80 | n)
+    elif n < 65536:
+        head += bytes([0x80 | 126]) + n.to_bytes(2, "big")
+    else:
+        head += bytes([0x80 | 127]) + n.to_bytes(8, "big")
+    mask = os.urandom(4)
+    sock.sendall(bytes(head) + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(data)))
+
+
+def _recv_exact(sock, n: int) -> bytes:
+    buf = b""
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise ConnectionError("closed")
+        buf += chunk
+    return buf
+
+
+def _ws_recv(sock) -> Optional[str]:
+    parts = []
+    while True:
+        b1, b2 = _recv_exact(sock, 2)
+        n = b2 & 0x7F
+        if n == 126:
+            n = int.from_bytes(_recv_exact(sock, 2), "big")
+        elif n == 127:
+            n = int.from_bytes(_recv_exact(sock, 8), "big")
+        mask = _recv_exact(sock, 4) if b2 & 0x80 else None
+        payload = _recv_exact(sock, n)
+        if mask:
+            payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+        op = b1 & 0x0F
+        if op == 0x8:
+            return None
+        if op in (0x1, 0x0):
+            parts.append(payload)
+            if b1 & 0x80:
+                return b"".join(parts).decode("utf-8", "replace")
+
+
+def cef_eval(js: str, timeout: float = 20, port: int = None):
+    """Run JavaScript in Steam's SharedJSContext and return its value. None when Steam's debugger is off."""
+    port = port or CEF_PORT
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/json", timeout=3) as r:
+            targets = json.loads(r.read())
+    except Exception:
+        return None
+    url = next((t.get("webSocketDebuggerUrl") for t in targets if t.get("title") == "SharedJSContext"), None)
+    if not url:
+        return None
+    m = re.match(r"ws://([^/:]+):(\d+)(/.*)", url)
+    if not m:
+        return None
+    try:
+        with socket.create_connection((m.group(1), int(m.group(2))), timeout=timeout) as s:
+            key = base64.b64encode(os.urandom(16)).decode()
+            s.sendall((f"GET {m.group(3)} HTTP/1.1\r\nHost: {m.group(1)}:{m.group(2)}\r\nUpgrade: websocket\r\n"
+                       f"Connection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
+            resp = b""
+            while b"\r\n\r\n" not in resp:
+                chunk = s.recv(4096)
+                if not chunk:
+                    return None
+                resp += chunk
+            if b" 101" not in resp.split(b"\r\n", 1)[0]:
+                return None
+            _ws_send(s, json.dumps({"id": 1, "method": "Runtime.evaluate",
+                                    "params": {"expression": js, "awaitPromise": True, "returnByValue": True}}))
+            while True:
+                msg = _ws_recv(s)
+                if msg is None:
+                    return None
+                data = json.loads(msg)
+                if data.get("id") == 1:
+                    return ((data.get("result") or {}).get("result") or {}).get("value")
+    except (OSError, ValueError, ConnectionError):
+        return None
+
+
+def cef_shortcut_names() -> Optional[set]:
+    v = cef_eval("JSON.stringify((window.appStore?.allApps||[]).filter(a=>a?.app_type===%d)"
+                 ".map(a=>a.display_name))" % SHORTCUT_APP_TYPE)
+    try:
+        return set(json.loads(v)) if v else None
+    except ValueError:
+        return None
+
+
+def latest_ge_proton() -> str:
+    tools = [p for p in custom_protons() if p.lower().startswith("ge-proton")]
+    return sorted(tools, key=parse_version)[-1] if tools else "proton_experimental"
+
+
+def nsl_shortcut_spec(name: str) -> Optional[dict]:
+    """The Steam shortcut NSL would make for this launcher (same exe, start dir, launch options, Proton)."""
+    if name in NSL_STORES:
+        exe = nsl_exe(name)
+        if not exe:
+            return None
+        args = NSL_STORES[name][2]
+        return {"appname": name, "exe": f'"{exe}"' + (f" {args}" if args else ""),
+                "StartDir": f'"{exe.parent}"',
+                "LaunchOptions": f'STEAM_COMPAT_DATA_PATH="{nsl_compatdata_for(exe)}/" %command%',
+                "CompatTool": latest_ge_proton()}
+    if name in NSL_WEB:
+        return {"appname": name, "exe": '"/usr/bin/flatpak"', "StartDir": '"/usr/bin"',
+                "LaunchOptions": f"{CHROME_OPTIONS} {NSL_WEB[name]}", "CompatTool": ""}
+    return None
+
+
+CEF_ADD_JS = """(async () => {
+  const specs = %s, done = [];
+  const have = new Set((window.appStore?.allApps||[]).filter(a=>a?.app_type===%d).map(a=>a.display_name));
+  for (const d of specs) {
+    if (have.has(d.appname)) { done.push(d.appname); continue; }
+    try {
+      const id = await SteamClient.Apps.AddShortcut(d.appname, d.exe, d.StartDir, d.LaunchOptions);
+      await SteamClient.Apps.SetShortcutName(id, d.appname);
+      await SteamClient.Apps.SetShortcutExe(id, d.exe);
+      await SteamClient.Apps.SetShortcutStartDir(id, d.StartDir);
+      await SteamClient.Apps.SetAppLaunchOptions(id, d.LaunchOptions);
+      if (d.CompatTool) {
+        const tools = await SteamClient.Apps.GetAvailableCompatTools(id);
+        const tool = tools.some(t => t.strToolName === d.CompatTool) ? d.CompatTool : 'proton_experimental';
+        await SteamClient.Apps.SpecifyCompatTool(id, tool);
+      }
+      done.push(d.appname);
+    } catch (e) { console.error('Ally Hub shortcut', d.appname, e); }
+  }
+  return JSON.stringify(done);
+})()"""
+
+CEF_REMOVE_JS = """(async () => {
+  const names = new Set(%s), done = [];
+  for (const a of (window.appStore?.allApps||[])) {
+    if (a?.app_type === %d && names.has(a.display_name)) {
+      try { await SteamClient.Apps.RemoveShortcut(a.appid); done.push(a.display_name); } catch (e) {}
+    }
+  }
+  return JSON.stringify(done);
+})()"""
+
+
+def cef_add_shortcuts(names: list) -> Optional[list]:
+    """Add the missing Steam tiles directly. Returns the names now in the library, or None if Steam's
+    debugger isn't reachable."""
+    specs = [s for s in (nsl_shortcut_spec(n) for n in names) if s]
+    if not specs:
+        return []
+    v = cef_eval(CEF_ADD_JS % (json.dumps(specs), SHORTCUT_APP_TYPE), timeout=40)
+    try:
+        return json.loads(v) if v else None
+    except ValueError:
+        return None
+
+
+def cef_remove_shortcuts(names: list) -> Optional[list]:
+    v = cef_eval(CEF_REMOVE_JS % (json.dumps(list(names)), SHORTCUT_APP_TYPE), timeout=30)
+    try:
+        return json.loads(v) if v else None
+    except ValueError:
+        return None
+
+
+def nsl_results(names: list, shortcuts: set = None) -> dict:
+    """After a run: {"missing": [not installed], "no_shortcut": [installed, but not in Steam]}."""
+    shortcuts = {n.lower() for n in (shortcuts if shortcuts is not None else steam_shortcut_names())}
+    missing = [n for n in names if n in NSL_STORES and not nsl_installed(n)]
+    no_short = [n for n in names if n not in missing
+                and not any(n.lower() == s or n.lower() in s for s in shortcuts)]
+    return {"missing": missing, "no_shortcut": no_short}
+
+
+def nsl_log_tail(lines: int = 120) -> str:
+    text = read_text(NSL_LOG)
+    out = "\n".join(text.splitlines()[-lines:])
+    rc, journal = run_quiet(["journalctl", "--user", "-u", "nslgamescanner", "-n", "25", "--no-pager"], timeout=10)
+    if journal:
+        out += "\n\n--- scanner service ---\n" + journal
+    out += f"\n\n--- account ---\nuserdata: {steam_user_id3() or 'not found'}; " \
+           f"shortcuts.vdf: {'yes' if (shortcuts_vdf() and shortcuts_vdf().exists()) else 'no'}; " \
+           f"steam debugger: {'on' if cef_eval('1+1', timeout=3) == 2 else 'off'}"
+    return out
+
+
+# ----- leftovers -----
+
+def _du(path: Path) -> int:
+    rc, out = run_quiet(["du", "-sb", str(path)], timeout=30)
+    try:
+        return int(out.split()[0]) if rc == 0 and out else 0
+    except ValueError:
+        return 0
+
+
+def nsl_leftovers() -> list:
+    """What uninstalled launchers left behind. Each: {label, path, size, warn}. Never anything a still
+    installed launcher (or the games inside it) needs."""
+    out = []
+    installed = [n for n in NSL_STORES if nsl_installed(n)]
+    # own prefixes ("separate" mode) whose launcher is gone
+    for name, (rel, own, _a, _u) in NSL_STORES.items():
+        d = COMPATDATA / own
+        exe = nsl_exe(name)
+        if d.exists() and not (exe and str(d) + "/" in str(exe)):
+            out.append({"label": f"{name}'s old Proton prefix", "path": d, "size": _du(d), "warn": ""})
+    shared = COMPATDATA / NSL_SHARED
+    if shared.exists() and not any(nsl_exe(n) and NSL_SHARED in str(nsl_exe(n)) for n in NSL_STORES):
+        out.append({"label": "Shared launcher prefix (no store left in it)", "path": shared, "size": _du(shared),
+                    "warn": "Also removes any games you installed through those stores."})
+    if NSL_DOWNLOADS.exists():
+        out.append({"label": "Leftover installer downloads", "path": NSL_DOWNLOADS, "size": _du(NSL_DOWNLOADS),
+                    "warn": ""})
+    if not installed and NSL_SCANNER.exists():
+        for p in (NSL_SCANNER, NSL_USER_DIR / "Modules", NSL_ENV, NSL_USER_DIR / "nslgamescanner.service"):
+            if p.exists():
+                out.append({"label": f"Game scanner files ({p.name})", "path": p, "size": _du(p), "warn": ""})
+    for f in (HOME / ".steam/root/userdata").glob("*/config/shortcuts.vdf_backups"):
+        old = sorted(f.glob("*"), key=lambda p: p.stat().st_mtime)[:-3]       # keep the newest 3
+        for p in old:
+            out.append({"label": "Old shortcut backup", "path": p, "size": _du(p), "warn": ""})
+    return out
+
+
+def nsl_clean_cmd(paths: list) -> Optional[str]:
+    """Delete the chosen leftovers (all inside the home folder, no password)."""
+    home = str(HOME) + "/"
+    safe = [str(p) for p in paths if str(p).startswith(home) and str(p) != str(HOME)
+            and (str(p).startswith(str(COMPATDATA) + "/") or str(p).startswith(str(NSL_USER_DIR) + "/")
+                 or str(p).startswith(str(NSL_DOWNLOADS)) or "/shortcuts.vdf_backups/" in str(p))]
+    if not safe:
+        return None
+    parts = []
+    if any("nslgamescanner" in p or p == str(NSL_SCANNER) for p in safe):
+        parts.append("systemctl --user disable --now nslgamescanner.service 2>/dev/null; true")
+    parts.append("rm -rf -- " + " ".join(shlex.quote(p) for p in safe))
+    parts.append("systemctl --user daemon-reload 2>/dev/null; echo 'Leftovers cleaned.'")
+    return "; ".join(parts)
+
+def decky_version(item, state: dict) -> str:
+    """Installed version of a catalog Decky plugin, shown on its card ("" when unknown)."""
+    if not getattr(item, "decky_names", None):
+        return ""
+    for key, info in state.get("decky", {}).items():
+        if any(n in key or n in Path(info["dir"]).name.lower() for n in item.decky_names):
+            return info.get("version", "")
+    return ""
+
+
+def decky_plugin_item(id, name, desc, monogram, color, install, names, warn="",
+                      recommended=False) -> Item:
+    return Item(
+        id=id, name=name, category="Game Mode plugins", desc=desc, monogram=monogram,
+        color=color, install=install, check=lambda s, n=names: bool(decky_match(n, s)),
+        uninstall="decky", warn=warn, requires=("decky",), recommended=recommended,
+        decky_names=names,
+    )
+
+
+TAILSCALE_INSTALL = (
+    'tmp=$(mktemp -d) && git clone --depth 1 https://github.com/tailscale-dev/deck-tailscale '
+    '"$tmp/dt" && cd "$tmp/dt" && sudo bash tailscale.sh; rc=$?; rm -rf "$tmp"; exit $rc'
+)
+
+CATALOG = [
+    # ================= MODS =================
+    Item(
+        id="decky", name="Decky Loader", category="Essentials",
+        desc="The plugin loader for Game Mode. Unlocks the Plugin Store page in Ally Hub "
+             "and the plug icon in your Quick Access menu.",
+        monogram="D", color="#8b5cf6",
+        install="curl -L https://github.com/SteamDeckHomebrew/decky-installer/releases/latest/download/install_release.sh | sh",
+        uninstall="curl -L https://github.com/SteamDeckHomebrew/decky-installer/releases/latest/download/uninstall.sh | sh",
+        check=lambda s: DECKY_PATH.exists(),
+        warn="SteamOS updates can remove Decky. Ally Hub's Update Guardian will spot it.",
+        recommended=True,
+    ),
+    decky_plugin_item(
+        "allycenter", "Ally Center",
+        "Built for the ROG Ally: TDP presets, RGB effects, charge limit, battery health, "
+        "temps and a screen-off download mode, all from the Quick Access menu.",
+        "AC", "#e11d48",
+        "curl -L https://github.com/PixelAddictUnlocked/allycenter/raw/main/install.sh | sh",
+        ("ally center", "allycenter"), recommended=True,
+        warn="Use one TDP tool at a time: Ally Center, SimpleDeckyTDP or the SteamOS slider.",
+    ),
+    # Frame generation: the same builds Bazzite installs (ujust get-decky-lossless-scaling / get-framegen),
+    # i.e. the latest stable GitHub release, not the Decky store's older copy or a pre-release.
+    decky_plugin_item(
+        "lsfg", "Lossless Scaling Frame Gen",
+        "Doubles, triples or quadruples your frame rate in almost any game. The same build Bazzite "
+        "installs: per-game profiles, a simple multiplier slider and launch options set for you.",
+        "LS", "#8b5cf6",
+        github_decky_install_cmd("xXJSONDeruloXx/decky-lsfg-vk", "Decky.LSFG-VK.zip", ("Decky LSFG-VK",)),
+        ("lsfg",),
+        warn="Needs Lossless Scaling from Steam (paid), switched to its lsfg-vk beta branch. "
+             "After installing, open the plugin once and tap Install lsfg-vk.",
+    ),
+    decky_plugin_item(
+        "framegen", "OptiScaler Frame Gen",
+        "FSR 4, XeSS and frame generation for games that support DLSS, FSR or XeSS. Pick a game in "
+        "the plugin and it sets the launch options for you. The same build Bazzite installs.",
+        "OS", "#0ea5e9",
+        github_decky_install_cmd("xXJSONDeruloXx/Decky-Framegen", "Decky-Framegen.zip",
+                                 ("Decky-Framegen", "Decky Framegen")),
+        ("framegen",),
+        warn="Large download (about 190 MB). Works only in games with DLSS, FSR or XeSS.",
+    ),
+    decky_plugin_item(
+        "simpledeckytdp", "SimpleDeckyTDP",
+        "Per-game TDP profiles, GPU clock control and CPU boost/SMT toggles. "
+        "Supports the Ally X through ASUS WMI.",
+        "TDP", "#f97316",
+        "curl -L https://github.com/aarron-lee/SimpleDeckyTDP/raw/main/install.sh | sh",
+        ("simpledeckytdp",),
+        warn="Overlaps with Ally Center and SteamOS's own TDP slider. Pick one.",
+    ),
+    Item(
+        id="nonsteamlaunchers", name="NonSteamLaunchers", category="Launchers & stores",
+        desc="Adds Epic, GOG, EA App, Ubisoft Connect, Battle.net, Xbox Game Pass (cloud), Netflix, "
+             "YouTube and more straight into your Steam library with artwork. Pick them on the Launchers page.",
+        monogram="NS", color="#10b981", kind="run",
+        install="curl -Ls https://raw.githubusercontent.com/moraroy/NonSteamLaunchers-On-Steam-Deck/main/NonSteamLaunchers.sh | bash",
+        check=lambda s: False,
+        warn="Restart Steam afterwards to see the new shortcuts.",
+    ),
+    Item(
+        id="tailscale", name="Tailscale", category="Launchers & stores",
+        desc="Private network between your devices. Stream your home PC with Moonlight from "
+             "anywhere, or reach your Ally from your phone. Set it up on the Connect page.",
+        monogram="Ts", color="#64748b",
+        install=TAILSCALE_INSTALL,
+        uninstall=('tmp=$(mktemp -d) && git clone --depth 1 https://github.com/tailscale-dev/deck-tailscale '
+                   '"$tmp/dt" && cd "$tmp/dt" && sudo bash uninstall.sh; rc=$?; rm -rf "$tmp"; exit $rc'),
+        check=lambda s: Path(TAILSCALE_BIN).exists(),
+        requires=(),
+    ),
+    Item(
+        id="emudeck", name="EmuDeck", category="Emulation",
+        desc="Installs and configures dozens of emulators, builds ROM folders and adds "
+             "games to Steam with artwork and controller profiles.",
+        monogram="E", color="#f59e0b",
+        install="curl -L https://raw.githubusercontent.com/dragoonDorise/EmuDeck/main/install.sh | bash",
+        open_cmd=shlex.quote(str(EMUDECK_PATH)),
+        check=lambda s: EMUDECK_PATH.exists(),
+        warn="Pick EmuDeck or RetroDECK, not both. Uninstall from inside EmuDeck.",
+    ),
+    flatpak_item("net.retrodeck.retrodeck", "RetroDECK", "Emulation",
+                 "All-in-one retro platform in a single Flatpak. Cleaner and more "
+                 "self-contained than EmuDeck.", "RD", "#ef4444"),
+    flatpak_item("com.steamgriddb.SteamROMManager", "Steam ROM Manager", "Emulation",
+                 "Add ROMs and non-Steam games to Steam with proper artwork.", "SR", "#eab308"),
+
+    # ================= APPS =================
+    flatpak_item("com.heroicgameslauncher.hgl", "Heroic Games Launcher", "Game launchers",
+                 "Play your Epic, GOG and Amazon Prime Gaming libraries.",
+                 "He", "#06b6d4", recommended=True),
+    flatpak_item("net.lutris.Lutris", "Lutris", "Game launchers",
+                 "One launcher for Battle.net, EA, Ubisoft, emulators and install scripts.",
+                 "Lu", "#f59e0b"),
+    flatpak_item("com.usebottles.bottles", "Bottles", "Game launchers",
+                 "Run Windows apps and launchers in isolated Wine prefixes.", "B", "#ef4444"),
+    flatpak_item("io.itch.itch", "itch.io", "Game launchers",
+                 "The indie game store and its huge free library.", "it", "#fa5c5c"),
+    flatpak_item("page.kramo.Cartridges", "Cartridges", "Game launchers",
+                 "A clean library that pulls games from Steam, Heroic, Lutris and more.",
+                 "Ca", "#a3e635"),
+    flatpak_item("com.vysp3r.ProtonPlus", "ProtonPlus", "Compatibility",
+                 "Install Proton-GE, Proton-CachyOS and other compatibility tools.",
+                 "P+", "#a855f7", recommended=True),
+    flatpak_item("net.davidotek.pupgui2", "ProtonUp-Qt", "Compatibility",
+                 "The classic Proton-GE / Wine-GE manager for Steam, Heroic and Lutris.",
+                 "PU", "#7c3aed"),
+    flatpak_item("com.github.Matoking.protontricks", "Protontricks", "Compatibility",
+                 "Install Windows runtimes and fixes into individual Proton games.", "Pt", "#6d28d9"),
+    flatpak_item("io.github.unknownskl.greenlight", "Greenlight", "Cloud & streaming",
+                 "Native Xbox Cloud Gaming and Xbox home streaming client. Perfect fit "
+                 "for an Xbox Ally.", "XC", "#107c10", recommended=True),
+    flatpak_item("com.google.Chrome", "Google Chrome", "Cloud & streaming",
+                 "Best browser for GeForce NOW, Amazon Luna and web cloud gaming.", "C", "#22c55e"),
+    flatpak_item("com.moonlight_stream.Moonlight", "Moonlight", "Cloud & streaming",
+                 "Stream games from your gaming PC (Sunshine or Apollo host).", "M", "#0ea5e9"),
+    flatpak_item("io.github.streetpea.chiaki-ng", "chiaki-ng", "Cloud & streaming",
+                 "PlayStation Remote Play for PS4 and PS5.", "PS", "#2563eb"),
+    flatpak_item("org.vinegarhq.Sober", "Sober", "More games",
+                 "Run Roblox on Linux, with ads and telemetry off by default.", "Ro", "#e2e8f0"),
+    flatpak_item("org.prismlauncher.PrismLauncher", "Prism Launcher", "More games",
+                 "Minecraft Java with easy modpacks and multiple instances.", "Mc", "#16a34a"),
+    flatpak_item("io.mrarm.mcpelauncher", "Minecraft Bedrock Launcher", "More games",
+                 "Play Minecraft Bedrock Edition (needs a Google Play copy).", "MB", "#65a30d"),
+    flatpak_item("com.discordapp.Discord", "Discord", "Social & media",
+                 "Voice and chat with your friends.", "Di", "#6366f1"),
+    flatpak_item("dev.vencord.Vesktop", "Vesktop", "Social & media",
+                 "Discord with working screen share audio on Linux and better performance.",
+                 "Ve", "#818cf8"),
+    flatpak_item("com.spotify.Client", "Spotify", "Social & media",
+                 "Music and podcasts.", "Sp", "#1db954"),
+    flatpak_item("tv.kodi.Kodi", "Kodi", "Social & media",
+                 "Full media center with a controller-friendly interface.", "K", "#17b2e7"),
+    flatpak_item("tv.plex.PlexHTPC", "Plex HTPC", "Social & media",
+                 "Plex's big-screen app, works great with a controller.", "Px", "#e5a00d"),
+    flatpak_item("com.stremio.Stremio", "Stremio", "Social & media",
+                 "Streaming hub for movies and shows.", "St", "#7b5bf5"),
+    flatpak_item("io.github.radiolamp.mangojuice", "MangoJuice", "Utilities",
+                 "Customize the MangoHud performance overlay without editing config files.",
+                 "MJ", "#f472b6"),
+    flatpak_item("com.github.mtkennerly.ludusavi", "Ludusavi", "Utilities",
+                 "Back up your game saves. Powers Ally Hub's automatic save backups.",
+                 "Ls", "#0891b2"),
+    flatpak_item("org.localsend.localsend_app", "LocalSend", "Utilities",
+                 "AirDrop-style file transfer to your phone or PC over Wi-Fi.", "LS", "#14b8a6"),
+    flatpak_item("com.obsproject.Studio", "OBS Studio", "Utilities",
+                 "Record or stream your gameplay.", "OB", "#475569"),
+    flatpak_item("com.github.tchx84.Flatseal", "Flatseal", "Utilities",
+                 "Fine-tune Flatpak permissions.", "F", "#3b82f6"),
+    flatpak_item("io.github.flattool.Warehouse", "Warehouse", "Utilities",
+                 "Manage, downgrade and clean up Flatpak apps and leftover data.", "W", "#0d9488"),
+]
+CATALOG_BY_ID = {i.id: i for i in CATALOG}
+LUDUSAVI_ID = "com.github.mtkennerly.ludusavi"
+
+MOD_CATEGORIES = ["Essentials", "Game Mode plugins", "Launchers & stores", "Emulation"]
+APP_CATEGORIES = ["Game launchers", "Compatibility", "Cloud & streaming", "More games",
+                  "Social & media", "Utilities"]
+
+FEATURED_PLUGINS = [
+    "css loader", "steamgriddb", "protondb", "hltb", "storage cleaner",
+    "tabmaster", "audio loader", "animation changer", "junk", "ludusavi", "sunshine",
+    "decky recorder", "bluetooth", "free loader", "magicpods", "localsend",
+]
+
+
+def gather_state() -> dict:
+    return {"flatpaks": installed_flatpaks(), "decky": installed_decky_plugins()}
+
+
+def decky_remove_cmd(dirs: list) -> str:
+    quoted = " ".join(shlex.quote(d) for d in dirs)
+    return f"sudo rm -rf {quoted} && sudo systemctl restart plugin_loader"
+
+
+def decky_store_install_cmd(url: str) -> str:
+    q = shlex.quote(url)
+    return (
+        'tmp=$(mktemp -d) && '
+        f'curl -fL -o "$tmp/p.zip" {q} && '
+        'python3 -m zipfile -e "$tmp/p.zip" "$tmp/out" && '
+        'sudo mkdir -p "$HOME/homebrew/plugins" && '
+        'for d in "$tmp/out"/*/; do n=$(basename "$d"); '
+        'sudo rm -rf "$HOME/homebrew/plugins/$n"; '
+        'sudo cp -r "$d" "$HOME/homebrew/plugins/$n"; '
+        'sudo chown -R "$USER:$USER" "$HOME/homebrew/plugins/$n"; done && '
+        'sudo systemctl restart plugin_loader; rc=$?; rm -rf "$tmp"; exit $rc'
+    )
+
+
+def store_latest_version(plugin: dict) -> Optional[dict]:
+    vers = plugin.get("versions") or []
+    if not vers:
+        return None
+    if all(x.get("created") for x in vers):
+        return max(vers, key=lambda x: x["created"])
+    return vers[0]
+
+
+def store_artifact_url(plugin: dict) -> Optional[str]:
+    v = store_latest_version(plugin)
+    if not v:
+        return None
+    return v.get("artifact") or (DECKY_CDN.format(v["hash"]) if v.get("hash") else None)
+
+
+# ==========================================================================
+# Profiles (export / import your whole setup)
+# ==========================================================================
+
+PROFILE_KEYS = ("theme", "rgb", "agent", "game_colors", "dock", "wol", "performance")
+
+
+def build_profile(state: dict) -> dict:
+    cfg = load_config()
+    b = battery_info()
+    return {
+        "allyhub_profile": 1,
+        "created": time.strftime("%Y-%m-%d %H:%M"),
+        "device": device_name(),
+        "flatpaks": sorted(state.get("flatpaks", [])),
+        "catalog": sorted(i.id for i in CATALOG
+                          if not i.id.count(".") and i.kind == "install" and i.check(state)),
+        "decky_plugins": sorted(v["name"] for v in state.get("decky", {}).values()),
+        "config": {k: cfg.get(k) for k in PROFILE_KEYS},
+        "system": {"charge_limit": b.get("limit") or "", "ssh": sshd_active()},
+    }
+
+
+def export_profile(state: dict) -> Path:
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    path = BACKUP_DIR / f"profile-{time.strftime('%Y-%m-%d_%H%M')}.allyhub.json"
+    path.write_text(json.dumps(build_profile(state), indent=2))
+    return path
+
+
+def profile_plan(profile: dict, state: dict) -> dict:
+    """What importing this profile would add on this device."""
+    return {
+        "catalog": [i for i in profile.get("catalog", [])
+                    if i in CATALOG_BY_ID and not CATALOG_BY_ID[i].check(state)],
+        "flatpaks": [f for f in profile.get("flatpaks", []) if f not in state.get("flatpaks", set())],
+        "decky_plugins": [p for p in profile.get("decky_plugins", [])
+                          if p.lower() not in state.get("decky", {})],
+        "config": profile.get("config", {}),
+        "system": profile.get("system", {}),
+    }
+
+
+def apply_profile_config(conf: dict) -> None:
+    def fn(cfg):
+        for k in PROFILE_KEYS:
+            if conf.get(k) is not None:
+                cfg[k] = conf[k]
+    update_config(fn)
+
+
+# ==========================================================================
+# Agent service
+# ==========================================================================
+
+def agent_unit_text(python: str) -> str:
+    return (
+        "[Unit]\nDescription=Ally Hub agent (lighting, automation, remote)\n"
+        "After=graphical-session.target\n\n"
+        "[Service]\nType=simple\n"
+        f"ExecStart={python} {APP_DIR / 'allyhub.py'} --agent\n"
+        "Restart=on-failure\nRestartSec=5\nNice=10\n\n"
+        "[Install]\nWantedBy=default.target\n"
+    )
+
+
+def agent_running() -> bool:
+    return service_active("allyhub-agent", user=True)
+
+
+def pause_agent() -> bool:
+    """Stop the background agent (a user service, no password) so it can't touch the lights during
+    the light test. Returns True if it was running and should be started again."""
+    if not agent_running():
+        return False
+    try:
+        subprocess.run(["systemctl", "--user", "stop", "allyhub-agent.service"], capture_output=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return True
+
+
+def resume_agent():
+    try:
+        subprocess.run(["systemctl", "--user", "start", "allyhub-agent.service"], capture_output=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def agent_state() -> dict:
+    return read_json(AGENT_STATE, {}) or {}
+
+
+# ==========================================================================
+# Performance: Game Boost and Tune-up
+# Ideas from CachyOS (game-performance, sysctl defaults) and Bazzite/CryoUtilities (zram, huge pages).
+# SteamOS's root is read-only, so everything lives in /etc and /sys, goes through one password prompt,
+# and has an undo. Values are written only when the kernel has the setting.
+# ==========================================================================
+
+CPUFREQ_ROOT = Path("/sys/devices/system/cpu/cpufreq")
+SYSCTL_ROOT = Path("/proc/sys")
+THP_ROOT = Path("/sys/kernel/mm/transparent_hugepage")
+MODULES_ROOT = Path("/lib/modules")
+PROC_SWAPS = Path("/proc/swaps")
+MEMINFO = Path("/proc/meminfo")
+NTSYNC_DEV = Path("/dev/ntsync")
+BOOST_STATE = DATA_DIR / "boost_state.json"
+TUNEUP_BEFORE = DATA_DIR / "tuneup_before.json"
+BOOST_TMPFILES = "/etc/tmpfiles.d/allyhub-boost.conf"
+TUNEUP_SYSCTL = "/etc/sysctl.d/99-zz-allyhub.conf"      # sorts after SteamOS's own 99-* files, so ours win
+TUNEUP_SWAP_SYSCTL = "/etc/sysctl.d/99-zz-allyhub-zram.conf"   # only written once zram really is the swap
+TUNEUP_TMPFILES = "/etc/tmpfiles.d/allyhub-tuneup.conf"
+TUNEUP_ZRAM_SCRIPT = "/etc/allyhub/zram.sh"
+TUNEUP_ZRAM_UNIT = "/etc/systemd/system/allyhub-zram.service"
+TUNEUP_NTSYNC_LOAD = "/etc/modules-load.d/allyhub-ntsync.conf"
+TUNEUP_NTSYNC_RULE = "/etc/udev/rules.d/70-allyhub-ntsync.rules"
+
+# CachyOS-style memory settings. Swap ones only make sense with zram (fast swap), so they go with it.
+MEM_SYSCTLS = {"vm.vfs_cache_pressure": "50", "vm.dirty_bytes": "268435456",
+               "vm.dirty_background_bytes": "67108864", "vm.compaction_proactiveness": "0"}
+ZRAM_SYSCTLS = {"vm.swappiness": "100", "vm.page-cluster": "0"}
+SPLIT_LOCK_SYSCTLS = {"kernel.split_lock_mitigate": "0"}
+# Setting dirty_*bytes zeroes the matching ratio, and the kernel refuses 0 for *_bytes, so Undo restores
+# the ratios instead (which zeroes the bytes again).
+DIRTY_RATIOS = ("vm.dirty_ratio", "vm.dirty_background_ratio")
+ZRAM_MARKER = "/run/allyhub-zram"           # only the zram swap Ally Hub started is ever stopped
+THP_SETTINGS = {"enabled": "always", "defrag": "defer+madvise"}
+TUNEUP_KEYS = ("zram", "memory", "hugepages", "splitlock", "ntsync")
+TUNEUP_TEXT = {
+    "zram": ("Compressed swap in RAM",
+             "Swaps to fast compressed memory instead of the slow swap file, so big games hitch less "
+             "when memory fills up."),
+    "memory": ("Memory tuning",
+               "Keeps more game files cached and writes to storage in small steady bursts instead of big "
+               "stalls."),
+    "hugepages": ("Huge pages", "Lets games use bigger memory pages. A Steam Deck favorite from CryoUtilities."),
+    "splitlock": ("No split-lock slowdown",
+                  "Stops the kernel from deliberately slowing games that trip a split lock, which some "
+                  "Windows games do."),
+    "ntsync": ("NTSync", "Turns on the kernel's Windows-style sync driver so Proton can use it."),
+}
+
+
+# ---------- small readers ----------
+
+def sysctl_file(key: str) -> Path:
+    return SYSCTL_ROOT / key.replace(".", "/")
+
+
+def sysctl_get(key: str) -> Optional[str]:
+    p = sysctl_file(key)
+    return read_text(p) if p.exists() else None
+
+
+def thp_get(name: str) -> Optional[str]:
+    """The selected value of a transparent_hugepage option ("always [madvise] never" -> "madvise")."""
+    text = read_text(THP_ROOT / name)
+    m = re.search(r"\[([^\]]+)\]", text)
+    return m.group(1) if m else (text or None)
+
+
+def thp_choices(name: str) -> list:
+    return read_text(THP_ROOT / name).replace("[", "").replace("]", "").split()
+
+
+def kernel_module_exists(name: str) -> bool:
+    if Path(f"/sys/module/{name}").exists():
+        return True
+    dep = read_text(MODULES_ROOT / os.uname().release / "modules.dep")
+    return bool(re.search(rf"/{re.escape(name)}\.ko(\.[a-z]+)?:", dep))
+
+
+def ram_bytes() -> int:
+    m = re.search(r"MemTotal:\s+(\d+)", read_text(MEMINFO))
+    return int(m.group(1)) * 1024 if m else 0
+
+
+def zram_supported() -> bool:
+    return Path("/sys/block/zram0").exists() or kernel_module_exists("zram")
+
+
+ZRAM_GENERATOR_CONFIGS = ("/etc/systemd/zram-generator.conf", "/usr/lib/systemd/zram-generator.conf")
+
+
+def zram_system_managed() -> bool:
+    """SteamOS (or zram-generator) already runs its own zram: leave it alone, just tune the swap settings."""
+    return any(Path(p).exists() for p in ZRAM_GENERATOR_CONFIGS) or \
+        (zram_active() and not Path(TUNEUP_ZRAM_UNIT).exists())
+
+
+def zram_active() -> bool:
+    return any(line.startswith("/dev/zram") for line in read_text(PROC_SWAPS).splitlines())
+
+
+def ntsync_supported() -> bool:
+    return NTSYNC_DEV.exists() or kernel_module_exists("ntsync")
+
+
+def ntsync_ready() -> bool:
+    return NTSYNC_DEV.exists() and os.access(NTSYNC_DEV, os.R_OK | os.W_OK)
+
+
+# ---------- Game Boost ----------
+
+def epp_files() -> list:
+    return sorted(CPUFREQ_ROOT.glob("policy*/energy_performance_preference"))
+
+
+def epp_current() -> Optional[str]:
+    files = epp_files()
+    return (read_text(files[0]) or None) if files else None
+
+
+def epp_choices() -> list:
+    files = epp_files()
+    return read_text(files[0].parent / "energy_performance_available_preferences").split() if files else []
+
+
+def epp_writable() -> bool:
+    files = epp_files()
+    return bool(files) and all(os.access(f, os.W_OK) for f in files)
+
+
+def ppd_available() -> bool:
+    """power-profiles-daemon: if SteamOS runs it, Game Boost asks it instead of writing the CPU directly,
+    so the two never fight."""
+    return bool(shutil.which("powerprofilesctl")) and service_active("power-profiles-daemon")
+
+
+_BACKEND_CACHE = {"at": 0.0, "value": ""}
+
+
+def boost_backend() -> str:
+    """Cached for a minute: the agent asks every few seconds during a game, and the answer rarely changes."""
+    now = time.monotonic()
+    if now - _BACKEND_CACHE["at"] > 60 or not _BACKEND_CACHE["at"]:
+        _BACKEND_CACHE["value"] = "ppd" if ppd_available() else "epp" if epp_files() else ""
+        _BACKEND_CACHE["at"] = now
+    return _BACKEND_CACHE["value"]
+
+
+def boost_target(backend: str, on_battery: bool) -> Optional[str]:
+    """What Game Boost asks for. Plugged in: full performance. On battery: a strong lean toward performance
+    (EPP balance_performance) without burning the last few watts. power-profiles-daemon has no middle
+    step, so on battery it's left alone."""
+    if backend == "ppd":
+        return None if on_battery else "performance"
+    if backend == "epp":
+        want = "balance_performance" if on_battery else "performance"
+        choices = epp_choices()
+        return want if not choices or want in choices else None
+    return None
+
+
+def boost_current(backend: str) -> Optional[str]:
+    if backend == "ppd":
+        rc, out = run_quiet(["powerprofilesctl", "get"])
+        return (out.strip() or None) if rc == 0 else None
+    return epp_current() if backend == "epp" else None
+
+
+def _boost_set(backend: str, value: str) -> bool:
+    if backend == "ppd":
+        return run_quiet(["powerprofilesctl", "set", value])[0] == 0
+    ok = False
+    for f in epp_files():
+        try:
+            f.write_text(value)
+            ok = True
+        except OSError:
+            pass        # EBUSY while the governor is "performance": that already is full speed
+    return ok
+
+
+def boost_apply(on_battery: bool) -> Optional[dict]:
+    """Switch to the boost setting. Returns what to undo later, or None when nothing changed."""
+    backend = boost_backend()
+    target = boost_target(backend, on_battery)
+    if not target:
+        return None
+    before = boost_current(backend)
+    if not before or before == target:
+        return None
+    if not _boost_set(backend, target):
+        return None
+    return {"backend": backend, "before": before, "set": target, "at": time.time()}
+
+
+def boost_restore(rec: dict) -> bool:
+    """Put back what was there before, unless something else changed it meanwhile (then leave it alone:
+    SteamOS or the user wins)."""
+    if not rec or not rec.get("backend") or not rec.get("before"):
+        return False
+    if boost_current(rec["backend"]) != rec.get("set"):
+        return False
+    return _boost_set(rec["backend"], rec["before"])
+
+
+def boost_ready() -> bool:
+    b = boost_backend()
+    return b == "ppd" or (b == "epp" and epp_writable())
+
+
+def boost_permission_cmd() -> Optional[str]:
+    """One password prompt so the agent can change the CPU's energy preference while a game runs.
+    tmpfiles keeps it across reboots; chgrp/chmod make it work right away."""
+    if not epp_files():
+        return None
+    try:
+        import grp
+        group = grp.getgrgid(os.getgid()).gr_name
+    except (ImportError, KeyError):
+        group = USER
+    pattern = f"{CPUFREQ_ROOT}/policy*/energy_performance_preference"
+    rule = f"z {pattern} 0664 root {group} - -"
+    parts = [f"printf '%s\\n' {shlex.quote(rule)} | tee {BOOST_TMPFILES} >/dev/null",
+             f"chgrp {shlex.quote(group)} {pattern}", f"chmod 0664 {pattern}"]
+    return ("sudo sh -c " + shlex.quote(" && ".join(parts)) +
+            " && echo 'Game Boost can now switch the CPU without a password.'")
+
+
+# ---------- Tune-up ----------
+
+def tuneup_plan() -> dict:
+    """What this kernel supports: {"zram": bool, "memory": bool, ...}."""
+    return {
+        "zram": zram_supported(),
+        "memory": all(sysctl_file(k).exists() for k in ("vm.vfs_cache_pressure", "vm.dirty_bytes")),
+        "hugepages": (THP_ROOT / "enabled").exists() and "always" in thp_choices("enabled"),
+        "splitlock": sysctl_file("kernel.split_lock_mitigate").exists(),
+        "ntsync": ntsync_supported(),
+    }
+
+
+def tuneup_sysctls(plan: dict = None) -> dict:
+    plan = tuneup_plan() if plan is None else plan
+    out = {}
+    if plan.get("memory"):
+        out.update({k: v for k, v in MEM_SYSCTLS.items() if sysctl_file(k).exists()})
+    if plan.get("splitlock"):
+        out.update(SPLIT_LOCK_SYSCTLS)
+    return out
+
+
+def tuneup_thp(plan: dict = None) -> dict:
+    plan = tuneup_plan() if plan is None else plan
+    if not plan.get("hugepages"):
+        return {}
+    return {k: v for k, v in THP_SETTINGS.items() if v in thp_choices(k)}
+
+
+def tuneup_applied() -> bool:
+    """Any tune-up file counts, so a half-finished apply still offers Undo."""
+    return any(Path(p).exists() for p in (TUNEUP_SYSCTL, TUNEUP_SWAP_SYSCTL, TUNEUP_ZRAM_UNIT, TUNEUP_TMPFILES,
+                                          TUNEUP_NTSYNC_LOAD))
+
+
+def tuneup_items() -> list:
+    """Live status of each tweak: state is "on", "off" or "na" (this kernel can't)."""
+    plan = tuneup_plan()
+    sysctls = tuneup_sysctls(plan)
+    live = {
+        "zram": zram_active(),
+        "memory": all(sysctl_get(k) == v for k, v in sysctls.items() if k in MEM_SYSCTLS),
+        "hugepages": thp_get("enabled") == "always",
+        "splitlock": sysctl_get("kernel.split_lock_mitigate") == "0",
+        "ntsync": ntsync_ready(),
+    }
+    out = []
+    for key in TUNEUP_KEYS:
+        title, desc = TUNEUP_TEXT[key]
+        state = "na" if not plan[key] else "on" if live[key] else "off"
+        out.append({"key": key, "title": title, "desc": desc, "state": state})
+    return out
+
+
+def tuneup_snapshot() -> dict:
+    """Current values of everything the tune-up changes, so Undo can put them back without a reboot."""
+    keys = sorted(set(MEM_SYSCTLS) | set(ZRAM_SYSCTLS) | set(SPLIT_LOCK_SYSCTLS) | set(DIRTY_RATIOS))
+    return {"sysctl": {k: sysctl_get(k) for k in keys if sysctl_get(k) is not None},
+            "thp": {k: thp_get(k) for k in THP_SETTINGS if thp_get(k)},
+            "at": time.time()}
+
+
+def zram_script(size_bytes: int) -> str:
+    return f"""#!/bin/sh
+# Ally Hub: compressed swap in RAM (zram), like Bazzite and CachyOS. Undo from Tools > Performance.
+case "$1" in
+start)
+  grep -q '^/dev/zram' /proc/swaps && exit 0
+  modprobe zram 2>/dev/null
+  [ -e /sys/block/zram0 ] || exit 0
+  [ "$(cat /sys/block/zram0/disksize)" = 0 ] || exit 0
+  echo zstd > /sys/block/zram0/comp_algorithm 2>/dev/null || echo lz4 > /sys/block/zram0/comp_algorithm 2>/dev/null
+  echo {int(size_bytes)} > /sys/block/zram0/disksize && mkswap /dev/zram0 >/dev/null && swapon -p 100 /dev/zram0 \\
+    && touch {ZRAM_MARKER}
+  ;;
+stop)
+  [ -e {ZRAM_MARKER} ] || exit 0
+  grep -q '^/dev/zram0 ' /proc/swaps && swapoff /dev/zram0
+  echo 1 > /sys/block/zram0/reset 2>/dev/null
+  rm -f {ZRAM_MARKER}
+  true
+  ;;
+esac
+"""
+
+
+ZRAM_UNIT_TEXT = f"""[Unit]
+Description=Ally Hub compressed swap in RAM (zram)
+After=systemd-modules-load.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart={TUNEUP_ZRAM_SCRIPT} start
+ExecStop={TUNEUP_ZRAM_SCRIPT} stop
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
+def _tee(body: str, path: str) -> str:
+    return f"printf '%s' {shlex.quote(body)} | tee {path} >/dev/null"
+
+
+def tuneup_apply_cmd(plan: dict = None) -> Optional[str]:
+    plan = tuneup_plan() if plan is None else plan
+    sysctls = tuneup_sysctls(plan)
+    thp = tuneup_thp(plan)
+    if not (sysctls or thp or plan.get("zram") or plan.get("ntsync")):
+        return None
+    parts = []
+    if plan.get("zram") and zram_system_managed():
+        swap = "".join(f"{k} = {v}\n" for k, v in ZRAM_SYSCTLS.items() if sysctl_file(k).exists())
+        parts += [f"{{ ! grep -q '^/dev/zram' /proc/swaps || {{ "
+                  f"{_tee('# Ally Hub tune-up: swap settings for zram' + chr(10) + swap, TUNEUP_SWAP_SYSCTL)}"
+                  f" && sysctl -q -e -p {TUNEUP_SWAP_SYSCTL}; }} || true; }}"]
+    elif plan.get("zram"):
+        size = max(ram_bytes() // 2, 1 << 30) // (1 << 20) * (1 << 20)     # half the RAM, at least 1 GB
+        swap = "".join(f"{k} = {v}\n" for k, v in ZRAM_SYSCTLS.items() if sysctl_file(k).exists())
+        parts += ["mkdir -p /etc/allyhub", _tee(zram_script(size), TUNEUP_ZRAM_SCRIPT),
+                  f"chmod 0755 {TUNEUP_ZRAM_SCRIPT}", _tee(ZRAM_UNIT_TEXT, TUNEUP_ZRAM_UNIT),
+                  "systemctl daemon-reload",
+                  "{ systemctl enable --now allyhub-zram.service || echo 'Compressed swap could not start.'; }",
+                  # swap tuning suits fast zram, not the swap file: only when zram really came up
+                  f"{{ ! grep -q '^/dev/zram' /proc/swaps || {{ "
+                  f"{_tee('# Ally Hub tune-up: swap settings for zram' + chr(10) + swap, TUNEUP_SWAP_SYSCTL)}"
+                  f" && sysctl -q -e -p {TUNEUP_SWAP_SYSCTL}; }} || true; }}"]
+    body = "# Ally Hub tune-up (Tools > Performance). Undo there, or delete this file.\n"
+    body += "".join(f"{k} = {v}\n" for k, v in sysctls.items())
+    parts += [_tee(body, TUNEUP_SYSCTL), f"{{ sysctl -q -e -p {TUNEUP_SYSCTL} || true; }}"]
+    if thp:
+        lines = "".join(f"w {THP_ROOT}/{k} - - - - {v}\n" for k, v in thp.items())
+        parts += [_tee("# Ally Hub tune-up: huge pages\n" + lines, TUNEUP_TMPFILES),
+                  f"{{ systemd-tmpfiles --create {TUNEUP_TMPFILES} || true; }}"]
+    if plan.get("ntsync"):
+        parts += [_tee("ntsync\n", TUNEUP_NTSYNC_LOAD),
+                  _tee('KERNEL=="ntsync", MODE="0666"\n', TUNEUP_NTSYNC_RULE),
+                  "udevadm control --reload",
+                  f"{{ modprobe ntsync 2>/dev/null; chmod 0666 {NTSYNC_DEV} 2>/dev/null; true; }}"]
+    return "sudo sh -c " + shlex.quote(" && ".join(parts)) + " && echo 'Tune-up applied.'"
+
+
+def tuneup_undo_cmd(before: dict = None) -> str:
+    before = before or {}
+    parts = ["{ systemctl disable --now allyhub-zram.service 2>/dev/null; true; }",
+             f"rm -f {TUNEUP_ZRAM_UNIT} {TUNEUP_ZRAM_SCRIPT} {TUNEUP_SYSCTL} {TUNEUP_SWAP_SYSCTL} {TUNEUP_TMPFILES} "
+             f"{TUNEUP_NTSYNC_LOAD} {TUNEUP_NTSYNC_RULE}",
+             "{ rmdir /etc/allyhub 2>/dev/null; true; }",
+             "{ systemctl daemon-reload || true; }", "{ udevadm control --reload || true; }"]
+    saved = before.get("sysctl") or {}
+    order = [k for k in saved if k not in DIRTY_RATIOS] + [k for k in DIRTY_RATIOS if k in saved]
+    restore = [f"sysctl -q -w {shlex.quote(f'{k}={saved[k]}')}" for k in order
+               if re.fullmatch(r"[a-z0-9_.-]+", k) and re.fullmatch(r"[0-9]+", str(saved[k]))
+               and not (k.endswith("_bytes") and str(saved[k]) == "0")]
+    restore += [f"echo {shlex.quote(v)} > {THP_ROOT}/{k}" for k, v in (before.get("thp") or {}).items()
+                if k in THP_SETTINGS and re.fullmatch(r"[a-z+]+", str(v))]
+    if not restore:
+        restore = ["sysctl -q --system"]      # no snapshot: reload SteamOS's own values
+    parts.append("{ " + "; ".join(restore) + "; true; }")
+    return "sudo sh -c " + shlex.quote(" && ".join(parts)) + " && echo 'Tune-up removed.'"
+
+
+# ---------- Every-game settings: Proton options set once for all games ----------
+# Bazzite-style: a systemd environment.d file, which SteamOS's Game Mode (a systemd user session) passes to
+# Steam and every game. No launch options, no password. Takes effect after a restart; `game_env_live`
+# reads Steam's real environment to show whether it did. Researched Oct 2026: GE-Proton and Proton-CachyOS
+# both use PROTON_FSR4_UPGRADE (RDNA3/3.5 included, default FSR 4.1.1); the RDNA3-specific
+# variable some guides mention does nothing. Valve's Proton 11 ships AMD's FSR 4 file itself, so these are harmless there.
+
+GAME_ENV_FILE = HOME / ".config/environment.d/90-allyhub-games.conf"
+COMPAT_TOOL_DIRS = (HOME / ".steam/root/compatibilitytools.d", STEAM_ROOT / "compatibilitytools.d")
+GAME_ENV_OPTIONS = {     # key -> (variables, title, description)
+    "fsr4": ({"PROTON_FSR4_UPGRADE": "1"}, "FSR 4 upgrade",
+             "Games with FSR 3.1 use AMD's sharper FSR 4 instead (version 4.1.1, which supports the Ally's "
+             "GPU). It looks much better but costs some frames on a handheld, so pair it with FSR's "
+             "Balanced or Performance mode. Needs GE-Proton or Proton-CachyOS."),
+    "fsr4_badge": ({"PROTON_FSR4_INDICATOR": "1"}, "Show the FSR 4 badge",
+                   "Puts a small FSR label in the corner of the game, so you can see it's working."),
+}
+
+
+def game_env_read() -> dict:
+    out = {}
+    for line in read_text(GAME_ENV_FILE).splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            out[k.strip()] = v.strip()
+    return out
+
+
+def game_env_enabled(opt: str) -> bool:
+    cur = game_env_read()
+    return all(cur.get(k) == v for k, v in GAME_ENV_OPTIONS[opt][0].items())
+
+
+def game_env_set(opt: str, on: bool) -> None:
+    cur = game_env_read()
+    for k, v in GAME_ENV_OPTIONS[opt][0].items():
+        if on:
+            cur[k] = v
+        else:
+            cur.pop(k, None)
+    if not cur:
+        GAME_ENV_FILE.unlink(missing_ok=True)
+        return
+    GAME_ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
+    body = "# Ally Hub: settings for every game (Tools > Performance). Applied after a restart.\n"
+    GAME_ENV_FILE.write_text(body + "".join(f"{k}={v}\n" for k, v in sorted(cur.items())))
+
+
+def process_env(names: tuple = ("steam",)) -> Optional[dict]:
+    """Environment of the user's running process with one of these names (Steam by default), or None."""
+    uid = os.getuid()
+    try:
+        pids = [p for p in os.listdir("/proc") if p.isdigit()]
+    except OSError:
+        return None
+    for pid in pids:
+        try:
+            if os.stat(f"/proc/{pid}").st_uid != uid or read_text(f"/proc/{pid}/comm") not in names:
+                continue
+            raw = Path(f"/proc/{pid}/environ").read_bytes()
+        except OSError:
+            continue
+        return dict(kv.split("=", 1) for kv in raw.decode("utf-8", "replace").split("\0") if "=" in kv)
+    return None
+
+
+def game_env_live(opt: str, env: Optional[dict] = None) -> Optional[bool]:
+    """True when Steam already runs with the option, False when not yet, None when Steam isn't running."""
+    env = process_env() if env is None else env
+    if env is None:
+        return None
+    return all(env.get(k) == v for k, v in GAME_ENV_OPTIONS[opt][0].items())
+
+
+def custom_protons() -> list:
+    """Installed Proton builds that understand the FSR 4 option (GE-Proton, Proton-CachyOS, Proton-EM)."""
+    found = set()
+    for d in COMPAT_TOOL_DIRS:
+        try:
+            found.update(p.name for p in d.iterdir()
+                         if p.is_dir() and re.search(r"(?i)ge-proton|cachyos|proton-em|proton.*-em", p.name))
+        except OSError:
+            pass
+    return sorted(found)
+
+
+def performance_summary() -> str:
+    """One line for reports and Ally Doctor."""
+    cfg = load_config().get("performance") or {}
+    on = [i["key"] for i in tuneup_items() if i["state"] == "on"]
+    return (f"boost={'on' if cfg.get('boost') else 'off'}({boost_backend() or 'none'}) "
+            f"tuneup={'applied' if tuneup_applied() else 'off'}[{','.join(on)}] "
+            f"games={','.join(sorted(game_env_read())) or 'none'}")
+
+
+# ==========================================================================
+# GitHub: auto-update and error reporting
+# ==========================================================================
+
+TOKEN_FILE = DATA_DIR / "github_token"
+UPDATE_STATE = DATA_DIR / "update_state.json"
+REPORT_DIR = DATA_DIR / "reports"
+REPORT_SENT = DATA_DIR / "reports_sent.json"
+PREV_DIR = DATA_DIR / "previous"
+APP_LOG = DATA_DIR / "allyhub.log"
+APP_FILES = ("allyhub.py", "core.py", "agent.py", "gui.py", "allyhub.svg", "install.sh",
+             "uninstall.sh", "README.md", "CHANGELOG.md", "VERSION")
+REQUIRED_FILES = ("allyhub.py", "core.py", "agent.py", "gui.py", "VERSION")
+# Where a file can sit: the repo keeps its files in folders (app/, scripts/, docs/), the install on the
+# device is flat.
+REPO_DIRS = ("app", "scripts", "docs", "")
+
+
+def repo_file(root: Path, name: str) -> Path:
+    for d in REPO_DIRS:
+        p = root / d / name if d else root / name
+        if p.exists():
+            return p
+    return root / name
+MAX_REPORTS_PER_DAY = 25
+REPORT_REPEAT_S = 6 * 3600       # same problem on the same version: once per 6 hours
+ATTACH_MAX = 60000              # GitHub allows 65536 characters per comment
+JOB_LOG_DIR = DATA_DIR / "jobs"
+HEALTHY_AFTER_S = 45
+UPDATE_INTERVAL_S = 6 * 3600     # how often devices look for a new version
+MAX_UNHEALTHY_BOOTS = 3
+
+
+def app_log(component: str, msg: str) -> None:
+    """Small rotating log that gets attached (scrubbed) to error reports."""
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        if APP_LOG.exists() and APP_LOG.stat().st_size > 256 * 1024:
+            os.replace(APP_LOG, APP_LOG.with_suffix(".log.1"))
+        with open(APP_LOG, "a") as f:
+            f.write(f"{time.strftime('%m-%d %H:%M:%S')} [{component}] {msg}\n")
+    except OSError:
+        pass
+
+
+def recent_log(lines: int = 40) -> str:
+    try:
+        return "".join(APP_LOG.read_text(errors="replace").splitlines(True)[-lines:])
+    except OSError:
+        return ""
+
+
+def repo_name() -> str:
+    return load_config()["updates"].get("repo") or REPO_DEFAULT
+
+
+def github_token() -> Optional[str]:
+    t = read_text(TOKEN_FILE)
+    return t or None
+
+
+def save_github_token(token: str) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    TOKEN_FILE.write_text(token.strip())
+    TOKEN_FILE.chmod(0o600)
+
+
+def gh_request(method: str, path: str, data: dict = None, accept: str = "application/vnd.github+json",
+               timeout: int = 25, auth: bool = True) -> tuple:
+    """Returns (status, body_bytes). status 0 means a network error."""
+    url = path if path.startswith("http") else "https://api.github.com" + path
+    headers = {"Accept": accept, "User-Agent": f"AllyHub/{VERSION}",
+               "X-GitHub-Api-Version": "2022-11-28"}
+    tok = github_token() if auth else None
+    if tok:
+        headers["Authorization"] = f"Bearer {tok}"
+    body = json.dumps(data).encode() if data is not None else None
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=body, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, r.read()
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, e.read()
+        except Exception:
+            return e.code, b""
+    except Exception:
+        return 0, b""
+
+
+# ---------- privacy scrubbing ----------
+
+_SCRUB = [
+    (re.compile(r"(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})"), "<token>"),
+    (re.compile(r"\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b"), "<mac>"),
+    (re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"), "<ip>"),
+    (re.compile(r"\b(?:[0-9a-fA-F]{1,4}:){3,7}[0-9a-fA-F]{1,4}\b"), "<ip6>"),
+    (re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"), "<email>"),
+    (re.compile(r"(?i)(pin|password|passwd|token|secret)(\s*[=:]\s*)\S+"), r"\1\2<hidden>"),
+]
+
+
+def scrub(text: str) -> str:
+    if not text:
+        return ""
+    text = text.replace(str(HOME), "~")
+    for rx, rep in _SCRUB:
+        text = rx.sub(rep, text)
+    if USER and len(USER) >= 3:
+        text = re.sub(rf"\b{re.escape(USER)}\b", "<user>", text)
+    pin = (load_config()["agent"].get("remote_pin") or "")
+    if len(pin) >= 4:
+        text = text.replace(pin, "<pin>")
+    return text
+
+
+# ---------- reports ----------
+
+def _fingerprint(*parts) -> str:
+    return hashlib.sha1("|".join(str(p) for p in parts).encode()).hexdigest()[:10]
+
+
+def environment_summary() -> str:
+    osr = os_release()
+    return (f"- Ally Hub: {display_version()} (build {VERSION})\n- SteamOS: {osr.get('VERSION_ID', '?')} "
+            f"(build {osr.get('BUILD_ID', '?')})\n- Kernel: {os.uname().release}\n"
+            f"- Device: {device_name()}\n- Mode: {'Game Mode' if in_game_mode() else 'Desktop'}\n"
+            f"- Python: {'.'.join(map(str, __import__('sys').version_info[:3]))}")
+
+
+# Why the last queue_report() call did or didn't queue: "queued", "off", "no_key",
+# "duplicate" (same problem already reported in the last day) or "limit" (daily cap).
+LAST_QUEUE = ""
+
+
+def job_log_path(key: str) -> Path:
+    return JOB_LOG_DIR / (re.sub(r"[^A-Za-z0-9._-]+", "_", key or "job")[:60] + ".log")
+
+
+def job_log_tail(key: str, chars: int = 40000) -> str:
+    return read_text(job_log_path(key))[-chars:]
+
+
+def _redacted_config() -> dict:
+    cfg = json.loads(json.dumps(load_config()))
+    cfg.get("agent", {}).pop("remote_pin", None)
+    cfg.get("wol", {}).pop("mac", None)
+    return cfg
+
+
+def diagnostics_snapshot() -> str:
+    """Everything worth knowing when something breaks, in one block (scrubbed later with the report).
+    Each probe is guarded: a broken probe must never stop a report."""
+    def probe(name, fn):
+        try:
+            return f"{name}: {fn()}"
+        except Exception as e:
+            return f"{name}: (probe failed: {type(e).__name__})"
+    lines = [
+        probe("Disk free", lambda: disk_usage(str(HOME))),
+        probe("Battery", lambda: battery_percent()),
+        probe("Agent", lambda: ("running" if agent_running() else "stopped") + f", state {agent_state()}"),
+        probe("Update state", lambda: {k: v for k, v in update_state().items() if k != "history"}),
+        probe("Decky", lambda: ("running" if service_active("plugin_loader") else "not running") +
+              "; plugins " + ", ".join(f"{i['name']} {i['version']}" for i in installed_decky_plugins().values())),
+        probe("Steam account folder", lambda: steam_user_id3() or "not found"),
+        probe("Steam debugger (Decky/CEF)", lambda: "on" if cef_eval("1+1", timeout=3) == 2 else "off"),
+        probe("Proton builds", lambda: ", ".join(custom_protons()) or "only Valve's"),
+        probe("Performance", performance_summary),
+        probe("Lighting", lambda: {k: v for k, v in (load_config().get("lighting") or {}).items()
+                                   if k in ("controller", "encoding", "hid_method", "effect")}),
+        probe("NonSteamLaunchers", lambda: "installed: " + (", ".join(n for n in NSL_STORES if nsl_installed(n))
+                                                             or "none") +
+              f"; scanner service {'active' if service_active('nslgamescanner', user=True) else 'inactive'}"),
+        probe("Config", lambda: json.dumps(_redacted_config(), sort_keys=True)),
+    ]
+    rc, journal = run_quiet(["journalctl", "--user", "-u", "allyhub-agent", "-n", "40", "--no-pager"], timeout=8)
+    if journal:
+        lines += ["", "--- agent journal ---", journal]
+    return "\n".join(lines)
+
+
+_UPLOAD_LOCK = None
+
+
+def upload_soon():
+    """Send queued reports right away on a background thread (GUI or agent), never blocking the caller."""
+    import threading
+    global _UPLOAD_LOCK
+    if _UPLOAD_LOCK is None:
+        _UPLOAD_LOCK = threading.Lock()
+    if not github_token():
+        return
+
+    def run():
+        if _UPLOAD_LOCK.acquire(blocking=False):
+            try:
+                upload_reports()
+            except Exception:
+                pass
+            finally:
+                _UPLOAD_LOCK.release()
+    threading.Thread(target=run, daemon=True).start()
+
+
+def queue_report(kind: str, title: str, details: str, fingerprint: str = None, attachments: list = None,
+                 force: bool = False, upload: bool = True) -> Optional[Path]:
+    """Save a scrubbed report and send it straight away. `attachments` are (name, text) pairs posted as
+    follow-up comments so nothing gets cut short. A system snapshot is always attached. `force` is for
+    reports the user sends by hand (they still need the access key)."""
+    global LAST_QUEUE
+    cfg = load_config()
+    if not cfg["updates"].get("reporting") and not force:
+        LAST_QUEUE = "off"
+        return None
+    fp = fingerprint or _fingerprint(kind, title)
+    key = f"{fp}@{VERSION}"                           # a new version may not have fixed it: report again
+    sent = read_json(REPORT_SENT, {}) or {}
+    now = time.time()
+    if not force and now - sent.get(key, 0) < REPORT_REPEAT_S:
+        LAST_QUEUE = "duplicate"
+        return None
+    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    if not force and any(fp in p.name for p in REPORT_DIR.glob("*.json")):
+        LAST_QUEUE = "duplicate"                      # already waiting to be sent
+        return None
+    today = [p for p in REPORT_DIR.glob("*.json") if now - p.stat().st_mtime < 86400]
+    if len(today) >= MAX_REPORTS_PER_DAY:
+        LAST_QUEUE = "limit"
+        return None
+    LAST_QUEUE = "queued" if github_token() else "no_key"
+    atts = [(n, t) for n, t in (attachments or []) if t and t.strip()]
+    atts.append(("System snapshot", diagnostics_snapshot()))
+    atts.append(("Ally Hub log (last 300 lines)", recent_log(300)))
+    report = {
+        "kind": kind, "fingerprint": fp, "version": VERSION, "time": time.strftime("%Y-%m-%d %H:%M"),
+        "title": scrub(title)[:120],
+        "body": (f"**Kind:** {kind}\n**Fingerprint:** `{fp}`\n\n### Environment\n{environment_summary()}\n\n"
+                 f"### Details\n```\n{scrub(details)[-20000:]}\n```\n\n"
+                 f"### Recent log\n```\n{scrub(recent_log(60))[-8000:]}\n```\n"
+                 + (f"\n_Attached below: {', '.join(n for n, _ in atts)}._\n" if atts else "")),
+        "attachments": [{"name": n, "text": scrub(t)[-ATTACH_MAX:]} for n, t in atts],
+    }
+    path = REPORT_DIR / f"{int(now)}-{fp}.json"
+    write_json(path, report)
+    app_log("report", f"queued {kind}: {title[:80]}")
+    if upload and LAST_QUEUE == "queued":
+        upload_soon()
+    return path
+
+
+def user_report(text: str, page: str = "") -> Optional[Path]:
+    """The "Report a problem" button: the user's words plus everything needed to act on them."""
+    atts = []
+    jobs = sorted(JOB_LOG_DIR.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)[:3] \
+        if JOB_LOG_DIR.exists() else []
+    for j in jobs:
+        atts.append((f"Job output: {j.stem} ({time.strftime('%H:%M', time.localtime(j.stat().st_mtime))})",
+                     read_text(j)[-ATTACH_MAX:]))
+    if NSL_LOG.exists() and time.time() - NSL_LOG.stat().st_mtime < 86400:
+        atts.append(("NonSteamLaunchers log", nsl_log_tail(400)))
+    return queue_report("user", (text.strip() or "Problem reported from Ally Hub")[:110],
+                        f"Reported by hand{f' on the {page} page' if page else ''}:\n\n{text.strip()}",
+                        _fingerprint("user", str(time.time())), attachments=atts, force=True)
+
+
+def report_update_failure(msg: str) -> Optional[Path]:
+    """An update that didn't install is a problem to fix, unless it's just the network."""
+    if not msg or "HTTP 0" in msg or "Couldn't reach" in msg:
+        return None
+    return queue_report("update-failure", f"Update didn't install: {msg[:90]}", msg,
+                        _fingerprint("update", re.sub(r"\d+", "N", msg)[:60]))
+
+
+def _comment_chunks(name: str, text: str) -> list:
+    out, size = [], 60000
+    parts = [text[i:i + size] for i in range(0, len(text), size)] or [""]
+    for n, part in enumerate(parts):
+        label = name + (f" (part {n + 1} of {len(parts)})" if len(parts) > 1 else "")
+        out.append(f"<details><summary>{label}</summary>\n\n```\n{part}\n```\n</details>")
+    return out
+
+
+def report_hint() -> str:
+    """Plain-language reason the last report wasn't sent, for messages to the user."""
+    return {
+        "off": "Turn on error reports (Settings → Updates) to have problems like this fixed automatically.",
+        "no_key": "Error reports are on, but there's no GitHub access key yet. Add one on Settings → Updates.",
+        "duplicate": "This exact problem was already reported in the last day, so it wasn't sent again. "
+                     "A fix may already be out: Settings → Updates → Check now.",
+        "limit": "Ally Hub already sent its daily maximum of reports. It'll send more tomorrow.",
+    }.get(LAST_QUEUE, "")
+
+
+def report_exception(component: str, exc_info=None) -> Optional[Path]:
+    import sys as _sys
+    etype, evalue, tb = exc_info or _sys.exc_info()
+    if etype is None or issubclass(etype, (KeyboardInterrupt, SystemExit)):
+        return None          # closing the app (Ctrl+C, Game Mode exit) isn't a crash
+    frames = traceback.extract_tb(tb)
+    last = frames[-1] if frames else None
+    where = f"{Path(last.filename).name}:{last.name}" if last else "?"
+    text = "".join(traceback.format_exception(etype, evalue, tb))
+    app_log(component, f"exception {etype.__name__} in {where}: {evalue}")
+    return queue_report("crash", f"{component}: {etype.__name__} in {where}: {evalue}", text,
+                        _fingerprint("crash", component, etype.__name__, where))
+
+
+def pending_reports() -> list:
+    return sorted(REPORT_DIR.glob("*.json")) if REPORT_DIR.exists() else []
+
+
+def upload_reports() -> tuple:
+    """Send queued reports as GitHub issues. Returns (sent, failed)."""
+    cfg = load_config()
+    if not github_token():
+        return 0, 0
+    files = pending_reports()
+    if not cfg["updates"].get("reporting"):          # automatic reports off: only ones sent by hand
+        files = [f for f in files if (read_json(f) or {}).get("kind") == "user"]
+    if not files:
+        return 0, 0
+    lock = open(REPORT_DIR / ".upload.lock", "w")        # GUI and agent may both try: one at a time
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        lock.close()
+        return 0, 0
+    try:
+        return _upload_locked(pending_reports())
+    finally:
+        lock.close()
+
+
+def _upload_locked(files: list) -> tuple:
+    if not files:
+        return 0, 0
+    repo = repo_name()
+    status, body = gh_request("GET", f"/repos/{repo}/issues?state=open&per_page=100&labels=auto-report")
+    open_issues = json.loads(body) if status == 200 else []
+    sent_ok, failed = 0, 0
+    sent = read_json(REPORT_SENT, {}) or {}
+    for f in files:
+        rep = read_json(f)
+        if not rep:
+            f.unlink(missing_ok=True)
+            continue
+        fp = rep["fingerprint"]
+        existing = next((i for i in open_issues if fp in (i.get("title") or "")), None)
+        number = None
+        if existing:
+            number = existing["number"]
+            status, _ = gh_request("POST", f"/repos/{repo}/issues/{number}/comments",
+                                   {"body": f"Happened again on {rep['time']} "
+                                            f"(v{display_version(rep['version'])}).\n\n" + rep["body"][:60000]})
+        else:
+            prefix = "[report]" if rep["kind"] == "user" else "[auto]"
+            payload = {"title": f"{prefix} {rep['title']} ({fp})", "body": rep["body"][:65000],
+                       "labels": ["auto-report", rep["kind"]]}
+            status, resp = gh_request("POST", f"/repos/{repo}/issues", payload)
+            if status == 422:   # labels not allowed for this key: send without them
+                payload.pop("labels")
+                status, resp = gh_request("POST", f"/repos/{repo}/issues", payload)
+            try:
+                number = json.loads(resp).get("number") if status in (200, 201) else None
+            except (ValueError, AttributeError):
+                number = None
+        if status in (200, 201):
+            for att in rep.get("attachments") or []:
+                if number:
+                    for chunk in _comment_chunks(att.get("name", "Attachment"), att.get("text", "")):
+                        gh_request("POST", f"/repos/{repo}/issues/{number}/comments", {"body": chunk})
+            sent[f"{fp}@{rep.get('version', '')}"] = time.time()
+            f.unlink(missing_ok=True)
+            sent_ok += 1
+        else:
+            failed += 1
+            app_log("report", f"upload failed with HTTP {status}")
+            if status in (401, 403, 404):
+                break
+    week_ago = time.time() - 7 * 86400
+    write_json(REPORT_SENT, {k: v for k, v in sent.items() if v > week_ago})
+    return sent_ok, failed
+
+
+# ---------- updates ----------
+
+def parse_version(v: str) -> tuple:
+    return tuple(int(x) for x in re.findall(r"\d+", v or "0")[:3]) or (0,)
+
+
+def plugin_newer(latest: str, installed: str) -> bool:
+    """True only when the store's version is really newer, so the store never "updates" a newer build
+    (like the GitHub release Ally Hub installs for frame generation) down to its older copy."""
+    return parse_version(latest) > parse_version(installed)
+
+
+# Public version numbers. The VERSION file is the updater's build number and must only ever go up,
+# because installed copies update only to a HIGHER number. People see the build with 5 taken off the
+# first part: build 6.0.0 = 1.0.0, 6.0.3 = 1.0.3, 6.1.0 = 1.1.0, 7.0.0 = 2.0.0. Lower builds are shown as is.
+PUBLIC_VERSION_OFFSET = 5
+
+
+def display_version(v: str = None) -> str:
+    v = v or VERSION
+    t = parse_version(v)
+    if len(t) == 3 and t[0] > PUBLIC_VERSION_OFFSET:
+        return f"{t[0] - PUBLIC_VERSION_OFFSET}.{t[1]}.{t[2]}"
+    return v
+
+
+def update_state() -> dict:
+    return read_json(UPDATE_STATE, {}) or {}
+
+
+def save_update_state(st: dict) -> None:
+    write_json(UPDATE_STATE, st)
+
+
+def remote_version() -> Optional[str]:
+    status, body = gh_request("GET", f"/repos/{repo_name()}/contents/VERSION?ref=main",
+                              accept="application/vnd.github.raw+json")
+    if status == 200:
+        v = body.decode(errors="replace").strip()
+        return v if re.fullmatch(r"\d+\.\d+\.\d+", v) else None
+    return None
+
+
+def check_for_update() -> dict:
+    """{'current', 'remote', 'available', 'error'}"""
+    st = update_state()
+    st["last_check"] = time.time()
+    remote = remote_version()
+    out = {"current": VERSION, "remote": remote, "available": False, "error": None}
+    if remote is None:
+        out["error"] = "Couldn't reach GitHub"
+    elif parse_version(remote) > parse_version(VERSION) and remote not in st.get("bad", []):
+        out["available"] = True
+    st["last_remote"] = remote
+    save_update_state(st)
+    return out
+
+
+def install_update(expected: str) -> tuple:
+    """Download main, verify it, back up the current version, install. (ok, message)"""
+    status, data = gh_request("GET", f"/repos/{repo_name()}/tarball/main",
+                              accept="application/vnd.github+json", timeout=90)
+    if status != 200 or not data:
+        return False, f"Download failed (HTTP {status})"
+    with tempfile.TemporaryDirectory() as tmp:
+        tpath = Path(tmp) / "src.tar.gz"
+        tpath.write_bytes(data)
+        try:
+            with tarfile.open(tpath) as tar:
+                try:
+                    tar.extractall(Path(tmp) / "x", filter="data")
+                except TypeError:
+                    tar.extractall(Path(tmp) / "x")
+        except (tarfile.TarError, OSError) as e:
+            return False, f"Bad download: {e}"
+        roots = [p for p in (Path(tmp) / "x").iterdir() if p.is_dir()]
+        if len(roots) != 1:
+            return False, "Unexpected download layout"
+        src = roots[0]
+        missing = [f for f in REQUIRED_FILES if not repo_file(src, f).exists()]
+        if missing:
+            return False, f"Update is missing {', '.join(missing)}"
+        new_ver = read_text(repo_file(src, "VERSION"))
+        # A newer release can land between the check and the download (two releases minutes apart, or
+        # GitHub's short cache): take the newer one instead of failing. Never go backwards or to a bad one.
+        if not re.fullmatch(r"\d+\.\d+\.\d+", new_ver or "") or \
+                parse_version(new_ver) < parse_version(expected) or \
+                parse_version(new_ver) <= parse_version(VERSION) or new_ver in update_state().get("bad", []):
+            return False, f"Version mismatch ({new_ver} vs {expected})"
+        expected = new_ver
+        import py_compile
+        for f in ("allyhub.py", "core.py", "agent.py", "gui.py"):
+            try:
+                py_compile.compile(str(repo_file(src, f)), cfile=str(Path(tmp) / (f + "c")), doraise=True)
+            except py_compile.PyCompileError as e:
+                return False, f"Update has a syntax error in {f}: {e.msg[:200]}"
+        if PREV_DIR.exists():
+            shutil.rmtree(PREV_DIR)
+        PREV_DIR.mkdir(parents=True)
+        for f in APP_FILES:
+            if (APP_DIR / f).exists():
+                shutil.copy2(APP_DIR / f, PREV_DIR / f)
+        (PREV_DIR / "VERSION").write_text(VERSION)
+        for f in APP_FILES:
+            if repo_file(src, f).exists():
+                shutil.copy2(repo_file(src, f), APP_DIR / f)
+        shutil.rmtree(APP_DIR / "__pycache__", ignore_errors=True)
+    st = update_state()
+    st.update({"pending": expected, "from": VERSION, "boots": 0, "installed_at": time.time()})
+    st.setdefault("history", []).append({"from": VERSION, "to": expected, "at": time.time()})
+    st["history"] = st["history"][-20:]
+    save_update_state(st)
+    app_log("update", f"installed {expected} (from {VERSION})")
+    return True, f"Updated to {display_version(expected)}"
+
+
+def previous_version() -> Optional[str]:
+    return read_text(PREV_DIR / "VERSION") or None if (PREV_DIR / "core.py").exists() else None
+
+
+def rollback(reason: str, mark_bad: bool = True) -> tuple:
+    prev = previous_version()
+    if not prev:
+        return False, "No previous version saved"
+    bad_ver = read_text(APP_DIR / "VERSION") or VERSION
+    for f in APP_FILES:
+        if (PREV_DIR / f).exists():
+            shutil.copy2(PREV_DIR / f, APP_DIR / f)
+    shutil.rmtree(APP_DIR / "__pycache__", ignore_errors=True)
+    st = update_state()
+    if mark_bad:
+        st.setdefault("bad", [])
+        if bad_ver not in st["bad"]:
+            st["bad"].append(bad_ver)
+    st.pop("pending", None)
+    st["rolled_back"] = {"from": bad_ver, "to": prev, "reason": reason, "at": time.time()}
+    save_update_state(st)
+    app_log("update", f"rolled back {bad_ver} -> {prev}: {reason}")
+    queue_report("rollback", f"Update {bad_ver} rolled back: {reason}",
+                 f"Rolled back from {bad_ver} to {prev}.\nReason: {reason}",
+                 _fingerprint("rollback", bad_ver))
+    return True, f"Rolled back to {prev}"
+
+
+def startup_check(component: str) -> str:
+    """Call at startup. Returns 'ok', 'probation' or 'rolled_back'."""
+    st = update_state()
+    if not st.get("pending") or st["pending"] != VERSION:
+        return "ok"
+    st["boots"] = st.get("boots", 0) + 1
+    save_update_state(st)
+    if st["boots"] > MAX_UNHEALTHY_BOOTS:
+        rollback(f"{component} failed to start {MAX_UNHEALTHY_BOOTS} times after updating")
+        return "rolled_back"
+    return "probation"
+
+
+def mark_healthy(component: str) -> None:
+    st = update_state()
+    if st.get("pending") == VERSION:
+        st.pop("pending", None)
+        st["boots"] = 0
+        st["healthy"] = {"version": VERSION, "at": time.time(), "by": component}
+        save_update_state(st)
+        app_log("update", f"{VERSION} confirmed healthy by {component}")
+
+
+def on_probation() -> bool:
+    return update_state().get("pending") == VERSION
+
+
+def changelog_text() -> str:
+    """Every release's notes, newest first, for the Updates page."""
+    text = read_text(APP_DIR / "CHANGELOG.md") or read_text(APP_DIR.parent / "docs" / "CHANGELOG.md")
+    text = re.sub(r"^# Changelog\s*", "", text)
+    return text.strip()
+
+
+def changelog_section(version: str = None) -> str:
+    text = read_text(APP_DIR / "CHANGELOG.md") or read_text(APP_DIR.parent / "docs" / "CHANGELOG.md")
+    for v in dict.fromkeys((display_version(version), version or VERSION)):   # public number first, then the build
+        m = re.search(rf"^## {re.escape(v)}\b.*?(?=^## |\Z)", text, re.M | re.S)
+        if m:
+            return m.group(0).strip()
+    return ""
