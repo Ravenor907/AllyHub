@@ -155,6 +155,8 @@ Using the side layout? Right moves into the page and Left goes back to the tabs.
 ## 🔄 Updates & error reports
 
 - Ally Hub checks this repository every few hours and installs new versions in the background.
+- **Want new features early?** Settings → Updates → Update channel → **Testing** follows the developer's test
+  builds. Switch back to Stable any time.
 - New versions run on probation. If one fails to start, Ally Hub goes back to the previous version by itself.
 - **Error reports are off unless you turn them on.** When on, crashes and failed installs become issues here,
   with IP and MAC addresses, usernames, PINs and keys removed first. Setup is on the **Updates** page.

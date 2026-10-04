@@ -2971,7 +2971,7 @@ class HealthPage(QWidget):
     def refresh_notices(self, state: dict):
         osr = core.os_release()
         self.info.setText(f"{core.device_name()} · SteamOS {osr.get('VERSION_ID', '?')} · "
-                          f"Ally Hub {core.display_version()}")
+                          f"Ally Hub {core.version_label()}")
         self.pw_banner.setVisible(state.get("password") is False)
         clear_layout(self.alerts_box)
         for a in core.read_json(core.DATA_DIR / "alerts.json", []) or []:
@@ -4874,6 +4874,15 @@ class UpdatesPage(QWidget):
         self.auto_cb.toggled.connect(lambda on: update_config(
             lambda c: c["updates"].__setitem__("auto_update", on)))
         uv.addWidget(self.auto_cb)
+        chr_ = QHBoxLayout()
+        chr_.addWidget(label("Update channel", "cardDesc"))
+        self.channel = QComboBox()
+        self.channel.addItem("Stable", "stable")
+        self.channel.addItem("Testing (new features first, may have bugs)", "testing")
+        self.channel.setProperty("padCycle", False)       # a channel change needs A + a confirmation
+        self.channel.currentIndexChanged.connect(self.change_channel)
+        chr_.addWidget(self.channel, 1)
+        uv.addLayout(chr_)
         ur = QHBoxLayout()
         self.btn_check = button("Check now", self.check_now, "primary")
         self.btn_rollback = button("Roll back", self.do_rollback, "danger")
@@ -4948,7 +4957,10 @@ class UpdatesPage(QWidget):
         cfg = load_config()
         st = core.update_state()
         disk_ver = core.read_text(core.APP_DIR / "VERSION") or VERSION
-        self.ver_label.setText(f"Version {core.display_version()}")
+        self.ver_label.setText(f"Version {core.version_label()}")
+        self.channel.blockSignals(True)
+        self.channel.setCurrentIndex(1 if core.update_channel(cfg) == "testing" else 0)
+        self.channel.blockSignals(False)
         parts = [f"Updates from github.com/{core.repo_name()}"]
         if st.get("last_check"):
             parts.append("last checked " + time.strftime("%b %d %H:%M", time.localtime(st["last_check"])))
@@ -5014,10 +5026,47 @@ class UpdatesPage(QWidget):
         if res.get("error"):
             self.hub.toast(res["error"])
         elif not res.get("available"):
-            self.hub.toast(f"You're up to date ({core.display_version()})")
-        elif ask(self, f"Version {core.display_version(res['remote'])} is available. Install it now?"):
+            self.hub.toast(f"You're up to date ({core.version_label()})")
+        elif ask(self, f"Version {core.display_version(res['remote'])}"
+                       f"{' (testing)' if res.get('branch') == 'testing' else ''} is available. Install it now?"):
             self.hub.toast(f"Installing {core.display_version(res['remote'])}…")
-            BackgroundTask(self, lambda: core.install_update(res["remote"]), self._installed)
+            BackgroundTask(self, lambda: core.install_update(res["remote"], res.get("branch", "main")),
+                           self._installed)
+        self.refresh()
+
+    def change_channel(self, *_args):
+        want = self.channel.currentData()
+        if not isinstance(want, str) or want == core.update_channel():
+            return
+        if want == "testing" and not ask(
+                self, "Switch to test builds?\n\nYou get new features before everyone else, straight from the "
+                      "developer's testing branch. They can have bugs: problems are reported (if reports are on) "
+                      "and fixed there, and Ally Hub still rolls back a version that won't start.\n\nYou can "
+                      "switch back to Stable any time."):
+            self.refresh()
+            return
+        update_config(lambda c: c["updates"].__setitem__("channel", want))
+        core.app_log("update", f"channel: {want}")
+        self.btn_check.setEnabled(False)
+        BackgroundTask(self, core.check_for_update, lambda r: self._channel_checked(want, r))
+
+    def _channel_checked(self, want: str, res):
+        self.btn_check.setEnabled(True)
+        if not isinstance(res, dict) or res.get("error"):
+            self.hub.toast("Channel saved. Ally Hub checks for updates when it's online.")
+        elif want == "stable" and res.get("stable") and \
+                core.parse_version(res["stable"]) < core.parse_version(VERSION):
+            if ask(self, f"You're on a test build ({core.display_version()}). Go back to the stable version "
+                         f"{core.display_version(res['stable'])} now?\n\nIf not, you stay on this build until "
+                         "a newer stable version comes out."):
+                self.hub.toast(f"Installing {core.display_version(res['stable'])}…")
+                BackgroundTask(self, lambda: core.install_update(res["stable"], "main", allow_older=True),
+                               self._installed)
+        elif res.get("available"):
+            self._checked(res)
+            return
+        else:
+            self.hub.toast(f"Channel: {'Testing' if want == 'testing' else 'Stable'}. You're up to date.")
         self.refresh()
 
     def _installed(self, result):
@@ -5881,7 +5930,7 @@ class Hub(QMainWindow):
                 and time.time() - st.get("last_check", 0) > core.UPDATE_INTERVAL_S):
             BackgroundTask(self, core.check_for_update,
                            lambda r: r.get("available") and self.toast(
-                               f"Update {r['remote']} available: see the Updates page", 8000))
+                               f"Update {core.display_version(r['remote'])} available: see the Updates page", 8000))
         if up.get("reporting") and core.pending_reports() and not core.agent_running():
             BackgroundTask(self, core.upload_reports, lambda r: None)
 

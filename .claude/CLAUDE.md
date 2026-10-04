@@ -248,9 +248,27 @@ with a short summary, and list them for the owner. The owner merges himself.
 Make sure these exist (create them if missing): `auto-report`, `bug`, `suggestion`, `approved`,
 `needs-owner`, `question`, `wontfix`, `duplicate`.
 
+## Branches and update channels (the owner's call)
+
+- `main` is **Stable**: what every device gets. `testing` is the owner's **test builds**: devices whose
+  Settings → Updates → Update channel is Testing (`config["updates"]["channel"]`) install whichever of main and
+  testing has the higher build (`check_for_update`, `UPDATE_CHANNELS`). Stable devices never look at testing.
+- New features go to `testing` first. They reach `main` only when the owner says to ship them.
+- The testing branch's VERSION must always be **higher** than main's (e.g. main 6.1.4, testing 6.2.x), or test
+  devices fall back to main. Never delete the `testing` branch: test devices follow it.
+- Reports from test builds carry the `testing` label and "(testing)" in the version line. Fix those on `testing`
+  (bump its patch number) unless the bug is also on main.
+- Any fix released on `main` is merged into `testing` the same run (keep testing's higher VERSION, merge the
+  changelog entries).
+- Shipping ("ship it"): merge testing into main (main takes testing's VERSION and changelog), push main, then
+  reset testing to main so the next test cycle starts from the release.
+- Leaving Testing: the Updates page offers the stable build (`install_update(..., allow_older=True)`, only ever
+  the exact stable version). Keep that path and the rollback intact.
+
 ## Daily maintenance routine
 
-1. Read all open issues and PRs in `Ravenor907/AllyHub`, plus new comments since the last run.
+1. Read all open issues and PRs in `Ravenor907/AllyHub`, plus new comments since the last run. Fetch both
+   `main` and `testing`; see "Branches and update channels" for which branch a fix belongs on.
 2. Triage each auto-report (and approved items):
    - **Code bug in Ally Hub** → fix it, add a regression check to `tests/run_tests.py` when practical.
    - **Third-party installer or network failure** (Decky CDN down, Flathub outage, upstream script changed)

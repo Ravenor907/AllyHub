@@ -10,6 +10,11 @@
 - **Storage saver (Tools → Storage):** each game's real size including its shader cache and Windows files, and a
   one-tap cleanup of what Steam leaves behind. Anything that can hold saves starts unticked.
 
+## 1.1.1
+
+- **Update channel:** Settings → Updates can now follow **Testing** builds to get new features before everyone
+  else. Everyone stays on **Stable** unless they switch, and switching back offers the stable version right away.
+
 ## 1.1.0
 
 - **Library art:** blank blue tiles for launchers and Ally Hub itself now get a cover, banner, hero and icon,
