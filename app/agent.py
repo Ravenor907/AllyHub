@@ -875,7 +875,7 @@ class Agent:
                     and now - st.get("last_check", 0) > core.UPDATE_INTERVAL_S and self.updated_to is None):
                 res = core.check_for_update()
                 if res["available"]:
-                    ok, msg = core.install_update(res["remote"])
+                    ok, msg = core.install_update(res["remote"], res.get("branch", "main"))
                     log(msg)
                     if not ok:
                         core.report_update_failure(msg)
