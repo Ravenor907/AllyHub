@@ -710,6 +710,31 @@ check(not (sa / "shadercache/200").exists() and not (sa / "downloading/300").exi
       and (sa / "shadercache/100").exists() and (core.TRASH_DIR / "files").exists() and not any((core.TRASH_DIR / "files").iterdir())
       and (_tools / "GE-Proton8-1").exists() and not (_tools / "GE-Proton9-27").exists(), "deletes what was picked and nothing else")
 check(core.storage_clean_cmd([Path("/")]) is None, "nothing safe picked -> no command")
+(core.STEAM_ROOT / "config/config.vdf").write_text('"InstallConfigStore"\n{\n\t"Software"\n\t{\n\t\t"Valve"\n\t\t{\n\t\t\t"Steam"\n\t\t\t{\n'
+    '\t\t\t\t"CompatToolMapping"\n\t\t\t\t{\n\t\t\t\t\t"0"\n\t\t\t\t\t{\n\t\t\t\t\t\t"name"\t\t"proton_9"\n\t\t\t\t\t}\n'
+    '\t\t\t\t\t"1245620"\n\t\t\t\t\t{\n\t\t\t\t\t\t"name"\t\t"GE-Proton9-20"\n\t\t\t\t\t}\n'
+    '\t\t\t\t\t"777"\n\t\t\t\t\t{\n\t\t\t\t\t\t"name"\t\t"Custom-Internal-Id"\n\t\t\t\t\t}\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n}\n')
+check(core.compat_tools_in_use() == {"proton_9", "GE-Proton9-20", "Custom-Internal-Id"}, "reads every Proton choice, not just the first")
+for n in ("GE-Proton9-20", "my-folder"):
+    _blob(_tools / n, 100)
+(_tools / "my-folder/compatibilitytool.vdf").write_text('"compatibilitytools"\n{\n "compat_tools"\n {\n  "Custom-Internal-Id"\n  {\n   "install_path" "."\n  }\n }\n}\n')
+_blob(_tools / "linked-target", 100); (_tools / "latest").symlink_to(_tools / "linked-target")
+inuse = core.tools_in_use_folders()
+check((_tools / "GE-Proton9-20").resolve() in inuse and (_tools / "my-folder").resolve() in inuse
+      and (_tools / "linked-target").resolve() in inuse, "a Proton in use is known by folder, internal id or symlink")
+check(core.storage_clean_cmd([_tools / "GE-Proton9-20", _tools / "my-folder", _tools / "linked-target", _tools / "latest"]) is None,
+      "Proton builds in use are never deleted, even from an old scan")
+_blob(sa / "compatdata/100", 10)
+check(core.storage_clean_cmd([sa / "compatdata/100", sa / "compatdata/3123456789"]) is None,
+      "an installed game's or a non-Steam tile's Windows files are never deleted")
+(sa / "libraryfolders.vdf").write_text('"libraryfolders"\n{\n\t"1"\n\t{\n\t\t"path"\t\t"/run/media/deck/SD"\n\t\t"apps"\n\t\t{\n\t\t\t"4242"\t\t"1"\n\t\t}\n\t}\n}\n')
+_blob(sa / "compatdata/4242", 10)
+check("4242" in core.library_app_ids() and core.storage_clean_cmd([sa / "compatdata/4242"]) is None,
+      "games on an SD card that isn't inserted still count as installed")
+(sa / "libraryfolders.vdf").unlink()
+_blob(sa / "shadercache/100", 10)
+c = core.storage_clean_cmd([sa / "shadercache/100"])
+check(c and "exit $rc" in c and subprocess.run(["bash", "-c", c]).returncode == 0, "clearing a shader cache reports real success")
 # ---- Game settings: launch options as switches, Proton picker, rescue ----
 check(core.launch_flags("PROTON_LOG=1 mangohud %command% -dx11") == {"log"}, "reads which switches are on")
 check(core.set_launch_flags("PROTON_LOG=1 mangohud %command% -dx11", {"fsr4", "lsfg"})
@@ -721,6 +746,13 @@ q = 'WINEDLLOVERRIDES="dxgi=n,b" %command%'
 check(core.set_launch_flags(q, {"deck"}) == 'SteamDeck=1 WINEDLLOVERRIDES="dxgi=n,b" %command%', "quoted values are kept whole")
 check(core.launch_flags(core.set_launch_flags("", set(core.GAME_TOGGLES))) == set(core.GAME_TOGGLES), "every switch round-trips")
 check(core.launch_flags(f"{HOME}/lsfg %command%") == {"lsfg"}, "frame generation is found by its full path too")
+check(not core.launch_parseable("--name=Don't %command%") and not core.launch_parseable('bash -c "echo; %command%"')
+      and core.launch_parseable('A="b c" %command% -x') and core.launch_parseable("-dx11"), "spots launch options the switches can't edit safely")
+check(core.set_launch_flags("SteamDeck=0 PROTON_LOG=2 %command%", set()) == "SteamDeck=0 PROTON_LOG=2 %command%",
+      "the owner's own values of the same variables are left alone")
+check(core.set_launch_flags("SteamDeck=0 %command%", {"deck"}) == "SteamDeck=1 %command%", "turning a switch on replaces its variable")
+check(core.steam_appid_of(str((7 << 32) | 0x02000000)) == 7 and core.steam_appid_of("1240440") == 1240440
+      and core.steam_appid_of(None) is None, "running non-Steam games map to their tile")
 t = core.parse_vdf_text('"a"\n{\n\t"b"\t\t"x \\"y\\""\n\t"c"\n\t{\n\t\t"d"\t\t"1"\n\t}\n}\n')
 check(t == {"a": {"b": 'x "y"', "c": {"d": "1"}}}, "reads Steam's text files: " + str(t))
 lc = Path(HOME) / ".steam/root/userdata" / core.steam_user_id3() / "config/localconfig.vdf"
@@ -768,7 +800,7 @@ _qd = Path(HOME) / "qam-check"; _qd.mkdir()
 _pkg, _pj = json.loads(qf["package.json"]), json.loads(qf["plugin.json"])
 check(_pkg["version"] == core.QAM_VERSION and _pkg["type"] == "module" and _pj["api_version"] == 1 and not _pj["flags"],
       "panel files: ES module (Decky's modern loader), API 1, runs as the user (no root flag)")
-check(f'connect(1, "{_pj["name"]}")' in qf["dist/index.js"], "the panel's frontend and backend use the same plugin name")
+check(f'connect(2, "{_pj["name"]}")' in qf["dist/index.js"], "the panel's frontend and backend use the same plugin name")
 check("socket" not in qf["dist/index.js"] and "fetch(" not in qf["dist/index.js"] and "urllib" not in qf["main.py"]
       and "http" not in qf["main.py"], "the panel never talks to the network, only the local agent")
 check(core.qam_installed() is None, "panel not installed yet")
@@ -795,7 +827,7 @@ globalThis.window = {
 };
 const mod = await import(process.argv[2]);
 const plugin = mod.default();
-const render = (s) => { STATE = [s, false]; return plugin.content.f(plugin.content.p); };
+const render = (s) => { STATE = [s, null]; return plugin.content.f(plugin.content.p); };
 const labels = (n, out = []) => {
   if (n && typeof n === "object") {
     if (n.p && n.p.label) out.push(n.t + ":" + n.p.label + (n.p.checked ? "=on" : ""));
@@ -814,7 +846,7 @@ console.log(JSON.stringify({ name: plugin.name, connect: calls[0], icon: plugin.
 ''')
     r = subprocess.run(["node", str(harness), str(_qd / "index.js")], capture_output=True, text=True, timeout=30)
     out = json.loads(r.stdout.strip().splitlines()[-1]) if r.stdout.strip() else {}
-    check(out.get("name") == "Ally Hub" and out.get("connect") == [1, "Ally Hub"] and out.get("icon") == "Icon",
+    check(out.get("name") == "Ally Hub" and out.get("connect") == [2, "Ally Hub"] and out.get("icon") == "Icon",
           "the panel loads in a Decky-like page and registers itself: " + (r.stderr[-400:] or str(out)))
     check(any("isn't running" in x for x in out["error"]), "agent off: the panel says how to turn it on")
     full = out["full"]
@@ -867,9 +899,13 @@ core.update_config(lambda c: c["updates"].__setitem__("reporting", False))
 check(core.queue_report("crash", "auto", "x", "fp-auto") is None, "automatic reports still respect the off switch")
 posts.clear()
 jl = core.job_log_path("nonsteamlaunchers"); jl.parent.mkdir(parents=True, exist_ok=True); jl.write_text("full job output here")
+_us = core.upload_soon
+core.upload_soon = lambda: None                   # read the queued report before the upload thread removes it
 up = core.user_report("Battle.net still missing", "Launchers")
 check(up is not None and json.loads(up.read_text())["kind"] == "user", "Report a problem works even with automatic reports off")
 check(any("Job output" in a["name"] for a in json.loads(up.read_text())["attachments"]), "it attaches the latest task output")
+core.upload_soon = _us
+core.upload_soon()
 time.sleep(1.5)                                   # upload_soon runs on a thread
 check(any(x[1].endswith("/issues") and x[2]["title"].startswith("[report] Battle.net") for x in posts if x[2]),
       "and it's sent at once as a [report] issue")
@@ -987,6 +1023,11 @@ r = _ask({"op": "action", "name": "game_flag", "data": {"key": "fsr4", "on": Tru
 check(r["ok"] and _sent[-1] == (1240440, "PROTON_FSR4_UPGRADE=1 %command%", None) and _ask({"op": "status"})["game_flags"] == ["fsr4"],
       "panel switch sets the game's launch options through Steam: " + str(r))
 check(a._steam_appid(str((123 << 32) | 0x02000000)) == 123, "non-Steam game ids map to their tile")
+check(not _ask({"op": "action", "name": "game_flag", "data": {"key": "lsfg", "on": True}})["ok"],
+      "frame generation can't be turned on before its plugin is installed (the game wouldn't start)")
+a.qam_game["options"] = "--name=Don't %command%"
+check(not _ask({"op": "action", "name": "game_flag", "data": {"key": "deck", "on": True}})["ok"]
+      and not _ask({"op": "status"})["game_live"], "launch options the switches can't parse are never touched")
 core.game_settings, core.apply_game_settings = _gs, _ag
 check(_ask({"op": "action", "name": "backup"})["ok"], "panel can ask for a save backup")
 _spec = _iu.spec_from_loader("qam_main", loader=None)
@@ -1633,6 +1674,22 @@ gui.ask_item = _ai
 tryit("games back", hub.games.back)
 tryit("games load failed", lambda: (hub.games.open_game(_gm), hub.games._loaded(_gm, {"error": "x"})))
 tryit("game reset done", lambda: hub.on_job_finished("game-reset", 0, ""))
+_ss, _later = gui.QTimer.singleShot, []
+gui.QTimer.singleShot = staticmethod(lambda ms, fn: _later.append(fn))
+hub._sheet = object()
+gui.msg_info(None, "t", "x")
+hub._sheet = None
+gui.QTimer.singleShot = _ss
+check(len(_later) == 1, "a message while a pop-up is open waits instead of opening a window")
+tryit("deferred message shows later", _later[0])
+tryit("games loaded (unparseable)", lambda: (setattr(hub.games, "game", _gm), hub.games._loaded(_gm, dict(_gs, options="--name=Don't %command%"))))
+check(not hub.games.parseable and hub.games.new_options() == "--name=Don't %command%", "unparseable options are saved back untouched")
+tryit("games loaded again", lambda: (setattr(hub.games, "game", _gm), hub.games._loaded(_gm, _gs)))
+for _k, _cb in hub.games.checks.items():           # the mock's checkboxes don't remember their state
+    _cb.isChecked = (lambda _k=_k: _k in hub.games.flags0)
+check(hub.games.new_options() == _gs["options"], "unchanged settings save the exact original text")
+hub.games.checks["deck"].isChecked = lambda: True
+check(hub.games.new_options() == "SteamDeck=1 PROTON_LOG=1 mangohud %command%", "one switch changes only its own token")
 tryit("panel card", hub.games.qam_card)
 _lj.clear()
 hub.runner.submit = lambda label, cmd, key="": _lj.append((key, cmd))
