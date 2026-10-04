@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.0
+
+- **Library art:** blank blue tiles for launchers and Ally Hub itself now get a cover, banner, hero and icon,
+  made on your handheld from each program's own icon. No SteamGridDB, nothing downloaded. New launchers get theirs
+  automatically, and Install → Launchers has **Fix artwork** and **Use my own picture**.
+- Pictures you set yourself are never replaced.
+
 ## 1.0.0
 
 The first release of Ally Hub for the ROG Xbox Ally X on SteamOS.

@@ -548,6 +548,121 @@ subprocess.run(["bash", "-c", cc])
 check(not (core.COMPATDATA / "EpicGamesLauncher").exists() and not core.NSL_DOWNLOADS.exists() and bn.exists(),
       "cleaner deletes the leftovers and nothing else")
 check(core.nsl_clean_cmd([Path("/etc/x")]) is None, "nothing safe to delete -> no command")
+# ---- library art: icons out of .exe files, art drawn as SVG, handed to Steam ----
+import struct as _st, xml.etree.ElementTree as _ET
+def _fake_exe(images):
+    # a minimal PE32 with one icon group holding images [(width_byte, bpp, bytes)]
+    ids = list(range(1, len(images) + 1))
+    grp = _st.pack("<HHH", 0, 1, len(images)) + b"".join(
+        _st.pack("<BBBBHHIH", w, w, 0, 0, 1, bpp, len(img), i) for (w, bpp, img), i in zip(images, ids))
+    blobs = [img for _w, _b, img in images] + [grp]
+    # layout inside .rsrc: root dir, type dirs, name dirs, lang dirs, data entries, then blobs
+    def d(n): return _st.pack("<IIHHHH", 0, 0, 0, 0, 0, n)
+    root, t3, t14 = 0, 16 + 16, 0
+    t3 = 16 + 8 * 2
+    t14 = t3 + 16 + 8 * len(ids)
+    names_start = t14 + 16 + 8
+    lang = [names_start + k * (16 + 8) for k in range(len(blobs))]
+    data_e = lang[-1] + 24
+    blob_off = data_e + 16 * len(blobs)
+    rs = bytearray()
+    rs += d(2) + _st.pack("<II", 3, 0x80000000 | t3) + _st.pack("<II", 14, 0x80000000 | t14)
+    rs += d(len(ids)) + b"".join(_st.pack("<II", i, 0x80000000 | lang[k]) for k, i in enumerate(ids))
+    rs += d(1) + _st.pack("<II", 1, 0x80000000 | lang[-1])
+    for k in range(len(blobs)):
+        rs += d(1) + _st.pack("<II", 1033, data_e + 16 * k)
+    pos = blob_off
+    for b in blobs:
+        rs += _st.pack("<IIII", 0x1000 + pos, len(b), 0, 0); pos += len(b)
+    for b in blobs:
+        rs += b
+    hdr = bytearray(0x200)
+    hdr[0:2] = b"MZ"; hdr[0x3C:0x40] = _st.pack("<I", 0x40)
+    hdr[0x40:0x44] = b"PE\0\0"
+    hdr[0x44:0x58] = _st.pack("<HHIIIHH", 0x14C, 1, 0, 0, 0, 0xE0, 0x102)
+    opt = 0x58
+    hdr[opt:opt + 2] = _st.pack("<H", 0x10B)
+    hdr[opt + 96 + 16:opt + 96 + 24] = _st.pack("<II", 0x1000, len(rs))
+    sec = opt + 0xE0
+    hdr[sec:sec + 40] = b".rsrc\0\0\0" + _st.pack("<IIIIIIHHI", len(rs), 0x1000, len(rs), 0x200, 0, 0, 0, 0, 0)
+    return bytes(hdr) + bytes(rs)
+_png2 = core._png_encode(2, 2, bytes([0, 0, 255, 255] * 4))
+_dib = _st.pack("<IiiHHIIiiII", 40, 4, 8, 1, 32, 0, 0, 0, 0, 0, 0) + bytes([255, 0, 0, 255] * 16) + bytes(4 * 4)
+_exe = Path(HOME) / "Battle.net Launcher.exe"
+_exe.write_bytes(_fake_exe([(32, 32, _dib), (0, 32, _png2)]))
+ents = core.pe_icon_entries(_exe.read_bytes())
+check([e[0] for e in ents] == [256, 32], "finds every image of the program's icon, biggest first: " + str([e[:2] for e in ents]))
+check(core.exe_icon_png(_exe) == _png2, "uses the program's own 256 px icon as is")
+_exe2 = Path(HOME) / "old.exe"; _exe2.write_bytes(_fake_exe([(4, 32, _dib)]))
+px = core._png_pixels(core.exe_icon_png(_exe2) or b"")
+check(px and px[:2] == (4, 4) and px[2][:4] == bytes([0, 0, 255, 255]), "turns a classic icon bitmap into a PNG (BGRA -> RGBA)")
+check(core.exe_icon_png(Path(HOME) / "missing.exe") is None and core.pe_icon_entries(b"MZ junk") == [],
+      "a missing or broken program just has no icon")
+check(core.icon_color(_png2).startswith("#") and int(core.icon_color(_png2)[5:7], 16) > 150, "picks the icon's color for the background")
+check(core.icon_color(None) == core.ART_FALLBACK_COLOR, "no icon -> a calm default color")
+arts = core.art_svgs("Tom & Jerry's <Launcher>", _png2)
+check(set(arts) == {"portrait", "wide", "hero", "logo"} and arts["portrait"][1:] == (600, 900),
+      "makes a tall cover, wide banner, hero and logo")
+for k, (svg, w, h) in arts.items():
+    _ET.fromstring(svg)
+check("Tom &amp; Jerry" in arts["portrait"][0] and "data:image/png;base64," in arts["wide"][0], "names are escaped and the icon is embedded")
+check("filter" not in "".join(a[0] for a in arts.values()), "only SVG features Qt can draw")
+g = core.art_svgs("Netflix", None, "#e11d48", '<circle cx="12" cy="12" r="10" />')
+check("icon" in g and "circle" in g["icon"][0], "no icon of its own -> a drawn icon tile too")
+sz, lines = core._wrap_title("Rockstar Games Launcher", 520, 66)
+check(len(lines) <= 2 and all(len(l) * sz * 0.56 <= 520 for l in lines), "long names wrap to fit")
+# shortcuts.vdf reader and the plan
+_vdf = (b"\x00shortcuts\x00\x000\x00\x02appid\x00" + (3123456789).to_bytes(4, "little") + b"\x01AppName\x00Battle.net\x00"
+        b"\x01Exe\x00\"" + str(_exe).encode() + b"\"\x00\x01icon\x00\x00\x08"
+        b"\x001\x00\x02appid\x00" + (2900000001).to_bytes(4, "little") + b"\x01AppName\x00Ally Hub\x00"
+        b"\x01Exe\x00\"/home/deck/.local/bin/allyhub\"\x00\x08\x08\x08")
+core.shortcuts_vdf().write_bytes(_vdf)
+_cef = core.cef_eval
+core.cef_eval = lambda js, timeout=20, port=None: None
+sc = core.steam_shortcuts()
+check([(s["appid"], s["name"]) for s in sc] == [(3123456789, "Battle.net"), (2900000001, "Ally Hub")],
+      "reads tiles and their ids from shortcuts.vdf: " + str(sc))
+plan = core.art_plan()
+check([t["name"] for t in plan["todo"]] == ["Battle.net", "Ally Hub"] and plan["todo"][0]["icon_png"] == _png2
+      and plan["todo"][1]["self"], "blank tiles get art, with each program's own icon")
+check([t["name"] for t in core.art_plan(only=["battle.net"])["todo"]] == ["Battle.net"], "after an install: only the new tiles")
+sent = []
+core.cef_eval = lambda js, timeout=20, port=None: (sent.append(js), '[0, 3, "icon"]')[1]
+res = core.apply_art(3123456789, {"portrait": b"P", "wide": b"W", "hero": b"H", "logo": b"L"}, _png2, "Battle.net")
+grid = core.steam_grid_dir()
+check(res["live"] and res["files"] == 4 and (grid / "3123456789p.png").read_bytes() == b"P"
+      and (grid / "3123456789.png").exists() and (grid / "3123456789_hero.png").exists() and (grid / "3123456789_logo.png").exists(),
+      "saves the art in Steam's grid folder and hands it over live")
+check(sent and "SetCustomArtworkForApp(id" in sent[0] and "3123456789" in sent[0] and "SetShortcutIcon" in sent[0]
+      and (core.ART_DIR / "3123456789_icon.png").read_bytes() == _png2, "sets the icon from the program's own icon file")
+check([t["name"] for t in core.art_plan()["todo"]] == ["Ally Hub"], "tiles with art are left alone")
+(grid / "2900000001p.jpg").write_bytes(b"mine")
+p2 = core.art_plan(redo=True)
+check([t["name"] for t in p2["todo"]] == ["Battle.net"] and p2["ours"] == 1,
+      "remaking only ever touches art Ally Hub made, never the owner's own")
+core.cef_eval = lambda js, timeout=20, port=None: None
+res = core.apply_art(2900000001, {"portrait": b"P", "hero": b"H"}, None, "Ally Hub")
+check(res["files"] == 1 and (grid / "2900000001p.jpg").read_bytes() == b"mine" and (grid / "2900000001_hero.png").exists(),
+      "a picture the owner set stays, kind by kind; the rest still gets art")
+res = core.apply_art(555, {"portrait": b"P"}, None, "New")
+check(not res["live"] and res["files"] == 1, "without Steam's connection the art is saved for the next Steam start")
+(grid / "3123456789_logo.png").write_bytes(b"from SteamGridDB")
+core.apply_art(3123456789, {"portrait": b"P2", "logo": b"L2"}, None, "Battle.net")
+check((grid / "3123456789_logo.png").read_bytes() == b"from SteamGridDB" and (grid / "3123456789p.png").read_bytes() == b"P2",
+      "art replaced after Ally Hub made it is no longer treated as Ally Hub's")
+core.apply_art(3123456789, {"portrait": b"MY PHOTO"}, None, "Battle.net", mine=True)
+check((grid / "3123456789p.png").read_bytes() == b"MY PHOTO" and "3123456789" not in core.art_made()
+      and not core.art_is_ours(3123456789, "portrait"), "the owner's own picture goes in and is never remade")
+check(core.art_plan(redo=True)["todo"] == [], "remake leaves the owner's pictures alone")
+core.cef_eval = _cef
+_payload = "x" * 300000
+import socket as _so2
+a, b = _so2.socketpair()
+_th.Thread(target=core._ws_send, args=(a, _payload)).start()
+hdr = core._recv_exact(b, 2); n = int.from_bytes(core._recv_exact(b, 8), "big"); m = core._recv_exact(b, 4)
+body = core._recv_exact(b, n)
+check(bytes(c ^ m[i % 4] for i, c in enumerate(body)).decode() == _payload, "big messages to Steam are masked correctly")
+a.close(); b.close()
 # ---- reports: attachments, snapshot, instant upload, per-version repeats, manual reports ----
 posts = []
 def _fake_gh(method, path, data=None, **kw):
@@ -1225,6 +1340,45 @@ tryit("launchers uninstall done", lambda: hub.on_job_finished("nsl-uninstall", 0
 tryit("launchers find leftovers", hub.launchers.find_leftovers)
 tryit("launchers show leftovers", lambda: hub.launchers._show_leftovers([{"label": "x", "path": Path(HOME) / "x", "size": 5, "warn": "w"}]))
 tryit("launchers checked", lambda: hub.launchers._checked(["Battle.net"], {"res": {"missing": [], "no_shortcut": ["Battle.net"]}, "live": False}))
+tryit("fix artwork", hub.launchers.fix_artwork)
+_ras = gui.rasterize_svg
+gui.rasterize_svg = lambda svg, w, h: b"png:" + str(w).encode()
+pngs, icon = gui.make_art({"appid": 1, "name": "Netflix", "icon_png": None, "color": None, "self": False})
+check(set(pngs) == {"portrait", "wide", "hero", "logo"} and icon == b"png:256",
+      "draws all four pictures, and an icon tile when the program has none")
+pngs, icon = gui.make_art({"appid": 2, "name": "Ally Hub", "icon_png": None, "color": None, "self": True})
+check(icon == b"png:512", "Ally Hub's own tile uses Ally Hub's logo")
+check(gui.art_glyph("Xbox Game Pass")[1] == "#16a34a" and gui.art_glyph("Unknown")[0], "icon-less tiles get a fitting symbol")
+_t = {"appid": 1, "name": "Battle.net", "icon_png": None, "color": None, "self": False}
+tryit("art planned", lambda: hub.launchers._art_planned({"tiles": 1, "ours": 0, "todo": [_t]}, False, False))
+hub.launchers._art_quiet = False
+tryit("art steps", lambda: [hub.launchers._art_step() for _ in range(3)])
+check(not hub.launchers._art_todo, "draws the tiles one by one")
+hub.launchers._art_busy = True
+hub.launchers.fix_artwork(only=["X"], quiet=True)
+check(hub.launchers._art_queue == [(["X"], True, False)], "a request during a run waits its turn")
+hub.launchers._art_queue = []
+tryit("art ready", hub.launchers._art_ready)
+check(not hub.launchers._art_busy, "the button comes back after a run")
+tryit("art plan error", lambda: hub.launchers._art_planned({"error": "boom"}, False, False))
+for _plan in ({"tiles": 0, "ours": 0, "todo": []}, {"tiles": 2, "ours": 1, "todo": []}, {"tiles": 2, "ours": 0, "todo": []}, None):
+    tryit("art nothing to do", lambda: hub.launchers._art_planned(_plan, False, False))
+gui.rasterize_svg = lambda svg, w, h: b""
+_q = []
+_qr = core.queue_report
+core.queue_report = lambda *a, **k: _q.append(a[1]) or True
+hub.launchers._art_quiet = True
+hub.launchers._art_todo, hub.launchers._art_made, hub.launchers._art_total = [_t], [], 1
+tryit("art draw fails", lambda: [hub.launchers._art_step() for _ in range(2)])
+check(_q and "couldn't draw" in _q[-1], "a system that can't draw the art files a report")
+tryit("art sent", lambda: hub.launchers._art_sent([("A", {"live": True, "files": 4}), ("B", {"live": False, "files": 4}),
+                                                    ("C", {"live": False, "files": 0})], False))
+check(any("didn't take" in x for x in _q), "art Steam didn't take files a report")
+tryit("art sent quietly", lambda: hub.launchers._art_sent([("A", {"live": True, "files": 4})], True))
+core.queue_report = _qr
+gui.rasterize_svg = _ras
+tryit("own picture", hub.launchers.own_picture)
+check(hub.launchers.btn_art.isEnabled is not None, "the art button exists")
 hub.runner.submit = _sub2
 tryit("NSL card opens the page", lambda: hub.on_item_action("nonsteamlaunchers", "install"))
 check(hub.current_page() is hub.launchers, "the catalog card opens the themed page, not the script's windows")
