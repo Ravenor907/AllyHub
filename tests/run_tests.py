@@ -251,13 +251,14 @@ check(sp["layout"] == "linked" and sp["direction"] == "ccw" and sp["rainbow"] is
 check("layout" not in core.normalize_effect({"type": "wave"}), "other effects don't grow spiral keys")
 own = core.normalize_effect({"type": "spiral", "rainbow": False, "colors": []})
 check(own["rainbow"] is False and len(own["colors"]) == 2, "unticking rainbow gives two colors to edit")
-z = core.zone_frames(core.PRESETS["RGB Spiral"], 0.3)
+_smooth = dict(core.PRESETS["RGB Spiral"], engine="smooth")     # Ally Hub's own (streamed) spiral
+z = core.zone_frames(_smooth, 0.3)
 check(len(z) == 4 and len(set(z)) == 4, "linked spiral: four different zone colors")
-same = core.zone_frames(dict(core.PRESETS["RGB Spiral"], layout="same"), 0.3)
+same = core.zone_frames(dict(_smooth, layout="same"), 0.3)
 check(same[0] == same[2] and same[1] == same[3] and same[0] != same[1], "matching sticks show the same pattern")
-mir = core.zone_frames(dict(core.PRESETS["RGB Spiral"], layout="mirror"), 0.7)
+mir = core.zone_frames(dict(_smooth, layout="mirror"), 0.7)
 check(mir[0] != mir[2], "mirrored sticks spin opposite ways")
-check(core.zone_frames(core.PRESETS["RGB Spiral"], 0.0) != core.zone_frames(core.PRESETS["RGB Spiral"], 0.5),
+check(core.zone_frames(_smooth, 0.0) != core.zone_frames(_smooth, 0.5),
       "spiral moves over time")
 check(len(set(core.zone_frames(core.PRESETS["Aurora"], 1.0))) == 1, "other effects light all zones alike")
 chip = core.hid_effect_packets(dict(core.PRESETS["RGB Spiral"], engine="chip", direction="ccw"), 255)
@@ -1002,6 +1003,25 @@ for _out, _want in ((core.USER + " P 01/01/2026 0 99999 7 -1", True), (core.USER
     _pw[_out] = core.sudo_password_set() is _want
 core.run_quiet = _rq
 check(all(_pw.values()), "password check says no only when passwd clearly says no: " + str(_pw))
+# the owner (1.3.4): the chip's own spiral is the default, the streamed one looked choppy
+check(core.normalize_effect({"type": "spiral"})["engine"] == "chip"
+      and all(core.uses_chip_effect(core.PRESETS[n]) for n in ("RGB Spiral", "Neon Vortex")),
+      "spirals default to the chip's built-in spiral")
+check(len(set(core.zone_frames(core.PRESETS["Neon Vortex"], 0.3))) > 1
+      and core.zone_frames(core.PRESETS["Neon Vortex"], 0.3) == core.zone_frames(dict(core.PRESETS["Neon Vortex"], rainbow=True, layout="linked"), 0.3),
+      "a chip spiral previews as the rainbow the chip shows")
+core.update_config(lambda c: (c["lighting"].update(chip_spiral=False, effect=dict(core.PRESETS["Neon Vortex"], engine="smooth"),
+                                                    custom={"Mine": {"type": "spiral", "engine": "smooth"}, "Calm": {"type": "breathe"}}),
+                              c["game_colors"].update(Halo={"type": "spiral", "engine": "smooth"}, Doom="#ff0000")))
+check(core.migrate_chip_spiral() is True, "saved spirals move to the chip's spiral once")
+_lc = core.load_config()
+check(_lc["lighting"]["effect"]["engine"] == "chip" and _lc["lighting"]["custom"]["Mine"]["engine"] == "chip"
+      and _lc["lighting"]["custom"]["Calm"] == {"type": "breathe"} and _lc["game_colors"]["Halo"]["engine"] == "chip"
+      and _lc["game_colors"]["Doom"] == "#ff0000" and _lc["lighting"]["chip_spiral"], "only spirals change: " + str(_lc["lighting"]))
+core.update_config(lambda c: c["lighting"]["effect"].__setitem__("engine", "smooth"))
+check(core.migrate_chip_spiral() is False and core.load_config()["lighting"]["effect"]["engine"] == "smooth",
+      "picking Ally Hub's style afterwards sticks")
+core.update_config(lambda c: (c["lighting"].update(effect=None, custom={}), c["game_colors"].clear()))
 check(core.DEFAULT_CONFIG["setup"]["password_known"] is False, "'I already have one' is remembered in setup")
 # ---- reports: attachments, snapshot, instant upload, per-version repeats, manual reports ----
 posts = []
@@ -1279,7 +1299,7 @@ _zf = core.hid_zone_frame
 core.hid_zone_frame = lambda zones, b, leds=None, method=None: (sent.append((tuple(zones), method)), True)[1]
 st = agent.Animator(types.SimpleNamespace(cfg={"lighting": {"encoding": "hid", "hid_method": "m6", "fps": 30}},
                                           leds=core.find_leds()))
-st.spec = (core.normalize_effect(core.PRESETS["RGB Spiral"]), 255, {})
+st.spec = (core.normalize_effect(dict(core.PRESETS["RGB Spiral"], engine="smooth")), 255, {})
 st.started_at -= 0.0
 st.step(); time.sleep(0.12); st.step()
 check(len(sent) == 2 and sent[0][0] != sent[1][0] and sent[0][1] == "m6", "agent streams changing spiral frames")

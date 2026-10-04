@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.4
+
+- **RGB Spiral and Neon Vortex now use the lighting chip's built-in spiral by default.** It's smooth and uses no
+  battery; Ally Hub's own spiral looked choppy. Your saved spirals switch over once. Ally Hub's style is still under
+  Style if you want your own colors (the chip's spiral is rainbow only).
+
 ## 1.3.3
 
 - **Setup no longer sends you to change your password over and over.** Ally Hub now checks again after the
