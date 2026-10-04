@@ -6,22 +6,18 @@
   essentials you pick (Decky Loader, Ally Hub in Quick Access, Ludusavi), lighting and a few favorites. Skip any
   step; Home shows a **Finish setting up** card with whatever is left, and Setup can be run again any time.
 - **The installer does more on a brand new install:** it adds Ally Hub to your Game Mode library and turns the
-  background helper on, so the Quick Access panel, Game Boost, save snapshots and sleep tracking work from the start.
-  Updates and reinstalls leave your settings alone.
+  background helper on. Updates and reinstalls leave your settings alone.
+- **Save time machine (Tools → Saves):** a snapshot of a game's saves every time it starts, keeping the last few per
+  game. Restore any of them from Game Mode; your saves as they are now are kept first, and **Undo the last restore**
+  puts them back. Uses Ludusavi (one tap to install).
+- **Sleep guardian (Tools → Sleep):** every sleep is tracked: how long, how much battery it used, what woke the
+  handheld, and sleeps that failed. It flags heavy drain and devices that keep waking it, and can stop a USB device
+  from waking it (the power button always works).
 
-## 1.3.1
+## 1.2.3
 
 - **Desktop Mode is no longer blown up.** The automatic interface size now takes the desktop's own display scaling
   into account instead of adding to it, so Ally Hub looks the same size in Desktop Mode and Game Mode.
-
-## 1.3.0
-
-- **Save time machine (Tools → Saves):** turn it on and Ally Hub snapshots a game's saves every time it starts,
-  keeping the last few per game. Restore any of them from Game Mode. Your saves as they are now are kept first, and
-  **Undo the last restore** puts them back. Uses Ludusavi (one tap to install).
-- **Sleep guardian (Tools → Sleep):** every sleep is tracked: how long, how much battery it used, what woke the
-  handheld, and sleeps that failed. If sleep drains too much or a USB device keeps waking it, the page says so and
-  can stop that device from waking it (the power button always works). **Send the sleep details** reports it.
 
 ## 1.2.2
 
