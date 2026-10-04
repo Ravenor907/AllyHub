@@ -908,6 +908,8 @@ check(core.ludusavi_ready(), "sees Ludusavi")
 check(core.ludusavi_title(100, "Big Game") == "Big Game" and core.ludusavi_title(100) == "Big Game"
       and sum(1 for l in _flog.read_text().splitlines() if '"find"' in l) == 1, "finds a game's Ludusavi title by Steam id, once")
 check(core.ludusavi_title(None, "Battle.net") == "Battle.net Thing" and core.ludusavi_title(555) == "", "by name for non-Steam games; unknown games are skipped")
+check("steam:555" not in core.read_json(core.TM_TITLES, {}), "a lookup without a clear answer is tried again later")
+check(core.ludusavi_title_cached(100) == "Big Game" and core.ludusavi_title_cached(None, "nope") == "", "cached titles for quick checks")
 ba = core.tm_backup_args("Big Game", 5)
 check(ba[-1] == "Big Game" and "--full-limit" in ba and ba[ba.index("--full-limit") + 1] == "5" and "--no-cloud-sync" in ba
       and str(core.TM_DIR) in ba, "snapshots go to their own folder with Ludusavi keeping the newest few")
@@ -916,6 +918,11 @@ sn = core.tm_snapshots()
 check(list(sn) == ["Big Game"] and sn["Big Game"][0]["name"] == "backup-2", "lists snapshots per game, newest first")
 _r = subprocess.run(["bash", "-c", core.tm_restore_cmd("Big Game", "backup-1")], capture_output=True, text=True)
 calls = [json.loads(l) for l in _flog.read_text().splitlines()][-2:]
+_rc = core.tm_restore_cmd("Big Game", "b")
+check("'Big Game' && flatpak run com.github.mtkennerly.ludusavi restore" in _rc and ">/dev/null" not in _rc,
+      "the restore only runs if saving the current saves worked, and its output is kept")
+_ru = core.tm_restore_cmd("Big Game", "u1", undo=True)
+check(str(core.TM_BEFORE_RESTORE) in _ru and "u1" in _ru and " backup " not in _ru, "undo restores the safety copy")
 check(_r.returncode == 0 and "Restored Big Game" in _r.stdout and "backup" in calls[0] and str(core.TM_BEFORE_RESTORE) in calls[0]
       and "restore" in calls[1] and calls[1][calls[1].index("--backup") + 1] == "backup-1",
       "a restore saves what's there now first, then restores the chosen snapshot: " + _r.stderr[-200:])
@@ -931,18 +938,23 @@ _wk = Path(HOME) / "fake-wakeup"
 _usb = Path(HOME) / "fake-sys/devices/pci0000:00/usb1/1-3"; (_usb / "power").mkdir(parents=True); (_usb / "power/wakeup").write_text("enabled")
 _btn = Path(HOME) / "fake-sys/devices/LNXSYSTM:00/PNP0C0C:00"; (_btn / "power").mkdir(parents=True); (_btn / "power/wakeup").write_text("enabled")
 for n, name, dev in (("wakeup0", "1-3", _usb), ("wakeup1", "PNP0C0C:00", _btn)):
-    (_wk / n).mkdir(parents=True); (_wk / n / "name").write_text(name); (_wk / n / "event_count").write_text("5")
+    (_wk / n).mkdir(parents=True); (_wk / n / "name").write_text(name); (_wk / n / "wakeup_count").write_text("5")
     (_wk / n / "device").symlink_to(dev)
 core.POWER_ROOT, core.WAKEUP_ROOT = _pw, _wk
 pre = core.sleep_snapshot()
 check(pre["stats"]["success"] == 10 and pre["wake"]["wakeup0"]["name"] == "1-3" and pre["wake"]["wakeup0"]["wake_file"],
       "reads suspend stats and wakeup sources")
-(_wk / "wakeup0/event_count").write_text("6"); (_pw / "suspend_stats/last_hw_sleep").write_text(str(int(3600 * 0.5 * 1e6)))
+(_wk / "wakeup0/wakeup_count").write_text("6"); (_pw / "suspend_stats/total_hw_sleep").write_text(str(int(3600 * 0.5 * 1e6)))
 post = core.sleep_snapshot()
 e = core.sleep_entry(pre, post, 7200, 80.0, 70.0, False)
 check(e["drop"] == 10.0 and e["per_hour"] == 5.0 and e["woke_by"] == ["1-3"] and not e["failed"] and e["hw_sleep_pct"] == 25.0,
       "a sleep's cost, cause and deep-sleep share: " + str(e))
 check(core.sleep_entry(pre, post, 7200, 80.0, 90.0, True)["per_hour"] is None, "charging sleeps don't count as drain")
+check(core.sleep_entry(pre, dict(post, wc=pre["wc"], irq="acpi PNP0C0C"), 600, 80.0, 79.0, False)["woke_by"] == ["acpi PNP0C0C"],
+      "without a counter change, the kernel's last wakeup interrupt names the cause")
+check(core.sleep_snapshot(full=False).get("wake") is None and "wc" in core.sleep_snapshot(full=False), "the every-second snapshot stays light")
+fl = core.sleep_failure_entry({"last_failed_dev": "xhci", "last_failed_step": "suspend"})
+check(fl["failed"] and fl["slept"] == 0 and fl["failed_dev"] == "xhci", "a sleep the kernel gave up on is recorded too")
 (_pw / "suspend_stats/fail").write_text("1"); (_pw / "suspend_stats/last_failed_dev").write_text("amdgpu")
 fe = core.sleep_entry(post, core.sleep_snapshot(), 30, 70.0, 70.0, False)
 check(fe["failed"] and fe["failed_dev"] == "amdgpu", "a failed sleep and the device behind it")
@@ -956,9 +968,13 @@ check(f["wakes"]["fix"] and f["wakes"]["fix"]["name"] == "1-3" and "failed" in f
 btn = dict(short, woke_by=["PNP0C0C:00"])
 check(core.sleep_findings([btn] * 3, srcs)[0]["fix"] is None, "never offers to stop the power button (or anything not USB)")
 check(core.sleep_findings([], srcs) == [], "nothing to say without sleeps")
-nc = core.nowake_cmd(["/devices/pci0000:00/usb1/1-3", "/devices/LNXSYSTM:00/PNP0C0C:00", '/devices/usb1/x"y'])
-check(nc.count("DEVPATH") == 1 and "PNP0C0C" not in nc and "udevadm" in nc, "the wake rule only ever covers USB devices")
-check("rm -f" in core.nowake_cmd([]), "allowing everything again removes the rule")
+nc = core.nowake_cmd(["/devices/pci0000:00/usb1/1-3", "/devices/LNXSYSTM:00/PNP0C0C:00", '/devices/usb1/x"y',
+                      "/devices/pci0000:00/usb1"])
+check(nc.count("DEVPATH") == 1 and "PNP0C0C" not in nc and "udevadm" in nc and 'SUBSYSTEM=="usb"' in nc and "usb1/power" not in nc,
+      "the wake rule only ever covers USB devices, never a whole USB bus: " + nc[:200])
+na = core.nowake_cmd([], allow=["/devices/pci0000:00/usb1/1-3"])
+check("rm -f" in na and "echo enabled" in na and "1-3/power/wakeup" in na, "allowing a device again removes the rule and re-enables it now")
+check(core._never_offer({"devpath": "/devices/pci0000:00/usb1", "wake_file": "/x"}), "a USB bus itself is never offered")
 check(core.duration_text(7260) == "2 h 1 min" and core.duration_text(90) == "1 min", "sleep lengths read naturally")
 core.record_sleep(e); check(core.sleep_log()[-1]["slept"] == 7200, "sleeps are logged")
 # ---- reports: attachments, snapshot, instant upload, per-version repeats, manual reports ----
@@ -1946,6 +1962,11 @@ hub.runner.submit = lambda label, cmd, key="": _tm.append((key, cmd))
 gui.ask_item = lambda *a, **k: (core.when_text("2026-10-01T10:00:00Z"), True)
 tryit("saves restore", lambda: hub.saves.pick("Big Game"))
 check(_tm and _tm[-1][0] == "tm-restore" and "b1" in _tm[-1][1], "picking a snapshot restores that one")
+hub.saves.undo = {"Big Game": [{"name": "u1", "when": "2026-10-04T10:00:00Z"}]}
+gui.ask_item = lambda *a, **k: (a[3][0], True)
+tryit("saves undo", lambda: hub.saves.pick("Big Game"))
+check("u1" in _tm[-1][1] and str(core.TM_BEFORE_RESTORE) in _tm[-1][1], "the last restore can be undone from the same list")
+tryit("saves loaded (both lists)", lambda: hub.saves._loaded({"tm": _snaps, "undo": {}}))
 gui.ask_item, hub.runner.submit = _ai3, _sub4
 tryit("saves restore done", lambda: hub.on_job_finished("tm-restore", 0, ""))
 hub.go("Sleep")
@@ -1962,10 +1983,15 @@ _sj = []
 hub.needs_password = lambda: False
 hub.runner.submit = lambda label, cmd, key="": _sj.append((key, cmd))
 tryit("sleep stop wake", lambda: hub.sleep.stop_wake({"kind": "nowake", "devpath": "/devices/pci0000:00/usb1/1-3", "name": "1-3"}))
-check(_sj and _sj[-1][0] == "sleep-nowake" and core.load_config()["sleep"]["no_wake"] == ["/devices/pci0000:00/usb1/1-3"],
-      "a device can be stopped from waking the handheld")
+check(_sj and _sj[-1][0] == "sleep-nowake" and core.load_config()["sleep"]["no_wake"] == [],
+      "stopping a device only changes the saved list once the job worked")
+tryit("sleep nowake done", lambda: hub.sleep.job_done(True))
+check(core.load_config()["sleep"]["no_wake"] == ["/devices/pci0000:00/usb1/1-3"], "a device can be stopped from waking the handheld")
 tryit("sleep allow wake", lambda: hub.sleep.allow_wake("/devices/pci0000:00/usb1/1-3"))
-check(core.load_config()["sleep"]["no_wake"] == [] and "rm -f" in _sj[-1][1], "and allowed again")
+tryit("sleep allow failed", lambda: hub.sleep.job_done(False))
+check(core.load_config()["sleep"]["no_wake"] == ["/devices/pci0000:00/usb1/1-3"], "a failed job leaves the list as it was")
+tryit("sleep allow wake again", lambda: (hub.sleep.allow_wake("/devices/pci0000:00/usb1/1-3"), hub.sleep.job_done(True)))
+check(core.load_config()["sleep"]["no_wake"] == [] and "echo enabled" in _sj[-1][1], "and allowed again, right away")
 hub.needs_password, hub.runner.submit = _np5, _sub5
 core.wakeup_sources = _ws
 tryit("sleep send details", hub.sleep.send_details)

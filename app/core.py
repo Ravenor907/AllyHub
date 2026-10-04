@@ -3642,17 +3642,34 @@ def ludusavi_title(appid: Optional[int] = None, name: str = "") -> str:
         return cache[key]
     if key == "name:":
         return ""
-    args = ["find", "--api"] + (["--steam-id", str(appid)] if key.startswith("steam:") else [name.strip()])
-    rc, out = run_quiet(ludusavi_cmd(*args), timeout=90)
-    title = ""
-    try:
-        games = json.loads(out).get("games") or {} if rc == 0 and out else {}
-        title = next(iter(games), "")
-    except (ValueError, AttributeError):
-        title = ""
-    cache[key] = title
-    write_json(TM_TITLES, cache)
+
+    def ask(args):
+        """(title, definitely-unknown). Only a clear "unknown game" answer is remembered as unknown, so a
+        timeout or an offline first run is simply tried again next time."""
+        rc, out = run_quiet(["nice", "-n", "19"] + ludusavi_cmd("find", "--api", *args), timeout=90)
+        try:
+            data = json.loads(out) if out else {}
+        except ValueError:
+            return "", False
+        title = next(iter(data.get("games") or {}), "") if isinstance(data, dict) else ""
+        unknown = bool(((data.get("errors") or {}) if isinstance(data, dict) else {}).get("unknownGames"))
+        return title, unknown and not title
+
+    title, unknown = ask(["--steam-id", str(appid)]) if key.startswith("steam:") else ("", True)
+    if not title and name.strip():
+        title, unknown2 = ask(["--normalized", name.strip()])   # exact name first, then normalized (never fuzzy)
+        unknown = unknown and unknown2
+    if title or unknown:
+        cache[key] = title
+        write_json(TM_TITLES, cache)
     return title
+
+
+def ludusavi_title_cached(appid: Optional[int] = None, name: str = "") -> str:
+    """The title from earlier lookups only (never runs Ludusavi), for quick checks in the window."""
+    cache = read_json(TM_TITLES, {}) or {}
+    key = f"steam:{appid}" if appid and appid < 0x80000000 else f"name:{name.strip().lower()}"
+    return cache.get(key, "")
 
 
 def tm_backup_args(title: str, keep: int, path: Path = None) -> list:
@@ -3671,11 +3688,12 @@ def tm_record(title: str, rc: int, game: str = "") -> None:
     write_json(TM_STATE, st)
 
 
-def tm_snapshots() -> dict:
-    """{title: [{"name", "when", "locked"}...] newest first} from Ludusavi's own listing of the snapshot folder."""
-    if not TM_DIR.exists():
+def tm_snapshots(path: Path = None) -> dict:
+    """{title: [{"name", "when", "locked"}...] newest first} from Ludusavi's own listing of a snapshot folder."""
+    path = path or TM_DIR
+    if not path.exists():
         return {}
-    rc, out = run_quiet(ludusavi_cmd("backups", "--api", "--path", str(TM_DIR)), timeout=120)
+    rc, out = run_quiet(ludusavi_cmd("backups", "--api", "--path", str(path)), timeout=120)
     try:
         games = json.loads(out).get("games") or {} if rc == 0 and out else {}
     except ValueError:
@@ -3688,13 +3706,18 @@ def tm_snapshots() -> dict:
     return res
 
 
-def tm_restore_cmd(title: str, backup: str) -> str:
-    """Restore one snapshot. What's there now is saved first (in its own folder), so a restore can be undone."""
-    before = " ".join(shlex.quote(a) for a in tm_backup_args(title, 3, TM_BEFORE_RESTORE)[:-2] + [title])
+def tm_restore_cmd(title: str, backup: str, undo: bool = False) -> str:
+    """Restore one snapshot. What's there now is saved first (in its own folder) and the restore only runs if
+    that worked, so every restore can be undone. undo=True restores that safety copy instead."""
+    src = TM_BEFORE_RESTORE if undo else TM_DIR
     restore = " ".join(shlex.quote(a) for a in ludusavi_cmd("restore", "--force", "--no-cloud-sync", "--path",
-                                                            str(TM_DIR), "--backup", backup, title))
-    return (f"mkdir -p {shlex.quote(str(TM_BEFORE_RESTORE))} && {before} >/dev/null; "
-            f"{restore} && echo {shlex.quote('Restored ' + title + '.')}")
+                                                            str(src), "--backup", backup, title))
+    done = f"echo {shlex.quote(('Undid the last restore of ' if undo else 'Restored ') + title + '.')}"
+    if undo:
+        return f"{restore} && {done}"
+    before = " ".join(shlex.quote(a) for a in tm_backup_args(title, 3, TM_BEFORE_RESTORE)[:-2] + [title])
+    return (f"mkdir -p {shlex.quote(str(TM_BEFORE_RESTORE))} && echo 'Saving your current saves first…' && "
+            f"{before} && {restore} && {done}")
 
 
 def when_text(iso: str) -> str:
@@ -3745,7 +3768,7 @@ def wakeup_sources() -> dict:
     except OSError:
         return out
     for d in entries:
-        count = read_text(d / "event_count").strip()
+        count = read_text(d / "wakeup_count").strip()      # times it woke the system or stopped a sleep
         dev = ""
         try:
             if (d / "device").exists():
@@ -3770,25 +3793,67 @@ def battery_level() -> Optional[float]:
         return None
 
 
-def sleep_snapshot() -> dict:
-    return {"t": time.time(), "stats": suspend_stats(), "wake": wakeup_sources()}
+def wake_counts() -> dict:
+    """Just the wakeup counters, cheap enough to read every second: {source dir: count}."""
+    out = {}
+    try:
+        entries = list(WAKEUP_ROOT.iterdir())
+    except OSError:
+        return out
+    for d in entries:
+        c = read_text(d / "wakeup_count").strip()
+        out[d.name] = int(c) if c.isdigit() else 0
+    return out
+
+
+def wake_irq_name() -> str:
+    """What the kernel says woke it last: /sys/power/pm_wakeup_irq, named through /proc/interrupts."""
+    irq = read_text(POWER_ROOT / "pm_wakeup_irq").strip()
+    if not irq.isdigit():
+        return ""
+    for line in read_text(Path("/proc/interrupts")).splitlines():
+        parts = line.split()
+        if parts and parts[0].rstrip(":") == irq:
+            return " ".join(p for p in parts[1:] if not p.isdigit())[-60:] or f"IRQ {irq}"
+    return f"IRQ {irq}"
+
+
+def sleep_snapshot(full: bool = True) -> dict:
+    """Suspend stats and wakeup counters. The agent takes a light one every second (so the "before" side is
+    never stale, and the button press that started the sleep isn't blamed for waking it)."""
+    snap = {"t": time.time(), "stats": suspend_stats(), "wc": wake_counts()}
+    if full:
+        snap["wake"] = wakeup_sources()
+    return snap
 
 
 def sleep_entry(pre: dict, post: dict, slept_s: float, pct_before, pct_after, charging: bool) -> dict:
     hours = slept_s / 3600
     drop = round(pct_before - pct_after, 2) if pct_before is not None and pct_after is not None else None
-    woke = [post["wake"][k]["name"] for k in post.get("wake", {})
-            if k in pre.get("wake", {}) and post["wake"][k]["count"] > pre["wake"][k]["count"]]
+    names = {k: v["name"] for k, v in (post.get("wake") or {}).items()}
+    c0, c1 = pre.get("wc") or {}, post.get("wc") or {}
+    woke = [names.get(k, k) for k in c1 if k in c0 and c1[k] > c0[k]]
+    if not woke and post.get("irq"):
+        woke = [post["irq"]]
     s0, s1 = pre.get("stats", {}), post.get("stats", {})
     failed = isinstance(s1.get("fail"), int) and isinstance(s0.get("fail"), int) and s1["fail"] > s0["fail"]
-    hw = s1.get("last_hw_sleep")
-    hw_pct = round(min(100.0, hw / 1e6 / slept_s * 100), 1) if isinstance(hw, int) and hw > 0 and slept_s > 0 else None
+    t0, t1 = s0.get("total_hw_sleep"), s1.get("total_hw_sleep")         # microseconds in hardware sleep
+    hw = t1 - t0 if isinstance(t0, int) and isinstance(t1, int) and t1 >= t0 else None
+    hw_pct = round(min(100.0, hw / 1e6 / slept_s * 100), 1) if hw and slept_s > 0 else None
     return {"end": round(post.get("t", time.time())), "slept": round(slept_s), "pct_before": pct_before,
             "pct_after": pct_after, "drop": drop, "charging": bool(charging),
             "per_hour": round(drop / hours, 2) if drop is not None and not charging and hours >= 0.25 else None,
             "woke_by": woke[:6], "failed": failed,
             "failed_dev": s1.get("last_failed_dev") if failed else "",
             "failed_step": s1.get("last_failed_step") if failed else "", "hw_sleep_pct": hw_pct}
+
+
+def sleep_failure_entry(stats: dict) -> dict:
+    """A sleep that never happened (the kernel gave up): no clock gap, so the agent records it from the stats."""
+    return {"end": round(time.time()), "slept": 0, "pct_before": None, "pct_after": None, "drop": None,
+            "charging": False, "per_hour": None, "woke_by": [], "failed": True,
+            "failed_dev": stats.get("last_failed_dev") or "", "failed_step": stats.get("last_failed_step") or "",
+            "hw_sleep_pct": None}
 
 
 def record_sleep(entry: dict) -> None:
@@ -3808,8 +3873,10 @@ def duration_text(seconds: float) -> str:
 
 
 def _never_offer(source: dict) -> bool:
-    """Devices Ally Hub never offers to stop: anything that isn't USB (power button, lid, the chipset)."""
-    return "/usb" not in source.get("devpath", "") or not source.get("wake_file")
+    """Devices Ally Hub never offers to stop: anything that isn't a USB device (power button, lid, the
+    chipset), and USB root hubs (blocking one would stop every device on it, the built-in controller too)."""
+    dev = source.get("devpath", "")
+    return "/usb" not in dev or bool(re.search(r"/usb\d+$", dev)) or not source.get("wake_file")
 
 
 def sleep_findings(log: list = None, sources: dict = None) -> list:
@@ -3830,7 +3897,7 @@ def sleep_findings(log: list = None, sources: dict = None) -> list:
             if hw and min(hw) < 80:
                 detail += f" It only spent {min(hw):.0f}% of that time in its deepest sleep, so something keeps it busy."
             out.append({"id": "drain", "title": "Sleep uses a lot of battery", "detail": detail, "fix": None})
-    shorts = [e for e in recent if e.get("slept", 0) < 180 and e.get("woke_by")]
+    shorts = [e for e in recent if 0 < e.get("slept", 0) < 180 and e.get("woke_by")]
     if len(shorts) >= 3:
         names = {}
         for e in shorts:
@@ -3853,17 +3920,27 @@ def sleep_findings(log: list = None, sources: dict = None) -> list:
     return out
 
 
-def nowake_cmd(devpaths: list) -> Optional[str]:
-    """Rewrite the rule file for exactly these USB devices (an empty list removes it) and apply it right away."""
-    devpaths = sorted({d for d in devpaths if d.startswith("/devices/") and "/usb" in d and '"' not in d})
+def _nowake_ok(d: str) -> bool:
+    return d.startswith("/devices/") and "/usb" in d and not re.search(r"/usb\d+$", d) and \
+        not any(c in d for c in '"\n\\')
+
+
+def nowake_cmd(devpaths: list, allow: list = ()) -> Optional[str]:
+    """Rewrite the rule file for exactly these USB devices (an empty list removes it) and apply it right away:
+    blocked devices get wakeup disabled, devices taken off the list (`allow`) get it enabled again."""
+    devpaths = sorted({d for d in devpaths if _nowake_ok(d)})
+    allow = sorted({d for d in allow if _nowake_ok(d)} - set(devpaths))
     rule = shlex.quote(NOWAKE_RULE)
+    sets = [f"echo disabled | sudo tee {shlex.quote('/sys' + d + '/power/wakeup')} >/dev/null" for d in devpaths] + \
+           [f"echo enabled | sudo tee {shlex.quote('/sys' + d + '/power/wakeup')} >/dev/null" for d in allow]
+    apply = f"{{ {' ; '.join(sets)} ; true; }} && " if sets else ""
     if not devpaths:
-        return f"sudo rm -f {rule} && sudo udevadm control --reload && echo 'Every device can wake the handheld again.'"
-    lines = "".join(f'ACTION=="add|change", DEVPATH=="{d}", ATTR{{power/wakeup}}="disabled"\n' for d in devpaths)
-    apply = " ; ".join(f"echo disabled | sudo tee {shlex.quote('/sys' + d + '/power/wakeup')} >/dev/null"
-                       for d in devpaths)
+        return (f"sudo rm -f {rule} && sudo udevadm control --reload && {apply}"
+                "echo 'Every device can wake the handheld again.'")
+    lines = "".join(f'ACTION=="add|bind|change", SUBSYSTEM=="usb", DEVPATH=="{d}", ATTR{{power/wakeup}}="disabled"\n'
+                    for d in devpaths)
     return (f"printf %s {shlex.quote(lines)} | sudo tee {rule} >/dev/null && sudo udevadm control --reload && "
-            f"{{ {apply} ; true; }} && echo 'Saved.'")
+            f"{apply}echo 'Saved.'")
 
 
 def decky_version(item, state: dict) -> str:
