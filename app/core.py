@@ -459,13 +459,42 @@ def panel_resolution() -> Optional[tuple]:
     return None
 
 
-def auto_ui_scale() -> float:
-    """Interface scale for the built-in screen: 1.5 on a 1080p 7-8 inch handheld."""
+def desktop_scale() -> float:
+    """The scale Desktop Mode already gives every app (KDE's display scale), 1.0 if none. Read before Qt starts,
+    from what Plasma exports or saves: QT_SCREEN_SCALE_FACTORS, kdeglobals, kwinoutputconfig.json, Xft.dpi."""
+    found = []
+    env = os.environ.get("QT_SCREEN_SCALE_FACTORS", "")
+    found += [float(x) for x in re.findall(r"(?:^|[=;])\s*([0-9]+(?:\.[0-9]+)?)\s*(?=;|$)", env)]
+    m = re.search(r"^\s*ScaleFactor\s*=\s*([0-9.]+)", read_text(HOME / ".config/kdeglobals"), re.M)
+    if m:
+        found.append(float(m.group(1)))
+    try:
+        outs = json.loads(read_text(HOME / ".config/kwinoutputconfig.json") or "[]")
+        for block in outs if isinstance(outs, list) else []:
+            for d in block.get("data") or [] if isinstance(block, dict) else []:
+                if isinstance(d, dict) and isinstance(d.get("scale"), (int, float)):
+                    found.append(float(d["scale"]))
+    except (ValueError, AttributeError):
+        pass
+    if not found and os.environ.get("DISPLAY"):
+        rc, out = run_quiet(["xrdb", "-query"], timeout=3)
+        m = re.search(r"Xft\.dpi:\s*([0-9.]+)", out or "")
+        if m:
+            found.append(float(m.group(1)) / 96)
+    found = [f for f in found if 0.5 <= f <= 4]
+    return max(found) if found else 1.0
+
+
+def auto_ui_scale(gamemode: bool = None) -> float:
+    """Interface scale for the built-in screen: 1.5 on a 1080p 7-8 inch handheld. In Desktop Mode the desktop's
+    own scaling already enlarges apps, so Auto only adds what's missing (otherwise it's scaled twice)."""
     res = panel_resolution()
     if not res:
         return 1.0
-    factor = round(res[1] / 720 * 4) / 4
-    return max(1.0, min(2.0, factor))
+    factor = max(1.0, min(2.0, round(res[1] / 720 * 4) / 4))
+    if gamemode is False:
+        factor = max(1.0, round(factor / desktop_scale() * 4) / 4)
+    return factor
 
 
 def mode_key(gamemode: bool) -> str:
@@ -481,7 +510,7 @@ def theme_size(theme_cfg: dict, name: str, gamemode: bool):
 def ui_scale(theme_cfg: dict, gamemode: bool = None) -> float:
     v = theme_cfg.get("ui_scale", "auto") if gamemode is None else theme_size(theme_cfg, "ui_scale", gamemode)
     if v == "auto":
-        return auto_ui_scale()
+        return auto_ui_scale(gamemode)
     try:
         return max(0.75, min(2.5, float(v)))
     except (TypeError, ValueError):
