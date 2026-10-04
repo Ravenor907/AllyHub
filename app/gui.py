@@ -4111,6 +4111,124 @@ class SavesPage(QWidget):
 
 
 # ==========================================================================
+# Sleep guardian: battery used per sleep, what woke the handheld, sleeps that failed
+# ==========================================================================
+
+class SleepPage(QWidget):
+    def __init__(self, hub):
+        super().__init__()
+        self.hub = hub
+        v = page_shell(self, "Sleep",
+                       "Ally Hub watches every sleep: how much battery it cost, what woke the handheld, and sleeps "
+                       "that didn't work. If something's wrong, it says what and offers a fix.")
+        card, cv = titled_card("moon", "#6366f1", "Recent sleeps")
+        self.summary = label("", "cardDesc", wrap=True)
+        cv.addWidget(self.summary)
+        self.list_box = QVBoxLayout()
+        self.list_box.setSpacing(2)
+        cv.addLayout(self.list_box)
+        v.addWidget(card)
+        v.addWidget(label("WHAT ALLY HUB NOTICED", "section"))
+        self.find_box = QVBoxLayout()
+        self.find_box.setSpacing(12)
+        v.addLayout(self.find_box)
+        v.addWidget(label("WAKING THE HANDHELD", "section"))
+        wcard, wv = titled_card("power", "#64748b", "Devices that can't wake it",
+                                "USB devices you've stopped from waking the handheld. The power button always works.")
+        self.nowake_box = QVBoxLayout()
+        wv.addLayout(self.nowake_box)
+        v.addWidget(wcard)
+        row = QHBoxLayout()
+        row.addWidget(button("Send the sleep details", self.send_details))
+        row.addStretch()
+        v.addLayout(row)
+        v.addStretch()
+
+    def refresh(self):
+        log = core.sleep_log()
+        clear_layout(self.list_box)
+        if not log:
+            self.summary.setText("No sleeps recorded yet. Put the handheld to sleep once and the details show up "
+                                 "here." + ("" if core.agent_running() else " Needs the Ally Hub agent "
+                                                                            "(Customize → Automation)."))
+        else:
+            last = log[-1]
+            used = ("charging" if last.get("charging") else
+                    f"used {last['drop']:.0f}% of the battery" if last.get("drop") is not None else "battery unknown")
+            rate = f" ({last['per_hour']:.1f}% per hour)" if last.get("per_hour") is not None else ""
+            woke = f" Woken by {', '.join(last['woke_by'])}." if last.get("woke_by") else ""
+            self.summary.setText(f"Last sleep: {core.duration_text(last['slept'])}, {used}{rate}.{woke}")
+            for e in reversed(log[-8:]):
+                when = time.strftime("%b %-d %H:%M", time.localtime(e.get("end", 0)))
+                bits = [core.duration_text(e.get("slept", 0))]
+                if e.get("charging"):
+                    bits.append("charging")
+                elif e.get("drop") is not None:
+                    bits.append(f"-{e['drop']:.0f}%")
+                if e.get("failed"):
+                    bits.append("failed")
+                self.list_box.addWidget(label(f"{when}   " + " · ".join(bits), "cardMeta"))
+        clear_layout(self.find_box)
+        findings = core.sleep_findings(log)
+        if not findings:
+            self.find_box.addWidget(label("Nothing wrong with recent sleeps ✔" if log else
+                                          "Nothing to say yet.", "cardDesc"))
+        for f in findings:
+            fc, fv = titled_card("moon", "#f59e0b", f["title"], f["detail"])
+            if f.get("fix") and f["fix"].get("kind") == "nowake":
+                r = QHBoxLayout()
+                r.addWidget(button(f"Stop {f['fix']['name']} waking it", lambda _=False, fx=f["fix"]: self.stop_wake(fx),
+                                   "primary"))
+                r.addStretch()
+                fv.addLayout(r)
+            self.find_box.addWidget(fc)
+        clear_layout(self.nowake_box)
+        blocked = (load_config().get("sleep") or {}).get("no_wake") or []
+        if not blocked:
+            self.nowake_box.addWidget(label("None. Every device can wake it.", "cardDesc"))
+        for d in blocked:
+            r = QHBoxLayout()
+            r.addWidget(label(d.rsplit("/", 1)[-1], "cardDesc"), 1)
+            r.addWidget(button("Allow again", lambda _=False, dp=d: self.allow_wake(dp)))
+            self.nowake_box.addLayout(r)
+
+    def _apply_nowake(self, devpaths: list, label_text: str):
+        if self.hub.needs_password():
+            return
+        cmd = core.nowake_cmd(devpaths)
+        if cmd:
+            update_config(lambda c: c.setdefault("sleep", {}).__setitem__("no_wake", sorted(set(devpaths))))
+            self.hub.runner.submit(label_text, cmd, "sleep-nowake")
+
+    def stop_wake(self, fix: dict):
+        if not ask(self, f"Stop {fix['name']} from waking the handheld?\n\nThe power button still wakes it, and you "
+                         "can allow it again here."):
+            return
+        cur = (load_config().get("sleep") or {}).get("no_wake") or []
+        self._apply_nowake(cur + [fix["devpath"]], f"Stopping {fix['name']} from waking the handheld")
+
+    def allow_wake(self, devpath: str):
+        cur = [d for d in (load_config().get("sleep") or {}).get("no_wake") or [] if d != devpath]
+        self._apply_nowake(cur, "Letting a device wake the handheld again")
+
+    def send_details(self, *_args):
+        def send():
+            details = json.dumps({"stats": core.suspend_stats(), "findings": core.sleep_findings()}, indent=1)
+            return core.queue_report("user", "Sleep details from the Sleep page",
+                                     "Sent from Tools → Sleep.\n\n" + details,
+                                     core._fingerprint("sleep", str(time.time())),
+                                     attachments=[("Sleep log", json.dumps(core.sleep_log()[-30:], indent=1)),
+                                                  ("Wakeup sources", json.dumps(core.wakeup_sources(), indent=1))],
+                                     force=True)
+        BackgroundTask(self, send, lambda _r: self.hub.toast("Sleep details sent. They'll be looked at in the next "
+                                                             "daily run."))
+
+    def job_done(self, ok: bool):
+        self.hub.toast("Saved ✔" if ok else "That didn't work. See Settings → Activity.")
+        self.refresh()
+
+
+# ==========================================================================
 # Storage saver: where the space went, and what Steam left behind
 # ==========================================================================
 
@@ -5448,7 +5566,7 @@ class Hub(QMainWindow):
         ("Install", [("Mods", "mods"), ("Plugin store", "store_page"), ("Apps", "apps"),
                      ("Launchers", "launchers")]),
         ("Customize", [("Lighting", "lighting_section"), ("Themes", "appearance"), ("Automation", "automation")]),
-        ("Tools", [("Performance", "performance"), ("Games", "games"), ("Saves", "saves"), ("Storage", "storage"), ("Doctor", "doctor"), ("Connect", "connect_page"),
+        ("Tools", [("Performance", "performance"), ("Games", "games"), ("Saves", "saves"), ("Storage", "storage"), ("Sleep", "sleep"), ("Doctor", "doctor"), ("Connect", "connect_page"),
                    ("System", "system")]),
         ("Settings", [("Updates", "updates"), ("Tweaks", "tweaks"), ("Activity", "activity")]),
     ]
@@ -5513,6 +5631,7 @@ class Hub(QMainWindow):
         self.storage = StoragePage(self)
         self.games = GamesPage(self)
         self.saves = SavesPage(self)
+        self.sleep = SleepPage(self)
         self.doctor = DoctorPage(self)
         self.appearance = AppearancePage(self)
         self.updates = UpdatesPage(self)
@@ -5877,6 +5996,8 @@ class Hub(QMainWindow):
             self.launchers.refresh()
         elif key == "storage-clean":
             self.storage.job_done(code == 0)
+        elif key == "sleep-nowake":
+            self.sleep.job_done(code == 0)
         elif key == "tm-restore":
             self.saves.job_done(code == 0)
         elif key in ("qam-install", "qam-remove"):

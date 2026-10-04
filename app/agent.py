@@ -417,6 +417,8 @@ class Agent:
         self._ludusavi, self._ludusavi_t = False, 0.0
         self.qam_game = {}         # the running game's switches, read from Steam once per game
         self.tm_lock = threading.Lock()   # one save snapshot at a time
+        self.sleep_last = None     # (monotonic, boottime, battery %, charging) at the previous tick
+        self.sleep_pre = None      # wakeup counters / suspend stats from shortly before a sleep
 
     # ---- config ----
     def reload_config(self):
@@ -523,6 +525,26 @@ class Agent:
             except OSError as e:
                 log(f"remote failed: {e}")
                 self.server = None
+
+    # ---- Sleep guardian: a gap between boottime and monotonic time is a sleep ----
+    def update_sleep(self, battery: dict):
+        mono, boot = time.monotonic(), time.clock_gettime(time.CLOCK_BOOTTIME)
+        pct = core.battery_level()
+        charging = (battery or {}).get("status") in ("Charging", "Full")
+        if self.sleep_last and self.sleep_pre:
+            lm, lb, lpct, lch = self.sleep_last
+            gap = (boot - lb) - (mono - lm)
+            if gap > 60:
+                post = core.sleep_snapshot()
+                entry = core.sleep_entry(self.sleep_pre, post, gap, lpct, pct, lch or charging)
+                core.record_sleep(entry)
+                self.sleep_pre = post
+                log(f"woke after {core.duration_text(gap)}: battery {entry['drop']}% "
+                    f"{'(charging)' if entry['charging'] else ''} woke by {', '.join(entry['woke_by']) or '?'}"
+                    f"{' FAILED ' + str(entry['failed_dev']) if entry['failed'] else ''}")
+        if self.sleep_pre is None or self.tick % 15 == 0:
+            self.sleep_pre = core.sleep_snapshot()
+        self.sleep_last = (mono, boot, pct, charging)
 
     # ---- Save time machine: snapshot a game's saves as it starts ----
     def tm_snapshot(self, game):
@@ -957,6 +979,7 @@ class Agent:
             if self.cfg["agent"].get("health_log"):
                 self.safely("health", self.log_health, battery)
             self.safely("saves", self.save_backups, battery)
+            self.safely("sleep", self.update_sleep, battery)
             self.safely("lighting", self.update_lighting, battery)
             self.safely("state", self.write_state)
             if not self.healthy and time.time() - self.started > core.HEALTHY_AFTER_S:
