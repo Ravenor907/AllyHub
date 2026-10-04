@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.1.0-e11d48?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.1.1-e11d48?style=flat-square">
   <img alt="SteamOS" src="https://img.shields.io/badge/SteamOS-3.8%2B-1a9fff?style=flat-square&logo=steam&logoColor=white">
   <img alt="Device" src="https://img.shields.io/badge/ROG%20Xbox%20Ally%20X-tested-8b5cf6?style=flat-square">
   <img alt="License" src="https://img.shields.io/github/license/Ravenor907/AllyHub?color=22c55e&style=flat-square">
@@ -152,6 +152,8 @@ Using the side layout? Right moves into the page and Left goes back to the tabs.
 ## 🔄 Updates & error reports
 
 - Ally Hub checks this repository every few hours and installs new versions in the background.
+- **Want new features early?** Settings → Updates → Update channel → **Testing** follows the developer's test
+  builds. Switch back to Stable any time.
 - New versions run on probation. If one fails to start, Ally Hub goes back to the previous version by itself.
 - **Error reports are off unless you turn them on.** When on, crashes and failed installs become issues here,
   with IP and MAC addresses, usernames, PINs and keys removed first. Setup is on the **Updates** page.

@@ -708,6 +708,7 @@ posts.clear()
 jl = core.job_log_path("nonsteamlaunchers"); jl.parent.mkdir(parents=True, exist_ok=True); jl.write_text("full job output here")
 up = core.user_report("Battle.net still missing", "Launchers")
 check(up is not None and json.loads(up.read_text())["kind"] == "user", "Report a problem works even with automatic reports off")
+check(json.loads(up.read_text())["channel"] == "stable", "reports note the update channel")
 check(any("Job output" in a["name"] for a in json.loads(up.read_text())["attachments"]), "it attaches the latest task output")
 time.sleep(1.5)                                   # upload_soon runs on a thread
 check(any(x[1].endswith("/issues") and x[2]["title"].startswith("[report] Battle.net") for x in posts if x[2]),
@@ -987,6 +988,44 @@ core.VERSION = "1.3.2"
 REMOTE.update(v="1.3.0")
 ok, msg = core.install_update("1.3.3")
 check(not ok and "mismatch" in msg, "never installs an older download")
+# update channels: stable follows main; testing follows whichever of main and testing is newer
+BR = {{"main": "1.3.2", "testing": None}}
+seen = []
+def fake2(method, path, data=None, **kw):
+    seen.append(path)
+    for b in ("main", "testing"):
+        if path.endswith("VERSION?ref=" + b):
+            return (200, BR[b].encode()) if BR[b] else (404, b"")
+        if path.endswith("/tarball/" + b):
+            return (200, tarball(BR[b])) if BR[b] else (404, b"")
+    return 404, b""
+core.gh_request = fake2
+check(core.update_channel() == "stable" and core.load_config()["updates"]["channel"] == "stable", "everyone starts on Stable")
+BR["testing"] = "1.4.0"
+r = core.check_for_update()
+check(not r["available"] and not any("ref=testing" in x for x in seen), "Stable never looks at the testing branch")
+core.update_config(lambda c: c["updates"].__setitem__("channel", "testing"))
+check(core.version_label().endswith("(testing)"), "test builds are marked as such")
+r = core.check_for_update()
+check(r["available"] and r["remote"] == "1.4.0" and r["branch"] == "testing" and r["stable"] == "1.3.2", "Testing sees the test build")
+ok, msg = core.install_update(r["remote"], r["branch"])
+check(ok and (app / "VERSION").read_text() == "1.4.0" and seen[-1].endswith("/tarball/testing")
+      and core.update_state()["branch"] == "testing", "installs the test build from the testing branch: " + msg)
+core.VERSION = "1.4.0"
+BR["main"] = "1.4.1"
+r = core.check_for_update()
+check(r["available"] and r["branch"] == "main", "a newer stable fix still reaches testing devices")
+BR["main"], BR["testing"] = "1.3.2", None
+r = core.check_for_update()
+check(not r["error"] and not r["available"], "no testing branch: testing devices simply stay put")
+core.update_config(lambda c: c["updates"].__setitem__("channel", "stable"))
+ok, msg = core.install_update("1.3.2", "main")
+check(not ok, "a normal update never goes backwards")
+ok, msg = core.install_update("1.3.2", "main", allow_older=True)
+check(ok and (app / "VERSION").read_text() == "1.3.2", "leaving Testing can go back to the stable version: " + msg)
+check(not core.install_update("1.3.2", "../evil")[0], "only known branches are ever downloaded")
+core.update_config(lambda c: c["updates"].__setitem__("channel", "nonsense"))
+check(core.update_channel() == "stable", "an unknown channel falls back to Stable")
 """.format(root=str(ROOT))
 
 GUI = r"""
@@ -1380,6 +1419,17 @@ gui.rasterize_svg = _ras
 tryit("own picture", hub.launchers.own_picture)
 check(hub.launchers.btn_art.isEnabled is not None, "the art button exists")
 hub.runner.submit = _sub2
+hub.go("Updates")
+tryit("channel to testing", lambda: (hub.updates.channel.setCurrentIndex(1), hub.updates.change_channel()))
+_cd = hub.updates.channel.currentData
+hub.updates.channel.currentData = lambda: "testing"
+tryit("channel change", hub.updates.change_channel)
+check(core.update_channel() == "testing", "the Updates page switches to test builds")
+tryit("channel checked: back to stable", lambda: hub.updates._channel_checked("stable", {"stable": "0.0.1", "available": False}))
+tryit("channel checked: update", lambda: hub.updates._channel_checked("testing", {"available": True, "remote": "9.0.0", "branch": "testing"}))
+tryit("channel checked: offline", lambda: hub.updates._channel_checked("testing", {"error": "x"}))
+hub.updates.channel.currentData = _cd
+core.update_config(lambda c: c["updates"].__setitem__("channel", "stable"))
 tryit("NSL card opens the page", lambda: hub.on_item_action("nonsteamlaunchers", "install"))
 check(hub.current_page() is hub.launchers, "the catalog card opens the themed page, not the script's windows")
 # header/footer on the sides

@@ -89,7 +89,8 @@ DEFAULT_CONFIG = {
     # controller "huesync": Ally Hub leaves the rings alone and points to the HueSync Decky plugin
     # (the owner's call). "allyhub" turns on the Lighting studio and agent lighting.
     "lighting": {"effect": None, "fps": 20, "on_battery": "slow", "custom": {}, "controller": "huesync"},
-    "updates": {"repo": REPO_DEFAULT, "auto_update": True, "reporting": False},
+    # channel "stable" follows main; "testing" also follows the testing branch (the owner's test builds)
+    "updates": {"repo": REPO_DEFAULT, "auto_update": True, "reporting": False, "channel": "stable"},
     # Tools > Performance. The tune-up itself lives in /etc, so only Game Boost's switch is here.
     "performance": {"boost": False},
 }
@@ -3762,7 +3763,7 @@ def _fingerprint(*parts) -> str:
 
 def environment_summary() -> str:
     osr = os_release()
-    return (f"- Ally Hub: {display_version()} (build {VERSION})\n- SteamOS: {osr.get('VERSION_ID', '?')} "
+    return (f"- Ally Hub: {version_label()} (build {VERSION})\n- SteamOS: {osr.get('VERSION_ID', '?')} "
             f"(build {osr.get('BUILD_ID', '?')})\n- Kernel: {os.uname().release}\n"
             f"- Device: {device_name()}\n- Mode: {'Game Mode' if in_game_mode() else 'Desktop'}\n"
             f"- Python: {'.'.join(map(str, __import__('sys').version_info[:3]))}")
@@ -3874,6 +3875,7 @@ def queue_report(kind: str, title: str, details: str, fingerprint: str = None, a
     atts.append(("Ally Hub log (last 300 lines)", recent_log(300)))
     report = {
         "kind": kind, "fingerprint": fp, "version": VERSION, "time": time.strftime("%Y-%m-%d %H:%M"),
+        "channel": update_channel(),
         "title": scrub(title)[:120],
         "body": (f"**Kind:** {kind}\n**Fingerprint:** `{fp}`\n\n### Environment\n{environment_summary()}\n\n"
                  f"### Details\n```\n{scrub(details)[-20000:]}\n```\n\n"
@@ -3996,7 +3998,7 @@ def _upload_locked(files: list) -> tuple:
         else:
             prefix = "[report]" if rep["kind"] == "user" else "[auto]"
             payload = {"title": f"{prefix} {rep['title']} ({fp})", "body": rep["body"][:65000],
-                       "labels": ["auto-report", rep["kind"]]}
+                       "labels": ["auto-report", rep["kind"]] + (["testing"] if rep.get("channel") == "testing" else [])}
             status, resp = gh_request("POST", f"/repos/{repo}/issues", payload)
             if status == 422:   # labels not allowed for this key: send without them
                 payload.pop("labels")
@@ -4057,8 +4059,24 @@ def save_update_state(st: dict) -> None:
     write_json(UPDATE_STATE, st)
 
 
-def remote_version() -> Optional[str]:
-    status, body = gh_request("GET", f"/repos/{repo_name()}/contents/VERSION?ref=main",
+# Update channels. Stable devices follow main. Testing devices follow whichever of main and the testing branch
+# has the higher build, so a fix released on main never skips them. Testing builds always carry a higher
+# number than the stable release they lead to.
+UPDATE_CHANNELS = {"stable": ("main",), "testing": ("main", "testing")}
+
+
+def update_channel(cfg: dict = None) -> str:
+    c = ((cfg or load_config()).get("updates") or {}).get("channel")
+    return c if c in UPDATE_CHANNELS else "stable"
+
+
+def version_label(v: str = None) -> str:
+    """The version people see, marked when this device is on test builds."""
+    return display_version(v) + (" (testing)" if update_channel() == "testing" else "")
+
+
+def remote_version(branch: str = "main") -> Optional[str]:
+    status, body = gh_request("GET", f"/repos/{repo_name()}/contents/VERSION?ref={branch}",
                               accept="application/vnd.github.raw+json")
     if status == 200:
         v = body.decode(errors="replace").strip()
@@ -4067,11 +4085,15 @@ def remote_version() -> Optional[str]:
 
 
 def check_for_update() -> dict:
-    """{'current', 'remote', 'available', 'error'}"""
+    """{'current', 'remote', 'branch', 'available', 'stable', 'error'}. 'stable' is main's version, so a device
+    that left the testing channel can be offered the way back."""
     st = update_state()
     st["last_check"] = time.time()
-    remote = remote_version()
-    out = {"current": VERSION, "remote": remote, "available": False, "error": None}
+    found = {b: remote_version(b) for b in UPDATE_CHANNELS[update_channel()]}
+    best = max(((v, b) for b, v in found.items() if v), key=lambda t: parse_version(t[0]), default=(None, "main"))
+    remote, branch = best
+    out = {"current": VERSION, "remote": remote, "branch": branch, "available": False,
+           "stable": found.get("main"), "error": None}
     if remote is None:
         out["error"] = "Couldn't reach GitHub"
     elif parse_version(remote) > parse_version(VERSION) and remote not in st.get("bad", []):
@@ -4081,9 +4103,12 @@ def check_for_update() -> dict:
     return out
 
 
-def install_update(expected: str) -> tuple:
-    """Download main, verify it, back up the current version, install. (ok, message)"""
-    status, data = gh_request("GET", f"/repos/{repo_name()}/tarball/main",
+def install_update(expected: str, branch: str = "main", allow_older: bool = False) -> tuple:
+    """Download a branch, verify it, back up the current version, install. (ok, message)
+    allow_older is only for going back to stable after the testing channel: exactly `expected`, nothing else."""
+    if branch not in {b for bs in UPDATE_CHANNELS.values() for b in bs}:
+        return False, f"Unknown update branch {branch}"
+    status, data = gh_request("GET", f"/repos/{repo_name()}/tarball/{branch}",
                               accept="application/vnd.github+json", timeout=90)
     if status != 200 or not data:
         return False, f"Download failed (HTTP {status})"
@@ -4108,7 +4133,10 @@ def install_update(expected: str) -> tuple:
         new_ver = read_text(repo_file(src, "VERSION"))
         # A newer release can land between the check and the download (two releases minutes apart, or
         # GitHub's short cache): take the newer one instead of failing. Never go backwards or to a bad one.
-        if not re.fullmatch(r"\d+\.\d+\.\d+", new_ver or "") or \
+        if allow_older:
+            if new_ver != expected or new_ver == VERSION:
+                return False, f"Version mismatch ({new_ver} vs {expected})"
+        elif not re.fullmatch(r"\d+\.\d+\.\d+", new_ver or "") or \
                 parse_version(new_ver) < parse_version(expected) or \
                 parse_version(new_ver) <= parse_version(VERSION) or new_ver in update_state().get("bad", []):
             return False, f"Version mismatch ({new_ver} vs {expected})"
@@ -4131,7 +4159,7 @@ def install_update(expected: str) -> tuple:
                 shutil.copy2(repo_file(src, f), APP_DIR / f)
         shutil.rmtree(APP_DIR / "__pycache__", ignore_errors=True)
     st = update_state()
-    st.update({"pending": expected, "from": VERSION, "boots": 0, "installed_at": time.time()})
+    st.update({"pending": expected, "from": VERSION, "boots": 0, "installed_at": time.time(), "branch": branch})
     st.setdefault("history", []).append({"from": VERSION, "to": expected, "at": time.time()})
     st["history"] = st["history"][-20:]
     save_update_state(st)
