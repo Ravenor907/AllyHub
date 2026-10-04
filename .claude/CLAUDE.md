@@ -17,9 +17,30 @@ move VERSION without making sure installed copies can still update.
 | `app/allyhub.py` | Entry point: `--agent`, `--apply-rgb`, `--gamemode`, `--fullscreen` | Keep tiny |
 | `app/core.py` | Everything without Qt: config, system info, LEDs, catalog, profiles, themes, GitHub updates and error reports | **Standard library only** |
 | `app/agent.py` | Background systemd user service: lighting, dock mode, health log, Update Guardian, save backups, phone remote, report upload, daily auto-update | **Standard library only** |
-| `app/gui.py` | PySide6 GUI. No sidebar: `Hub.TABS` defines 5 top tabs (LB/RB), each a `GroupPage` with section chips (LT/RT). Home is the health report (`HealthPage`, section "Health", plus notices for a missing password or Decky); no shortcut tiles (the owner's call). Navigate in code with `hub.go("Section name")` | Only `PySide6-Essentials` modules (QtCore, QtGui, QtWidgets, QtNetwork). No QtCharts, no extra pip packages |
+| `app/gui.py` | PySide6 GUI. No sidebar: `Hub.TABS` defines 5 top tabs (LB/RB), each a `GroupPage` with section chips (LT/RT). Layout since 1.4.0: see "Layout" below. No shortcut tiles on Home (the owner's call). Navigate in code with `hub.go("Section name")` (old names still work through `Hub.ALIASES`) | Only `PySide6-Essentials` modules (QtCore, QtGui, QtWidgets, QtNetwork). No QtCharts, no extra pip packages |
 | `scripts/install.sh` / `scripts/uninstall.sh` | User-level install into `~/.local/share/allyhub` with a venv | No sudo in install.sh |
 | `tests/run_tests.py` | Full test suite, runs without Qt or hardware | Must pass before any push |
+
+**Layout (1.4.0, the owner's call: "simple up front, complex under the hood", intuitive at a glance, customizable
+without feeling overwhelming).** `Hub.TABS`:
+- **Home:** Overview (`HealthPage`: notices, live tiles, then the Checkup (`DoctorPage.block`: only problems show,
+  "Show all checks" for the rest) and Quick fixes (`TweaksPage.block`), then history) · Battery & sleep (`SleepPage`
+  + `SystemPage.card_battery`) · Storage (`StoragePage` + `card_storage`) · Setup (chip only until setup is done).
+- **Store:** Browse (`BrowsePage`: chips Essentials / Mods / Apps / Decky plugins / Installed; the Decky store is the
+  `StorePage` under its chip; each catalog card exists once in `browse.cards`) · Launchers.
+- **Games:** Game settings (`GamesPage`) · Performance · Saves (`SavesPage` + `AutomationPage.block_saves`).
+- **Customize:** Lighting (studio gets `AutomationPage.block_lighting`) · Theme (`AppearancePage` + `card_boot`).
+- **Settings:** General (`UpdatesPage` with the Simple/Advanced card and `AutomationPage.block_general` on top) ·
+  Connections (`ConnectPage` + SSH) · Backups (`SectionPage`: profile, settings backup) · Activity (Advanced only).
+How it's built: a section is one existing page; blocks from other objects are added with `add_block` / `retitle`
+in `Hub.compose_sections`. `SystemPage`, `AutomationPage`, `DoctorPage` and `TweaksPage` are no longer pages: they
+build their blocks parentless and keep the logic. `on_page_shown` refreshes whatever opens, plus the owners of its
+blocks. A new feature goes on the page where someone would look for it; give it a block, don't add a section.
+**Simple / Advanced** (`config["theme"]["advanced"]`, Simple by default): wrap expert controls in `adv(widget)`
+(tune-up, Proton per game, other launch options, wake blockers, SSH, save folder) and pages built per view read
+`advanced_mode()`. One essentials list: catalog items with `recommended=True` (Store and Setup both use it).
+The user-facing name is **"background helper"**, never "agent". One rule when a feature needs it: start it and toast.
+In "sides" bar layout toasts pop up over the page (`_toast_pop`), since the status text is hidden there.
 
 **Lighting has two controllers (the owner's call).** `config["lighting"]["controller"]` defaults to
 `"huesync"`: the **HueSync** Decky plugin (honjow) drives the rings, the agent never touches them, and
@@ -65,7 +86,7 @@ Icons: badges are Lucide line icons embedded in `gui.ICONS` (inner SVG, rendered
 items map through `ITEM_ICONS` / `CATEGORY_ICONS`. Never use text abbreviations for badges (the owner's call);
 add new icons from github.com/lucide-icons/lucide `icons/*.svg`.
 
-**Performance (ideas from CachyOS and Bazzite):** Tools → Performance (`PerformancePage`).
+**Performance (ideas from CachyOS and Bazzite):** Games → Performance (`PerformancePage`).
 - **Game Boost** (`config["performance"]["boost"]`, off by default): the agent's `update_boost` switches the CPU
   energy preference while `GameWatcher` sees a game (plugged in `performance`, battery `balance_performance`),
   via power-profiles-daemon when it runs (`ppd`, never on battery) or the EPP sysfs files (`epp`, permission by
@@ -96,7 +117,7 @@ The store only shows UPDATE when its version is newer (`plugin_newer`).
 control is far away or missing (`_too_far`), so read-only content is reachable; the right stick (js axis 4)
 scrolls freely (`_stick_scroll`). Never scroll the window behind a dialog. Pages must live in `scroll_page`.
 
-**Launchers page (the owner's call):** Install → Launchers (`LaunchersPage`) instead of NSL's own GUI.
+**Launchers page (the owner's call):** Store → Launchers (`LaunchersPage`) instead of NSL's own GUI.
 `nsl_install_cmd` downloads NSL's script and runs it with launcher names as arguments (its Decky plugin's
 method) and a job-scoped `zenity` stand-in (`NSL_ZENITY`): progress lines go to Activity, questions get "no".
 Only names in `NSL_GROUPS` are passed. The catalog card opens the page.
@@ -115,7 +136,7 @@ Leftovers: `nsl_leftovers` / `nsl_clean_cmd` (home-folder paths only; the shared
 left in it, unticked by default because games live there). Battle.net through Launchers still needs the
 owner's confirmation that it shows up in Game Mode.
 
-**Library art (the owner's call: no SteamGridDB):** Install → Launchers → Library art. `core.art_plan`
+**Library art (the owner's call: no SteamGridDB):** Store → Launchers → Library art. `core.art_plan`
 lists tiles (`steam_shortcuts`: CEF `appStore` ids merged with shortcuts.vdf) whose grid folder has no portrait.
 Icons come out of the tile's .exe (`pe_icon_entries`, `_dib_to_png`, stdlib PE/PNG code); `art_svgs` draws
 portrait/wide/hero/logo as SVG using only QtSvg-safe features (no filters, no nested svg); the GUI rasterizes them
@@ -127,7 +148,7 @@ owner's own art, kind by kind. "Use my own picture" passes `mine=True` (always w
 Runs after a successful launcher install and after "Add Ally Hub to Steam". Brand logos are never drawn:
 the only real artwork used is the program's own icon from the owner's installed copy.
 
-**Game settings (Tools → Games, `GamesPage`):** launch options as switches (`GAME_TOGGLES`: env tokens before
+**Game settings (Games → Game settings, `GamesPage`):** launch options as switches (`GAME_TOGGLES`: env tokens before
 `%command%`, `~/lsfg` as a wrapper), Proton per game, and "Game won't start?" (other Proton, `PROTON_LOG` + send
 `proton_log`, `reset_prefix_cmd` renames compatdata/<id> to `<id>_allyhub_backup_<ts>`, steam://validate).
 Read/write only through Steam (`game_settings`: RegisterForAppDetails strLaunchOptions/strCompatToolName;
@@ -136,7 +157,7 @@ only edit options `launch_parseable` accepts (else the text is saved back untouc
 removed; unchanged options are sent back byte for byte. For a non-Steam tile, "" Proton means no tool at all.
 The page swaps list/detail views in one layout: never open a dialog from inside another (nested = new window).
 
-**Storage saver (Tools → Storage, `StoragePage`):** `storage_scan` sizes games (manifest SizeOnDisk + shader
+**Storage saver (Home → Storage, `StoragePage`):** `storage_scan` sizes games (manifest SizeOnDisk + shader
 cache + prefix) and lists leftovers: shader caches/prefixes/downloads of removed games, reset backups, Proton
 builds no game uses (keeps the newest per family), the trash. `storage_clean_cmd` re-checks everything at delete
 time (`_storage_safe`): never an installed game's or non-Steam tile's prefix (incl. apps listed for unmounted SD
@@ -164,21 +185,21 @@ unclear is None and never blocks), `needs_password` re-checks before asking and 
 "I already have one" (`setup.password_known`, which overrides a "no"), `on_job_finished` re-checks. Konsole is
 started detached with `--separate` and its pid watched (`_pw_timer`), so closing Ally Hub never kills it.
 
-**Save time machine (Tools → Saves, `SavesPage`):** the agent's `tm_snapshot` runs Ludusavi when a game
+**Save time machine (Games → Saves, `SavesPage`):** the agent's `tm_snapshot` runs Ludusavi when a game
 starts (`config["saves"]`: time_machine, keep) into `TM_DIR` with `--full-limit keep --differential-limit 0`,
 at most once per game per 10 minutes, niced. Titles: `ludusavi_title` (Steam id, then exact/normalized name,
 never fuzzy); only a clear `errors.unknownGames` answer is cached as unknown. Restore (`tm_restore_cmd`) first
 backs up current saves to `TM_BEFORE_RESTORE` and only restores if that worked (`&&`); "Undo the last restore"
 restores from there. Never restore while that game runs.
 
-**Sleep guardian (Tools → Sleep, `SleepPage`):** the agent's `update_sleep` takes a light snapshot every second
+**Sleep guardian (Home → Battery & sleep, `SleepPage`):** the agent's `update_sleep` takes a light snapshot every second
 (suspend_stats + `wakeup_count` per source) and treats a CLOCK_BOOTTIME vs CLOCK_MONOTONIC gap over 5 s as a sleep
 (`sleep_entry`: drain, %/h, sources whose wakeup_count rose or `pm_wakeup_irq`, total_hw_sleep share). A rise in
 suspend_stats/fail without a gap is a failed sleep. `sleep_findings` flags heavy drain, repeat short wakes and
 failures. The only fix writes `NOWAKE_RULE` (USB devices only, never a root hub or non-USB device such as the power
 button); the saved list changes only after the job worked, and "Allow again" re-enables wakeup immediately.
 
-**Quick Access panel (Tools → Games card):** a Decky plugin embedded in core.py (`QAM_PLUGIN_JSON`, `QAM_MAIN_PY`,
+**Quick Access panel (Games → Game settings card):** a Decky plugin embedded in core.py (`QAM_PLUGIN_JSON`, `QAM_MAIN_PY`,
 `QAM_INDEX_JS`; bump `QAM_VERSION` when they change) so normal updates deliver it; `qam_install_cmd` copies it
 into ~/homebrew/plugins/AllyHub with sudo and restarts plugin_loader. The frontend is plain ESM on window.SP_REACT /
 window.DFL and Decky's loader handshake (`connect(2, "Ally Hub")`, the same one @decky/api uses; npm is blocked
@@ -276,7 +297,7 @@ with a short summary, and list them for the owner. The owner merges himself.
 - Friendly, brief, plain language, helpful. No em dashes.
 - Write in first person plural or neutral voice, and end every reply to someone other than the owner with:
   `<sub>Replied by Claude, Ally Hub's AI maintainer.</sub>` People should know who they're talking to.
-- Point people to Ally Doctor and the Activity log when relevant.
+- Point people to the Checkup (Home → Overview) and the activity log when relevant.
 - Never share anything about the owner beyond what's in the repo. Never ask anyone for passwords or keys.
 - Don't argue. If someone is hostile or spamming, don't engage; mention it to the owner.
 - Close stale issues (no reply 14 days after asking for details) with a polite note.
@@ -289,7 +310,7 @@ Make sure these exist (create them if missing): `auto-report`, `bug`, `suggestio
 ## Branches and update channels (the owner's call)
 
 - `main` is **Stable**: what every device gets. `testing` is the owner's **test builds**: devices whose
-  Settings → Updates → Update channel is Testing (`config["updates"]["channel"]`) install whichever of main and
+  Settings → General → Update channel is Testing (`config["updates"]["channel"]`) install whichever of main and
   testing has the higher build (`check_for_update`, `UPDATE_CHANNELS`). Stable devices never look at testing.
 - New features go to `testing` first. They reach `main` only when the owner says to ship them.
 - The testing branch's VERSION must always be **higher** than main's (e.g. main 6.1.4, testing 6.2.x), or test

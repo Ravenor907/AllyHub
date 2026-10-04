@@ -34,7 +34,7 @@ import core
 
 ALERTS_FILE = core.DATA_DIR / "alerts.json"
 SEEN_FILE = core.DATA_DIR / "seen_games.json"
-SNAP_DIR = core.BACKUP_DIR / "auto"
+SNAP_DIR = core.SETTINGS_SNAP_DIR
 HEALTH_KEEP_DAYS = 7
 
 
@@ -55,26 +55,7 @@ def add_alert(alert_id: str, text: str, notify: bool = True):
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def snapshot_settings() -> Path:
-    """Tar up settings we can read without root. Keeps the 5 newest."""
-    SNAP_DIR.mkdir(parents=True, exist_ok=True)
-    out = SNAP_DIR / f"settings-{time.strftime('%Y-%m-%d_%H%M')}.tar.gz"
-    with tarfile.open(out, "w:gz") as tar:
-        for rel in ("homebrew/settings", ".config/allyhub", ".config/MangoHud"):
-            base = core.HOME / rel
-            if not base.exists():
-                continue
-            for root, _dirs, files in os.walk(base):
-                for f in files:
-                    p = Path(root) / f
-                    try:
-                        tar.add(p, arcname=str(p.relative_to(core.HOME)))
-                    except (OSError, tarfile.TarError):
-                        pass
-    snaps = sorted(SNAP_DIR.glob("settings-*.tar.gz"))
-    for old in snaps[:-5]:
-        old.unlink(missing_ok=True)
-    return out
+snapshot_settings = core.snapshot_settings     # moved to core in 1.4.0 (the GUI's Back up now uses it too)
 
 
 # --------------------------------------------------------------------------
@@ -273,7 +254,7 @@ input[type=password]{width:100%%;padding:14px;border-radius:12px;border:1px soli
 #msg{color:var(--m);text-align:center;min-height:20px}</style></head><body>
 %(body)s</body></html>"""
 
-REMOTE_LOGIN = """<h1>Ally Hub Remote</h1><div class="sub">Enter the PIN shown in Ally Hub &gt; Connect.</div>
+REMOTE_LOGIN = """<h1>Ally Hub Remote</h1><div class="sub">Enter the PIN shown in Ally Hub &gt; Settings &gt; Connections.</div>
 <form method="post" action="/login" class="card"><input type="password" name="pin" inputmode="numeric" autofocus>
 <button class="p">Unlock</button></form><div id="msg">%(note)s</div>"""
 

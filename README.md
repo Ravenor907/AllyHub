@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.3.5-e11d48?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.4.0-e11d48?style=flat-square">
   <img alt="SteamOS" src="https://img.shields.io/badge/SteamOS-3.8%2B-1a9fff?style=flat-square&logo=steam&logoColor=white">
   <img alt="Device" src="https://img.shields.io/badge/ROG%20Xbox%20Ally%20X-tested-8b5cf6?style=flat-square">
   <img alt="License" src="https://img.shields.io/github/license/Ravenor907/AllyHub?color=22c55e&style=flat-square">
@@ -30,8 +30,8 @@ and a phone remote. Works in Desktop Mode, and fully in Game Mode with just the 
 |   |   |
 |---|---|
 | 🎛️ **Quick Access panel** | Ally Hub in the ••• menu while you play: battery, temps, this game's switches, Game Boost, lighting and a save backup button |
-| 🎮 **Made for Game Mode** | Five console-style tabs, every button, list and dropdown works with the controller, and pop-ups open inside the app instead of new windows |
-| 🧩 **Mods & plugins** | Decky Loader, Ally Center, SimpleDeckyTDP, Lossless Scaling and OptiScaler frame gen (Bazzite's builds), EmuDeck and the full Decky Plugin Store. Turn any plugin off without uninstalling it |
+| 🎮 **Made for Game Mode** | Five console-style tabs, every button, list and dropdown works with the controller, and pop-ups open inside the app instead of new windows. Simple by default, Advanced when you want every control |
+| 🧩 **One store** | Mods, apps and the full Decky Plugin Store in one place: Decky Loader, Ally Center, Lossless Scaling and OptiScaler frame gen (Bazzite's builds), EmuDeck and more. Turn any plugin off without uninstalling it |
 | 📦 **30 curated apps** | Heroic, Greenlight (Xbox Cloud), Moonlight, ProtonPlus, Discord, Spotify and more, each with install, update and remove |
 | 🕹️ **PC launchers** | Battle.net, Epic, EA, Ubisoft, GOG and 10 more added straight to your Steam library with their own cover art, plus uninstall and a leftover cleaner |
 | 🚀 **Performance** | Game Boost while you play, a one-tap system tune-up and FSR 4 for every game, ideas from CachyOS and Bazzite, all undoable |
@@ -41,8 +41,8 @@ and a phone remote. Works in Desktop Mode, and fully in Game Mode with just the 
 | 💽 **Storage saver** | See each game's real size and clear what Steam leaves behind: shader caches and files of removed games, unused Proton builds, old downloads |
 | 🌈 **Ring lighting** | Smooth animated effects, a customizable RGB Spiral, battery and per-game colors, or hand the rings to HueSync |
 | 🎨 **Themes** | 8 themes, custom accent colors, interface size, and tabs on the top or as icons down the sides |
-| 🩺 **Health & Doctor** | Temps, power draw and battery on Home, history, drain per game and one-tap fixes |
-| 🤖 **Background agent** | Dock mode, Update Guardian, health logging and scheduled game save backups |
+| 🩺 **Home at a glance** | Temps, power draw and battery, a checkup that only shows what needs you (with the fix), quick fixes, history and drain per game |
+| 🤖 **Background helper** | Dock mode, Update Guardian, battery history and scheduled game save backups |
 | 📱 **Phone remote** | PIN-protected page to check battery and temps, change lighting and wake your PC |
 | 🔄 **Self-updating** | Updates itself and rolls back on its own if a new version misbehaves |
 
@@ -75,7 +75,7 @@ That's it. Ally Hub keeps itself up to date from here on.
 - **"git: command not found"**: [download the ZIP](https://github.com/Ravenor907/AllyHub/archive/refs/heads/main.zip),
   extract it into your home folder, open Konsole in that folder and run `bash scripts/install.sh`.
 - **It asks for a password**: the installer never does. Decky Loader, lighting and some tweaks need a sudo
-  password later. No password yet? Home has a **Set password** button.
+  password later. No password yet? The checkup on Home has a **Set password** button.
 - **Nothing happens after "Done!"**: log out and back in, or run `~/.local/bin/allyhub` in Konsole to see
   the error, then open a [bug report](../../issues/new?template=bug_report.yml).
 - **Reinstall or repair**: run the same command again. Your settings are kept.
@@ -86,11 +86,11 @@ That's it. Ally Hub keeps itself up to date from here on.
 
 | Tab | Sections |
 |---|---|
-| **Home** | Health report: battery, temps, power draw, storage, and what needs attention |
-| **Install** | Mods · Plugin store · Apps · Launchers |
-| **Customize** | Lighting · Themes · Automation |
-| **Tools** | Performance · Games · Saves · Storage · Sleep · Doctor · Connect (phone remote) · System |
-| **Settings** | Updates · Tweaks · Activity |
+| **Home** | Overview (battery, temps, checkup, quick fixes) · Battery & sleep · Storage |
+| **Store** | Browse (Essentials, Mods, Apps, Decky plugins, Installed) · Launchers |
+| **Games** | Game settings · Performance · Saves |
+| **Customize** | Lighting · Theme |
+| **Settings** | General (Simple / Advanced, background helper, updates) · Connections (phone remote) · Backups · Activity |
 
 <details>
 <summary><b>Performance</b></summary>
@@ -156,11 +156,11 @@ Using the side layout? Right moves into the page and Left goes back to the tabs.
 ## 🔄 Updates & error reports
 
 - Ally Hub checks this repository every few hours and installs new versions in the background.
-- **Want new features early?** Settings → Updates → Update channel → **Testing** follows the developer's test
+- **Want new features early?** Settings → General → Update channel → **Testing** follows the developer's test
   builds. Switch back to Stable any time.
 - New versions run on probation. If one fails to start, Ally Hub goes back to the previous version by itself.
 - **Error reports are off unless you turn them on.** When on, crashes and failed installs become issues here,
-  with IP and MAC addresses, usernames, PINs and keys removed first. Setup is on the **Updates** page.
+  with IP and MAC addresses, usernames, PINs and keys removed first. Setup is on **Settings → General**.
 - **Report a problem** sends your description right away with logs, the full task output and a
   system snapshot, scrubbed the same way.
 
@@ -182,10 +182,10 @@ lighting permission, charge limit, Game Boost, the tune-up) ask for your passwor
 under `/etc`. The uninstaller removes Ally Hub's own settings.
 
 **Is there a bottom bar?** It's off by default to give pages more room. Turn it on, or move the tabs to
-the sides, under Customize → Themes.
+the sides, under Customize → Theme.
 
 **Does FSR 4 make games faster?** Not on the Z2 Extreme. It looks sharper than FSR 3 but costs a few frames.
-Turn it on under Tools → Performance if you prefer the image.
+Turn it on under Games → Performance if you prefer the image.
 
 ## 💬 Feedback
 
@@ -202,7 +202,8 @@ work, test it on my own Ally X and decide what ships. Replies from Claude are si
 bash ~/.local/share/allyhub/uninstall.sh
 ```
 
-Removes Ally Hub, its background agent and its system settings (lighting, charge limit and performance).
+Removes Ally Hub, its background helper, its Quick Access panel and its system settings (lighting, charge limit and
+performance).
 Your mods, apps, launchers and `~/AllyHub-Backups` stay.
 
 ## 🙏 Credits

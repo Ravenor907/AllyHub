@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.4.0
+
+A new, simpler layout: everything is where you'd look for it, and the expert controls stay out of the way until you
+want them.
+- **Five tabs, fewer sections:** Home (Overview, Battery & sleep, Storage), Store (Browse, Launchers), Games (Game
+  settings, Performance, Saves), Customize (Lighting, Theme) and Settings (General, Connections, Backups, Activity).
+  20 sections became 15 (13 in Simple once setup is done).
+- **Home at a glance:** the Overview now has a Checkup that only shows what needs you, with the fix, plus Quick fixes.
+  Ally Doctor and Tweaks moved in here.
+- **One store:** Mods, Apps and Decky plugins are in Store → Browse, with Essentials and Installed views. One list of
+  essentials, the same one setup offers.
+- **Simple / Advanced** (Settings → General). Simple is the default and tucks away the system tune-up, Proton per game,
+  wake blockers, SSH and the activity log. Advanced shows everything.
+- **Things that lived in two places now live in one:** battery care sits with sleep, SD card and shader cache tools
+  with Storage, scheduled save backups with Saves, battery/per-game/dock lighting with Lighting, the boot video with
+  Theme, SSH with Connections.
+- **Back up settings no longer asks for your password.**
+- Pages like Saves, Sleep, Storage, Game settings and Setup no longer open blank.
+- The "agent" is now called the **background helper** everywhere, and any feature that needs it simply turns it on.
+- Importing a profile is a list you can pick from with the controller.
+- With the tabs on the sides, messages like "Saved" now pop up instead of disappearing.
+
 ## 1.3.5
 
 Safety and privacy fixes from a security review:

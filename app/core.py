@@ -77,7 +77,8 @@ DEFAULT_CONFIG = {
               # (None = use the shared "scale"/"ui_scale" above, which older versions saved)
               "scale_gamemode": None, "scale_desktop": None, "ui_scale_gamemode": None, "ui_scale_desktop": None,
               "bars": "top",            # "sides": header/footer as icon columns
-              "footer": False},         # bottom bar off by default (the owner's call)
+              "footer": False,          # bottom bar off by default (the owner's call)
+              "advanced": False},       # Simple by default; Advanced shows the expert controls (1.4.0)
     "rgb": None,
     "agent": {
         "enabled": False, "battery_rings": False, "low_battery_flash": True,
@@ -824,17 +825,6 @@ def try_direct_writes(writes: list) -> bool:
     return True
 
 
-def writes_as_shell(writes: list) -> str:
-    parts = []
-    for path, value, fallback in writes:
-        p = shlex.quote(path)
-        cmd = f"echo {shlex.quote(value)} > {p}"
-        if fallback is not None:
-            cmd = f"{{ {cmd}; }} 2>/dev/null || echo {shlex.quote(fallback)} > {p}"
-        parts.append(cmd)
-    return "sudo sh -c " + shlex.quote("; ".join(parts))
-
-
 def leds_writable(leds: list) -> bool:
     return bool(leds) and all(os.access(l.path / "multi_intensity", os.W_OK) for l in leds)
 
@@ -1037,25 +1027,6 @@ def hid_rules(leds: list) -> list:
     return sorted({f'KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{{idVendor}}=="{v}", '
                    f'ATTRS{{idProduct}}=="{p}", MODE:="0666", RUN+="/bin/chmod 0666 /dev/%k"'
                    for v, p in ally_hid_nodes(leds)["ids"]})
-
-
-def hid_permission_cmd(leds: list) -> Optional[str]:
-    rules = hid_rules(leds)
-    if not rules:
-        return None
-    body = "\n".join([RULES_MARKER] + rules)
-    return (f"printf '%s\\n' {shlex.quote(body)} | sudo tee {HID_PERMISSION_RULE} >/dev/null && "
-            "sudo udevadm control --reload && "
-            "sudo udevadm trigger --subsystem-match=hidraw --action=change && sleep 1 && "
-            "echo 'Ally Hub can now talk to the lighting chip directly.'")
-
-
-def lighting_rules_current(leds: list) -> bool:
-    """The permission rules from this version are in place. Informational only: never use this to
-    skip asking: a stale rule file would leave the owner stuck in a restart loop."""
-    if not Path(UDEV_LED_RULE).exists():
-        return False
-    return not hid_rules(leds) or RULES_MARKER in read_text(Path(HID_PERMISSION_RULE))
 
 
 def _file_access(p: Path) -> str:
@@ -2386,12 +2357,6 @@ def art_made() -> dict:
     return read_json(ART_MADE, {}) or {}
 
 
-def art_targets(include_all: bool = False) -> list:
-    """Tiles that still show Steam's blank blue art (or every tile with include_all)."""
-    grid = steam_grid_dir()
-    return [s for s in steam_shortcuts() if include_all or not has_grid_art(s["appid"], grid)]
-
-
 def is_self_shortcut(s: dict) -> bool:
     return s.get("name", "").strip().lower() == "ally hub" or "allyhub" in s.get("exe", "").lower()
 
@@ -3448,7 +3413,7 @@ def proton_log(appid) -> str:
 # only talks to the agent's local socket (CONTROL_SOCK, this user only). Bump QAM_VERSION when they change.
 # ==========================================================================
 
-QAM_VERSION = "1.0.0"
+QAM_VERSION = "1.0.1"
 QAM_DIR = HOME / "homebrew/plugins/AllyHub"
 QAM_STAGE = DATA_DIR / "qam-plugin"
 QAM_PLUGIN_JSON = r'''{
@@ -3565,15 +3530,15 @@ function Content() {
     const r = await call("action", name, data);
     busy.current = false;
     if (r && r.message && !quiet) toast(r.message);
-    else if (r && r.error) toast("Ally Hub's agent didn't answer.");
+    else if (r && r.error) toast("Ally Hub's background helper didn't answer.");
     load();
   };
 
   if (!s) return h(PanelSection, null, h(PanelSectionRow, null, h(Field, { label: "Loading…", focusable: true })));
   if (s.error) {
     return h(PanelSection, { title: "Ally Hub" },
-      h(PanelSectionRow, null, h(Field, { focusable: true, label: "Ally Hub's background agent isn't running",
-        description: "Open Ally Hub and turn on the agent under Customize → Automation." })));
+      h(PanelSectionRow, null, h(Field, { focusable: true, label: "Ally Hub's background helper isn't running",
+        description: "Open Ally Hub and turn it on under Settings → General." })));
   }
 
   const sections = [];
@@ -4253,8 +4218,8 @@ CATALOG = [
                  "Customize the MangoHud performance overlay without editing config files.",
                  "MJ", "#f472b6"),
     flatpak_item("com.github.mtkennerly.ludusavi", "Ludusavi", "Utilities",
-                 "Back up your game saves. Powers Ally Hub's automatic save backups.",
-                 "Ls", "#0891b2"),
+                 "Back up your game saves. Powers Ally Hub's save snapshots and backups.",
+                 "Ls", "#0891b2", recommended=True),
     flatpak_item("org.localsend.localsend_app", "LocalSend", "Utilities",
                  "AirDrop-style file transfer to your phone or PC over Wi-Fi.", "LS", "#14b8a6"),
     flatpak_item("com.obsproject.Studio", "OBS Studio", "Utilities",
@@ -4369,6 +4334,32 @@ def store_artifact_url(plugin: dict) -> Optional[str]:
 # ==========================================================================
 # Profiles (export / import your whole setup)
 # ==========================================================================
+
+SETTINGS_SNAP_DIR = BACKUP_DIR / "auto"
+
+
+def snapshot_settings() -> Path:
+    """Tar up settings we can read without root (no password). Keeps the 5 newest. Update Guardian runs this
+    daily; Backups > Back up now runs it on demand."""
+    SETTINGS_SNAP_DIR.mkdir(parents=True, exist_ok=True)
+    out = SETTINGS_SNAP_DIR / f"settings-{time.strftime('%Y-%m-%d_%H%M%S')}.tar.gz"
+    with tarfile.open(out, "w:gz") as tar:
+        for rel in ("homebrew/settings", ".config/allyhub", ".config/MangoHud"):
+            base = HOME / rel
+            if not base.exists():
+                continue
+            for root, _dirs, files in os.walk(base):
+                for f in files:
+                    p = Path(root) / f
+                    try:
+                        tar.add(p, arcname=str(p.relative_to(HOME)))
+                    except (OSError, tarfile.TarError):
+                        pass
+    snaps = sorted(SETTINGS_SNAP_DIR.glob("settings-*.tar.gz"))
+    for old in snaps[:-5]:
+        old.unlink(missing_ok=True)
+    return out
+
 
 PROFILE_KEYS = ("theme", "rgb", "agent", "game_colors", "dock", "wol", "performance")
 # Never shared in a profile and never taken from one: a profile can't switch on someone's remote with a PIN the
@@ -5294,10 +5285,10 @@ def _comment_chunks(name: str, text: str) -> list:
 def report_hint() -> str:
     """Plain-language reason the last report wasn't sent, for messages to the user."""
     return {
-        "off": "Turn on error reports (Settings → Updates) to have problems like this fixed automatically.",
-        "no_key": "Error reports are on, but there's no GitHub access key yet. Add one on Settings → Updates.",
+        "off": "Turn on error reports (Settings → General) to have problems like this fixed automatically.",
+        "no_key": "Error reports are on, but there's no GitHub access key yet. Add one on Settings → General.",
         "duplicate": "This exact problem was already reported in the last day, so it wasn't sent again. "
-                     "A fix may already be out: Settings → Updates → Check now.",
+                     "A fix may already be out: Settings → General → Check now.",
         "limit": "Ally Hub already sent its daily maximum of reports. It'll send more tomorrow.",
     }.get(LAST_QUEUE, "")
 
