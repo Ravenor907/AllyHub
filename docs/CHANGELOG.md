@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.1
+
+- **Update channel:** Settings → Updates can now follow **Testing** builds to get new features before everyone
+  else. Everyone stays on **Stable** unless they switch, and switching back offers the stable version right away.
+
 ## 1.1.0
 
 - **Library art:** blank blue tiles for launchers and Ally Hub itself now get a cover, banner, hero and icon,
