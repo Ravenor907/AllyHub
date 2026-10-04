@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.1
+
+- **Never stuck with a bad plugin:** every Decky plugin can be turned off and back on without uninstalling it, from
+  its card or from the new **Your plugins** list on the Plugin store page (it shows every plugin, however it was
+  installed). **Turn all plugins off** finds a troublemaker fast, and **Turn them back on** restores exactly those.
+- **Launchers:** **Hide from Steam** takes a launcher's tile out of your library but keeps it installed. Adding an
+  installed launcher back just restores its tile, no reinstall.
+- **EmuDeck** now has a Remove button. It runs EmuDeck's own uninstaller, which offers to back up your saves.
+
 ## 1.2.0
 
 - **Quick Access panel:** Ally Hub in the ••• menu while you play. Battery and temperatures, switches for the game

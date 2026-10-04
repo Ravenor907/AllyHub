@@ -3690,7 +3690,9 @@ CATALOG = [
         install="curl -L https://raw.githubusercontent.com/dragoonDorise/EmuDeck/main/install.sh | bash",
         open_cmd=shlex.quote(str(EMUDECK_PATH)),
         check=lambda s: EMUDECK_PATH.exists(),
-        warn="Pick EmuDeck or RetroDECK, not both. Uninstall from inside EmuDeck.",
+        uninstall=f"bash {shlex.quote(str(HOME / '.config/EmuDeck/backend/uninstall.sh'))}",
+        warn="Pick EmuDeck or RetroDECK, not both. Remove runs EmuDeck's own uninstaller, which asks about "
+             "backing up your saves and BIOS (best done in Desktop Mode).",
     ),
     flatpak_item("net.retrodeck.retrodeck", "RetroDECK", "Emulation",
                  "All-in-one retro platform in a single Flatpak. Cleaner and more "
@@ -3778,7 +3780,44 @@ FEATURED_PLUGINS = [
 
 
 def gather_state() -> dict:
-    return {"flatpaks": installed_flatpaks(), "decky": installed_decky_plugins()}
+    return {"flatpaks": installed_flatpaks(), "decky": installed_decky_plugins(), "decky_off": sorted(decky_disabled())}
+
+
+# ---------- Turning Decky plugins off and on (without uninstalling) ----------
+# Decky keeps the list in its own settings ("disabled_plugins" in ~/homebrew/settings/loader.json, plugin.json
+# names) and only reads it at start, so the job stops Decky, edits the list as root, and starts it again.
+DECKY_SETTINGS = HOME / "homebrew/settings/loader.json"
+DECKY_SAFE_MODE = DATA_DIR / "decky_safe_mode.json"     # which plugins "Turn all off" turned off
+_DECKY_TOGGLE_PY = (
+    "import json,os,sys\n"
+    "p,mode,names=sys.argv[1],sys.argv[2],json.loads(sys.argv[3])\n"
+    "try:\n s=json.load(open(p))\nexcept Exception:\n s={}\n"
+    "d=[n for n in s.get('disabled_plugins',[]) if n not in names]\n"
+    "s['disabled_plugins']=d+(names if mode=='off' else [])\n"
+    "os.makedirs(os.path.dirname(p),exist_ok=True)\n"
+    "t=p+'.allyhub';json.dump(s,open(t,'w'),indent=4);os.replace(t,p)\n"
+)
+
+
+def decky_disabled() -> set:
+    return set((read_json(DECKY_SETTINGS, {}) or {}).get("disabled_plugins") or [])
+
+
+def decky_toggle_cmd(names: list, off: bool) -> Optional[str]:
+    names = sorted({str(n) for n in names if n})
+    if not names:
+        return None
+    return ("sudo systemctl stop plugin_loader; "
+            f"sudo python3 -c {shlex.quote(_DECKY_TOGGLE_PY)} {shlex.quote(str(DECKY_SETTINGS))} "
+            f"{'off' if off else 'on'} {shlex.quote(json.dumps(names))}; rc=$?; "
+            "sudo systemctl start plugin_loader; "
+            f"[ $rc = 0 ] && echo {shlex.quote(('Turned off: ' if off else 'Turned on: ') + ', '.join(names))}; exit $rc")
+
+
+def decky_item_names(item, state: dict) -> list:
+    """The plugin.json names behind a catalog item (what Decky's off list uses)."""
+    dirs = set(decky_match(getattr(item, "decky_names", ()) or (), state))
+    return [i["name"] for i in state.get("decky", {}).values() if i["dir"] in dirs]
 
 
 def decky_remove_cmd(dirs: list) -> str:
