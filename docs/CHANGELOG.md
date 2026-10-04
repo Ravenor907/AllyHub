@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.2
+
+- **EmuDeck Remove** works even if EmuDeck was never set up (it removes the downloaded app instead of looking for
+  an uninstaller that isn't there yet).
+- **Interface and text size are remembered separately for Game Mode and Desktop Mode**, so switching between them
+  no longer means changing the size every time. Set each once under Customize → Themes.
+
 ## 1.2.1
 
 - **Never stuck with a bad plugin:** every Decky plugin can be turned off and back on without uninstalling it, from

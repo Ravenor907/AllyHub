@@ -4806,6 +4806,9 @@ class AppearancePage(QWidget):
         v.addLayout(ar)
 
         v.addWidget(label("INTERFACE SIZE", "section"))
+        v.addWidget(label(f"These sizes are for {'Game Mode' if GAMEMODE else 'Desktop Mode'}. "
+                          f"{'Desktop Mode' if GAMEMODE else 'Game Mode'} remembers its own, so switching between "
+                          "them never changes your setup.", "cardMeta", wrap=True))
         ir = QHBoxLayout()
         self.ui_size = QComboBox()
         self.ui_sizes = [("auto", "")] + [(f, f"{int(f * 100)}%") for f in (1.0, 1.25, 1.5, 1.75, 2.0)]
@@ -4866,8 +4869,8 @@ class AppearancePage(QWidget):
         pal = core.theme_palette(t)
         for b, key in ((self.btn_a1, "accent"), (self.btn_a2, "accent2")):
             b.setStyleSheet(f"QPushButton {{ border-left: 14px solid {pal[key]}; }}")
-        self.scale.setValue(int(t.get("scale", 100)))
-        cur = t.get("ui_scale", "auto")
+        self.scale.setValue(int(core.theme_size(t, "scale", GAMEMODE) or 100))
+        cur = core.theme_size(t, "ui_scale", GAMEMODE)
         idx = next((i for i, (v, _) in enumerate(self.ui_sizes) if v == cur), 0)
         self.ui_size.setCurrentIndex(idx)
         self.scale_lbl.setText(f"{self.scale.value()}%")
@@ -4904,12 +4907,12 @@ class AppearancePage(QWidget):
 
     def save_ui_size(self, idx):
         val = self.ui_sizes[idx][0]
-        update_config(lambda c: c["theme"].__setitem__("ui_scale", val))
+        update_config(lambda c: c["theme"].__setitem__(f"ui_scale_{core.mode_key(GAMEMODE)}", val))
         self.btn_ui_restart.show()
         self.ui_note.setText("Restart Ally Hub to apply the new size.")
 
     def save_scale(self):
-        self._save(scale=self.scale.value())
+        self._save(**{f"scale_{core.mode_key(GAMEMODE)}": self.scale.value()})
 
     def save_nav(self, idx):
         self._save(controller_nav=["auto", "on", "off"][idx])
@@ -5570,7 +5573,7 @@ class Hub(QMainWindow):
     def apply_theme(self):
         t = load_config()["theme"]
         pal = core.theme_palette(t)
-        scale = int(t.get("scale", 100))
+        scale = int(core.theme_size(t, "scale", GAMEMODE) or 100)
         self.app.setStyleSheet(build_qss(pal, int(scale)))
         if getattr(self, "bars", "top") == "sides":
             self._label_buttons(True)               # re-tint the side icons for the new theme
@@ -6160,11 +6163,17 @@ def main():
     core.app_log("gui", f"start {VERSION} ({'game mode' if GAMEMODE else 'desktop'})")
     global _SCALE_SET_BY_US
     if "QT_SCALE_FACTOR" not in os.environ:
-        os.environ["QT_SCALE_FACTOR"] = str(core.ui_scale(load_config()["theme"]))
+        os.environ["QT_SCALE_FACTOR"] = str(core.ui_scale(load_config()["theme"], GAMEMODE))
         _SCALE_SET_BY_US = True
     QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+    try:                                            # for reports: how this mode presents the screen
+        scr = app.primaryScreen()
+        core.app_log("gui", f"screen {scr.size().width()}x{scr.size().height()} dpr {scr.devicePixelRatio():.2f} "
+                            f"dpi {scr.logicalDotsPerInch():.0f} qt_scale {os.environ.get('QT_SCALE_FACTOR')}")
+    except Exception:
+        pass
     if not single_instance(app):                    # already open: it was brought to the front
         core.app_log("gui", "second launch: showed the open window instead")
         return

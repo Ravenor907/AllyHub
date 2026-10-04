@@ -73,6 +73,9 @@ REFUSAL_PATTERNS = re.compile(
 DEFAULT_CONFIG = {
     "theme": {"preset": "ROG Crimson", "accent": None, "accent2": None,
               "scale": 100, "controller_nav": "auto", "ui_scale": "auto",
+              # Game Mode and Desktop Mode show the same size differently, so each remembers its own
+              # (None = use the shared "scale"/"ui_scale" above, which older versions saved)
+              "scale_gamemode": None, "scale_desktop": None, "ui_scale_gamemode": None, "ui_scale_desktop": None,
               "bars": "top",            # "sides": header/footer as icon columns
               "footer": False},         # bottom bar off by default (the owner's call)
     "rgb": None,
@@ -461,8 +464,18 @@ def auto_ui_scale() -> float:
     return max(1.0, min(2.0, factor))
 
 
-def ui_scale(theme_cfg: dict) -> float:
-    v = theme_cfg.get("ui_scale", "auto")
+def mode_key(gamemode: bool) -> str:
+    return "gamemode" if gamemode else "desktop"
+
+
+def theme_size(theme_cfg: dict, name: str, gamemode: bool):
+    """This mode's own interface or text size, falling back to the shared one."""
+    v = theme_cfg.get(f"{name}_{mode_key(gamemode)}")
+    return theme_cfg.get(name, "auto" if name == "ui_scale" else 100) if v is None else v
+
+
+def ui_scale(theme_cfg: dict, gamemode: bool = None) -> float:
+    v = theme_cfg.get("ui_scale", "auto") if gamemode is None else theme_size(theme_cfg, "ui_scale", gamemode)
     if v == "auto":
         return auto_ui_scale()
     try:
@@ -3584,6 +3597,16 @@ def qam_uninstall_cmd() -> str:
             "echo 'Quick Access panel removed.'")
 
 
+def emudeck_uninstall_cmd() -> str:
+    """EmuDeck's own guided uninstaller exists only after its first-run setup. Before that, all there is to
+    remove is the app file the installer downloaded (and its shortcuts)."""
+    u = shlex.quote(str(HOME / ".config/EmuDeck/backend/uninstall.sh"))
+    files = " ".join(shlex.quote(str(p)) for p in (EMUDECK_PATH, HOME / "Desktop/EmuDeck.desktop",
+                                                     HOME / ".local/share/applications/EmuDeck.desktop"))
+    return (f'if [ -f {u} ]; then bash {u}; '
+            f'else rm -f -- {files} && echo "EmuDeck was never set up, so only its app was removed."; fi')
+
+
 def decky_version(item, state: dict) -> str:
     """Installed version of a catalog Decky plugin, shown on its card ("" when unknown)."""
     if not getattr(item, "decky_names", None):
@@ -3690,7 +3713,7 @@ CATALOG = [
         install="curl -L https://raw.githubusercontent.com/dragoonDorise/EmuDeck/main/install.sh | bash",
         open_cmd=shlex.quote(str(EMUDECK_PATH)),
         check=lambda s: EMUDECK_PATH.exists(),
-        uninstall=f"bash {shlex.quote(str(HOME / '.config/EmuDeck/backend/uninstall.sh'))}",
+        uninstall=emudeck_uninstall_cmd(),
         warn="Pick EmuDeck or RetroDECK, not both. Remove runs EmuDeck's own uninstaller, which asks about "
              "backing up your saves and BIOS (best done in Desktop Mode).",
     ),
