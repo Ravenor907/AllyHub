@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+*.tmp
+scripts/.copy_test.sh
