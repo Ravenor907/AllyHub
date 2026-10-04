@@ -856,6 +856,25 @@ console.log(JSON.stringify({ name: plugin.name, connect: calls[0], icon: plugin.
           and "button:Back up saves now" in full, "Game Boost, lighting and save backup controls")
     check("section:Lighting" not in out["shelved"] and "section:This game" not in out["shelved"],
           "no lighting controls while HueSync runs the rings, no game section without a game")
+# ---- turning Decky plugins off without uninstalling ----
+_ds = Path(HOME) / "decky-settings/loader.json"
+_ds.parent.mkdir(parents=True); _ds.write_text('{"developer.enabled": true, "disabled_plugins": ["Old"]}')
+for mode, names in (("off", ["HueSync", "Ally Hub"]), ("on", ["Ally Hub"])):
+    subprocess.run(["python3", "-c", core._DECKY_TOGGLE_PY, str(_ds), mode, json.dumps(names)], check=True)
+_dj = json.loads(_ds.read_text())
+check(_dj["disabled_plugins"] == ["Old", "HueSync"] and _dj["developer.enabled"] is True,
+      "Decky's off list gains and loses plugins, its other settings stay")
+core.DECKY_SETTINGS = _ds
+check(core.decky_disabled() == {"Old", "HueSync"}, "reads which plugins are off")
+import shlex
+_tc = core.decky_toggle_cmd(["x'; rm -rf ~; '"], True)
+check("plugin_loader" in _tc and "x'; rm -rf ~; '" in shlex.split(_tc.split("python3 -c ", 1)[1])[3],
+      "plugin names are passed safely: " + _tc[-160:])
+check(core.decky_toggle_cmd([], True) is None, "nothing to toggle -> no command")
+_st = {"decky": {"allycenter": {"dir": "/h/homebrew/plugins/AllyCenter", "name": "Ally Center", "version": "1"}}}
+check(core.decky_item_names(core.CATALOG_BY_ID["allycenter"], _st) == ["Ally Center"], "finds the Decky name behind a catalog card")
+check("decky_off" in core.gather_state(), "the app knows which plugins are off")
+check("EmuDeck/backend/uninstall.sh" in core.CATALOG_BY_ID["emudeck"].uninstall, "EmuDeck can be removed with its own uninstaller")
 # ---- reports: attachments, snapshot, instant upload, per-version repeats, manual reports ----
 posts = []
 def _fake_gh(method, path, data=None, **kw):
@@ -1755,6 +1774,43 @@ tryit("channel checked: update", lambda: hub.updates._channel_checked("testing",
 tryit("channel checked: offline", lambda: hub.updates._channel_checked("testing", {"error": "x"}))
 hub.updates.channel.currentData = _cd
 core.update_config(lambda c: c["updates"].__setitem__("channel", "stable"))
+# plugins: off/on from cards, the store list and safe mode
+_sub3 = hub.runner.submit
+_lj.clear()
+hub.runner.submit = lambda label, cmd, key="": _lj.append((key, cmd))
+_np2 = hub.needs_password
+hub.needs_password = lambda: False
+hub.state["decky"] = {"allycenter": {"dir": "/h/homebrew/plugins/AllyCenter", "name": "Ally Center", "version": "1"},
+                      "huesync": {"dir": "/h/homebrew/plugins/HueSync", "name": "HueSync", "version": "2"}}
+hub.state["decky_off"] = ["HueSync"]
+tryit("plugin card off", lambda: hub.on_item_action("allycenter", "disable"))
+check(_lj and _lj[-1][0] == "allycenter" and "Ally Center" in _lj[-1][1] and " off " in _lj[-1][1], "a plugin card turns it off")
+tryit("plugin card on", lambda: hub.on_item_action("allycenter", "enable"))
+check(" on " in _lj[-1][1], "and back on")
+tryit("your plugins list", hub.store_page.show_mine)
+core.DECKY_SAFE_MODE.unlink(missing_ok=True)
+tryit("safe mode off", hub.store_page.safe_mode)
+check(core.read_json(core.DECKY_SAFE_MODE) == ["Ally Center"] and _lj[-1][0] == "decky-safe",
+      "safe mode turns off every plugin that was on, and remembers which")
+tryit("safe mode back on", hub.store_page.safe_mode)
+check(" on " in _lj[-1][1] and "Ally Center" in _lj[-1][1], "and turns exactly those back on")
+_gs2 = core.gather_state
+core.gather_state = lambda: {"flatpaks": [], "decky": hub.state["decky"], "decky_off": []}
+tryit("safe mode job done", lambda: hub.on_job_finished("decky-safe", 0, ""))
+core.gather_state = _gs2
+check(not core.DECKY_SAFE_MODE.exists(), "safe mode clears once they're back on")
+tryit("remove from your plugins", lambda: hub.remove_decky(hub.state["decky"]["huesync"]))
+check(_lj[-1][0] == "decky-mine:HueSync" and "HueSync" in _lj[-1][1], "any installed plugin can be removed from the list")
+tryit("store row toggle", lambda: hub.on_store_action({"name": "HueSync"}, "enable"))
+tryit("update cards with an off plugin", hub.update_cards)
+hub.needs_password = _np2
+# launchers: hide from Steam, quick restore
+hub.launchers.picked = lambda: ["Youtube"]
+tryit("launchers hide", hub.launchers.hide)
+check(hub.launchers.restorable(["Youtube"]) and not hub.launchers.restorable(["Battle.net"]) and not hub.launchers.restorable([]),
+      "web launchers and installed stores can come back without reinstalling")
+tryit("launchers quick restore", hub.launchers.add)
+hub.runner.submit = _sub3
 tryit("NSL card opens the page", lambda: hub.on_item_action("nonsteamlaunchers", "install"))
 check(hub.current_page() is hub.launchers, "the catalog card opens the themed page, not the script's windows")
 # header/footer on the sides

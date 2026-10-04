@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.2.0-e11d48?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.2.1-e11d48?style=flat-square">
   <img alt="SteamOS" src="https://img.shields.io/badge/SteamOS-3.8%2B-1a9fff?style=flat-square&logo=steam&logoColor=white">
   <img alt="Device" src="https://img.shields.io/badge/ROG%20Xbox%20Ally%20X-tested-8b5cf6?style=flat-square">
   <img alt="License" src="https://img.shields.io/github/license/Ravenor907/AllyHub?color=22c55e&style=flat-square">
@@ -31,7 +31,7 @@ and a phone remote. Works in Desktop Mode, and fully in Game Mode with just the 
 |---|---|
 | 🎛️ **Quick Access panel** | Ally Hub in the ••• menu while you play: battery, temps, this game's switches, Game Boost, lighting and a save backup button |
 | 🎮 **Made for Game Mode** | Five console-style tabs, every button, list and dropdown works with the controller, and pop-ups open inside the app instead of new windows |
-| 🧩 **Mods & plugins** | Decky Loader, Ally Center, SimpleDeckyTDP, Lossless Scaling and OptiScaler frame gen (Bazzite's builds), EmuDeck and the full Decky Plugin Store |
+| 🧩 **Mods & plugins** | Decky Loader, Ally Center, SimpleDeckyTDP, Lossless Scaling and OptiScaler frame gen (Bazzite's builds), EmuDeck and the full Decky Plugin Store. Turn any plugin off without uninstalling it |
 | 📦 **30 curated apps** | Heroic, Greenlight (Xbox Cloud), Moonlight, ProtonPlus, Discord, Spotify and more, each with install, update and remove |
 | 🕹️ **PC launchers** | Battle.net, Epic, EA, Ubisoft, GOG and 10 more added straight to your Steam library with their own cover art, plus uninstall and a leftover cleaner |
 | 🚀 **Performance** | Game Boost while you play, a one-tap system tune-up and FSR 4 for every game, ideas from CachyOS and Bazzite, all undoable |

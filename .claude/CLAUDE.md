@@ -140,6 +140,14 @@ time (`_storage_safe`): never an installed game's or non-Steam tile's prefix (in
 cards, `library_app_ids`), never a Proton in use (`tools_in_use_folders`: folder name, compatibilitytool.vdf ids,
 symlink targets), never symlinks or `..`. Prefixes can hold saves: they start unticked.
 
+**Turning things off (the owner's call: never stuck with a faulty add-on):** Decky plugins turn off/on without
+uninstalling through Decky's own list (`disabled_plugins` in ~/homebrew/settings/loader.json, plugin.json names;
+`decky_toggle_cmd` stops Decky, edits it as root, starts Decky). Catalog cards and store rows have Turn off/on;
+the Plugin store page lists every installed plugin (`StorePage.show_mine`) with on/off and Remove, plus safe mode
+(`DECKY_SAFE_MODE` remembers what "Turn all plugins off" turned off). Launchers: "Hide from Steam" removes tiles
+only; Add restores tiles directly when the launcher is still installed (`LaunchersPage.restorable`). Every new
+catalog item needs a working Remove (EmuDeck uses its own uninstall.sh).
+
 **Quick Access panel (Tools → Games card):** a Decky plugin embedded in core.py (`QAM_PLUGIN_JSON`, `QAM_MAIN_PY`,
 `QAM_INDEX_JS`; bump `QAM_VERSION` when they change) so normal updates deliver it; `qam_install_cmd` copies it
 into ~/homebrew/plugins/AllyHub with sudo and restarts plugin_loader. The frontend is plain ESM on window.SP_REACT /

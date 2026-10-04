@@ -1181,15 +1181,26 @@ class ItemCard(QFrame):
                                   lambda: self.action.emit(item.id, "install"), "primary")
         self.btn_open = button("Open", lambda: self.action.emit(item.id, "open"))
         self.btn_remove = button("Remove", lambda: self.action.emit(item.id, "uninstall"), "danger")
+        # Decky plugins can be switched off without uninstalling (if one misbehaves, it's one tap away)
+        self.btn_toggle = button("Turn off", lambda: self.action.emit(item.id, "enable" if self.off else "disable"))
+        self.off = False
         btns.addWidget(self.btn_install)
         btns.addWidget(self.btn_open)
         btns.addStretch()
+        btns.addWidget(self.btn_toggle)
         btns.addWidget(self.btn_remove)
         root.addLayout(btns)
 
-    def update_state(self, installed: bool, missing_reqs: list, queued: bool, version: str = ""):
+    def update_state(self, installed: bool, missing_reqs: list, queued: bool, version: str = "",
+                     off: bool = False):
+        self.off = bool(off)
+        self.btn_toggle.setVisible(installed and bool(self.item.decky_names))
+        self.btn_toggle.setText("Turn on" if self.off else "Turn off")
+        self.btn_toggle.setEnabled(not queued)
         if queued:
             set_pill(self.pill, "WORKING…", "busy")
+        elif installed and self.off:
+            set_pill(self.pill, "TURNED OFF", "off")
         elif self.item.kind == "run":
             set_pill(self.pill, "TOOL", "tool")
         elif installed:
@@ -1329,15 +1340,24 @@ class StoreRow(QFrame):
         btns = QVBoxLayout()
         self.btn_install = button("Install", lambda: self.action.emit(self.plugin, "install"), "primary")
         self.btn_remove = button("Remove", lambda: self.action.emit(self.plugin, "uninstall"), "danger")
+        self.off = False
+        self.btn_toggle = button("Turn off", lambda: self.action.emit(self.plugin, "enable" if self.off else "disable"))
         btns.addWidget(self.btn_install)
+        btns.addWidget(self.btn_toggle)
         btns.addWidget(self.btn_remove)
         btns.addStretch()
         h.addLayout(btns)
 
-    def update_state(self, installed: Optional[dict], queued: bool, decky_ok: bool):
+    def update_state(self, installed: Optional[dict], queued: bool, decky_ok: bool, off: bool = False):
         latest = core.store_latest_version(self.plugin) or {}
+        self.off = bool(off)
+        self.btn_toggle.setVisible(bool(installed))
+        self.btn_toggle.setText("Turn on" if self.off else "Turn off")
+        self.btn_toggle.setEnabled(not queued)
         if queued:
             set_pill(self.pill, "WORKING…", "busy")
+        elif installed and self.off:
+            set_pill(self.pill, "TURNED OFF", "off")
         elif installed and installed.get("version") and latest.get("name") \
                 and core.plugin_newer(latest["name"], installed["version"]):
             set_pill(self.pill, f"UPDATE {installed['version']} → {latest['name']}", "update")
@@ -1372,6 +1392,22 @@ class StorePage(QWidget):
         nl.addWidget(label("Decky Loader isn't installed yet. Install it first.", "bannerText", wrap=True), 1)
         nl.addWidget(button("Install Decky", lambda: hub.on_item_action("decky", "install"), "primary"))
         v.addWidget(self.need_decky)
+        mine, mv = titled_card("plug", "#8b5cf6", "Your plugins",
+                               "Everything in Decky, however it was installed. Turn a plugin off if it misbehaves "
+                               "(it stays installed), or remove it.")
+        self.mine_box = QVBoxLayout()
+        self.mine_box.setSpacing(6)
+        mv.addLayout(self.mine_box)
+        srow = QHBoxLayout()
+        self.btn_safe = button("Turn all plugins off", self.safe_mode)
+        srow.addWidget(self.btn_safe)
+        srow.addStretch()
+        mv.addLayout(srow)
+        mv.addWidget(label("If Game Mode acts up after installing plugins, turn them all off, then back on one at a "
+                           "time to find the culprit.", "cardMeta", wrap=True))
+        self.mine_card = mine
+        v.addWidget(mine)
+        v.addWidget(label("STORE", "section"))
         bar = QHBoxLayout()
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search plugins…")
@@ -1460,6 +1496,51 @@ class StorePage(QWidget):
             c.setChecked(k == key)
         self.rebuild()
 
+    def show_mine(self):
+        """Every installed Decky plugin with On/Off and Remove, store or not (HueSync, Ally Hub's panel, ...)."""
+        clear_layout(self.mine_box)
+        plugins = sorted(self.hub.state.get("decky", {}).values(), key=lambda i: i["name"].lower())
+        off = set(self.hub.state.get("decky_off") or [])
+        self.mine_card.setVisible(bool(plugins) or bool(core.read_json(core.DECKY_SAFE_MODE, None)))
+        pending = self.hub.runner.pending_keys()
+        for info in plugins:
+            row = QHBoxLayout()
+            name = info["name"]
+            state = "off" if name in off else "on"
+            pill = label("", "pill")
+            set_pill(pill, "OFF" if state == "off" else "ON", state)
+            pill.setFixedWidth(56)
+            pill.setAlignment(Qt.AlignCenter)
+            row.addWidget(pill)
+            row.addWidget(label(name + (f"  v{info['version'].lstrip('v')}" if info.get("version") else ""),
+                                "cardDesc"), 1)
+            busy = ("decky-mine:" + name) in pending
+            t = button("Turn on" if state == "off" else "Turn off",
+                       lambda _=False, n=name, s=state: self.hub.toggle_decky([n], s == "on", "decky-mine:" + n))
+            r = button("Remove", lambda _=False, i=info: self.hub.remove_decky(i), "danger")
+            t.setEnabled(not busy)
+            r.setEnabled(not busy)
+            row.addWidget(t)
+            row.addWidget(r)
+            self.mine_box.addLayout(row)
+        saved = core.read_json(core.DECKY_SAFE_MODE, None)
+        self.btn_safe.setText("Turn them back on" if saved else "Turn all plugins off")
+        self.btn_safe.setEnabled(bool(saved) or any(i["name"] not in off for i in plugins))
+
+    def safe_mode(self, *_args):
+        saved = core.read_json(core.DECKY_SAFE_MODE, None)
+        if saved:
+            self.hub.toggle_decky(saved, False, "decky-safe", after=lambda ok: ok and core.DECKY_SAFE_MODE.unlink(
+                missing_ok=True))
+            return
+        off = set(self.hub.state.get("decky_off") or [])
+        names = [i["name"] for i in self.hub.state.get("decky", {}).values() if i["name"] not in off]
+        if not names or not ask(self, f"Turn off all {len(names)} plugins?\n\nThey stay installed. “Turn them back "
+                                      "on” restores exactly these."):
+            return
+        core.write_json(core.DECKY_SAFE_MODE, names)
+        self.hub.toggle_decky(names, True, "decky-safe", confirm=False)
+
     def installed_for(self, plugin: dict) -> Optional[dict]:
         return self.hub.state["decky"].get((plugin.get("name") or "").lower())
 
@@ -1508,7 +1589,10 @@ class StorePage(QWidget):
         pending = self.hub.runner.pending_keys()
         for row in self.rows:
             key = "store:" + (row.plugin.get("name") or "")
-            row.update_state(self.installed_for(row.plugin), key in pending, decky_ok)
+            inst = self.installed_for(row.plugin)
+            row.update_state(inst, key in pending, decky_ok,
+                             off=bool(inst) and inst["name"] in set(self.hub.state.get("decky_off") or []))
+        self.show_mine()
 
 
 # ==========================================================================
@@ -3170,8 +3254,10 @@ class LaunchersPage(QWidget):
         v.addWidget(opts)
         row = QHBoxLayout()
         self.btn_add = button("Add to Steam", self.add, "primary")
+        self.btn_hide = button("Hide from Steam", self.hide)
         self.btn_remove = button("Uninstall", self.uninstall, "danger")
         row.addWidget(self.btn_add)
+        row.addWidget(self.btn_hide)
         row.addWidget(self.btn_remove)
         row.addWidget(button("Clear", self.clear))
         row.addStretch()
@@ -3215,6 +3301,7 @@ class LaunchersPage(QWidget):
         self.btn_add.setEnabled(bool(n))
         self.btn_remove.setText(f"Uninstall {n}" if n else "Uninstall")
         self.btn_remove.setEnabled(bool(n))
+        self.btn_hide.setEnabled(bool(n))
 
     def clear(self):
         for cb in self.checks.values():
@@ -3228,9 +3315,42 @@ class LaunchersPage(QWidget):
                              "Uninstall to remove it.") if have else
                             "Takes a few minutes per store. Progress shows in Settings → Activity.")
 
+    # ---- hide / show (the launcher stays installed) ----
+    def hide(self, *_args):
+        names = self.picked()
+        if not names or not ask(self, "Take these out of your Steam library?\n\n" + "\n".join(f"• {n}" for n in names) +
+                                "\n\nThey stay installed. Pick them and tap Add to Steam to bring the tiles back."):
+            return
+        self.clear()
+
+        def done(removed):
+            if removed is None:
+                msg_warn(self, APP_NAME, "Steam's connection for plugins is off (it comes with Decky Loader), so the "
+                                         "tiles couldn't be removed from here.")
+            else:
+                self.hub.toast(f"Hidden from Steam: {', '.join(removed) or 'nothing to hide'}")
+        BackgroundTask(self, lambda: core.cef_remove_shortcuts(names), done)
+
+    def restorable(self, names: list) -> bool:
+        """Every pick is already on the handheld, so its tile can come back without reinstalling."""
+        return bool(names) and all(n in core.NSL_WEB or core.nsl_installed(n) for n in names)
+
     # ---- add ----
     def add(self):
         names = self.picked()
+        if self.restorable(names) and ask(self, "These are already installed.\n\nJust put their tiles back in Steam? "
+                                                "(No to reinstall them instead.)"):
+            self.clear()
+
+            def done(added):
+                if added is None:
+                    msg_warn(self, APP_NAME, "Steam's connection for plugins is off (it comes with Decky Loader). "
+                                             "Tap Add to Steam again and choose No to reinstall instead.")
+                    return
+                self.hub.toast(f"Back in your Steam library: {', '.join(added)}")
+                self.fix_artwork(only=added, quiet=True)
+            BackgroundTask(self, lambda: core.cef_add_shortcuts(names), done)
+            return
         cmd = core.nsl_install_cmd(names, self.separate.isChecked())
         if not cmd:
             return
@@ -5217,6 +5337,7 @@ class Hub(QMainWindow):
         global _HUB
         _HUB = self
         self._sheet = None
+        self._decky_after = {}             # job key -> callback(ok) for Decky on/off jobs
 
         root = QWidget()
         root.setObjectName("root")
@@ -5553,7 +5674,10 @@ class Hub(QMainWindow):
                 item = CATALOG_BY_ID[iid]
                 missing = [CATALOG_BY_ID[r].name for r in item.requires
                            if not CATALOG_BY_ID[r].check(self.state)]
-                card.update_state(item.check(self.state), missing, iid in pending, core.decky_version(item, self.state))
+                inst = item.check(self.state)
+                off = inst and bool(item.decky_names) and bool(
+                    set(core.decky_item_names(item, self.state)) & set(self.state.get("decky_off") or []))
+                card.update_state(inst, missing, iid in pending, core.decky_version(item, self.state), off=off)
         self.store_page.refresh_state()
 
     def toast(self, text: str, ms: int = 3500):
@@ -5583,7 +5707,7 @@ class Hub(QMainWindow):
                               core._fingerprint("job-error", key), attachments=[("Full job output", full)])
         self.state = core.gather_state() | {"password": self.state.get("password")}
         item = CATALOG_BY_ID.get(key)
-        name = item.name if item else key.replace("store:", "")
+        name = item.name if item else ("Decky plugins" if key == "decky-safe" else key.split(":", 1)[-1])
         failed_msg = None
         if code != 0 and key != "nonsteamlaunchers":     # the Launchers page checks and reports that one
             failed_msg = f"“{name}” failed (exit code {code})."
@@ -5601,6 +5725,9 @@ class Hub(QMainWindow):
         elif not item and core.REFUSAL_PATTERNS.search(tail or ""):
             msg_warn(self, APP_NAME, f"“{name}” may not have worked:\n\n{tail[-600:]}")
         self.installing.discard(key)
+        after = self._decky_after.pop(key, None)
+        if after:
+            after(code == 0)
         if key == "rgb-perms":
             self.lighting.access_job_done(code == 0)
         if key in ("boost-perms", "tuneup", "tuneup-undo"):
@@ -5647,6 +5774,13 @@ class Hub(QMainWindow):
             return
         if (iid in ("decky", "tailscale") or item.decky_names) and self.needs_password():
             return
+        if action in ("disable", "enable"):
+            names = core.decky_item_names(item, self.state)
+            if not names:
+                self.toast(f"{item.name} not found")
+                return
+            self.toggle_decky(names, action == "disable", iid)
+            return
         if action == "uninstall":
             if not ask(self, f"Remove {item.name}?"):
                 return
@@ -5672,6 +5806,11 @@ class Hub(QMainWindow):
         key = "store:" + name
         if self.needs_password():
             return
+        if action in ("disable", "enable"):
+            info = self.store_page.installed_for(plugin)
+            if info:
+                self.toggle_decky([info["name"]], action == "disable", key)
+            return
         if action == "uninstall":
             info = self.store_page.installed_for(plugin)
             if not info or not ask(self, f"Remove {name}?"):
@@ -5683,6 +5822,27 @@ class Hub(QMainWindow):
                 msg_warn(self, APP_NAME, f"{name} has no downloadable release.")
                 return
             self.runner.submit(f"Installing plugin {name}", core.decky_store_install_cmd(url), key)
+        self.update_cards()
+
+    def toggle_decky(self, names: list, off: bool, key: str, confirm: bool = True, after=None):
+        """Turn Decky plugins off (they stay installed) or back on. Decky restarts for a moment."""
+        if self.needs_password():
+            return
+        if confirm and off and not ask(self, f"Turn off {', '.join(names)}?\n\nIt stays installed and you can turn "
+                                             "it back on here. Decky restarts for a moment."):
+            return
+        cmd = core.decky_toggle_cmd(names, off)
+        if not cmd:
+            return
+        if after:
+            self._decky_after[key] = after
+        self.runner.submit(f"Turning {'off' if off else 'on'} {', '.join(names)}", cmd, key)
+        self.update_cards()
+
+    def remove_decky(self, info: dict):
+        if self.needs_password() or not ask(self, f"Remove {info['name']}?"):
+            return
+        self.runner.submit(f"Removing {info['name']}", core.decky_remove_cmd([info["dir"]]), "decky-mine:" + info["name"])
         self.update_cards()
 
     def install_essentials(self):
