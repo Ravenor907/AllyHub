@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.3.5
+
+Safety and privacy fixes from a security review:
+- **Shared profiles are checked before anything runs.** A tampered profile can no longer slip commands into the
+  charge limit or app names, and profiles no longer carry (or change) your phone remote PIN or your PC's network
+  address.
+- **Phone remote:** five wrong PINs and that device has to wait 5 minutes. The PIN no longer shows up in the
+  browser's address bar or history, you stay signed in with a random session instead of the PIN, and the remote only
+  answers to the handheld's own address.
+- **Downloads:** installers only run after they finished downloading (a failed or cut-off download is never run),
+  and Decky store plugins are checked against the store's checksum.
+- **Error reports** no longer include your Steam account number or your device's name.
+- **An expired access key no longer stops updates.**
+- Ally Hub's logs and settings are now private to your user, and the access key is private from the moment it's
+  saved.
+- Uninstalling also removes the Quick Access panel and the Game Mode library tile.
+
 ## 1.3.4
 
 - **RGB Spiral and Neon Vortex now use the lighting chip's built-in spiral by default.** It's smooth and uses no
