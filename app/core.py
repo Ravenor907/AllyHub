@@ -45,6 +45,7 @@ DATA_DIR = HOME / ".local/share/allyhub"
 CONFIG_DIR = HOME / ".config/allyhub"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 AGENT_STATE = DATA_DIR / "agent_state.json"
+CONTROL_SOCK = DATA_DIR / "agent.sock"     # the Quick Access panel talks to the agent here
 HEALTH_FILE = DATA_DIR / "health.jsonl"
 LED_ROOT = Path("/sys/class/leds")
 UDEV_LED_RULE = "/etc/udev/rules.d/99-allyhub-leds.rules"
@@ -3268,6 +3269,226 @@ def proton_log(appid) -> str:
     except OSError:
         return ""
     return data[-200000:].decode("utf-8", "replace")
+
+
+
+# ==========================================================================
+# Quick Access panel: a small Decky plugin (Ally Hub in the ••• menu while you play)
+# Its files live here, inside core.py, so every installed copy gets them with a normal update. The plugin
+# only talks to the agent's local socket (CONTROL_SOCK, this user only). Bump QAM_VERSION when they change.
+# ==========================================================================
+
+QAM_VERSION = "1.0.0"
+QAM_DIR = HOME / "homebrew/plugins/AllyHub"
+QAM_STAGE = DATA_DIR / "qam-plugin"
+QAM_PLUGIN_JSON = r'''{
+  "name": "Ally Hub",
+  "author": "Ravenor907",
+  "flags": [],
+  "api_version": 1,
+  "publish": {
+    "tags": ["ally", "utility"],
+    "description": "Ally Hub in the Quick Access menu: status, per-game switches, Game Boost, lighting and save backups.",
+    "image": ""
+  }
+}
+'''
+QAM_MAIN_PY = r'''# Ally Hub's Quick Access panel: a thin bridge to the Ally Hub agent running on this handheld.
+# Talks only to the agent's local socket (owned by this user, mode 0600). No network.
+import asyncio
+import json
+import os
+
+try:
+    import decky
+    HOME = decky.DECKY_USER_HOME
+    log = decky.logger
+except Exception:                     # outside Decky (tests)
+    import logging
+    HOME = os.path.expanduser("~")
+    log = logging.getLogger("allyhub")
+
+SOCK = os.path.join(HOME, ".local/share/allyhub/agent.sock")
+
+
+async def _ask(req: dict) -> dict:
+    try:
+        reader, writer = await asyncio.wait_for(asyncio.open_unix_connection(SOCK), timeout=3)
+    except (OSError, asyncio.TimeoutError):
+        return {"error": "agent"}
+    try:
+        writer.write(json.dumps(req).encode() + b"\n")
+        await writer.drain()
+        line = await asyncio.wait_for(reader.readline(), timeout=25)
+        return json.loads(line or b"{}")
+    except (OSError, ValueError, asyncio.TimeoutError) as e:
+        log.warning(f"Ally Hub agent request failed: {e!r}")
+        return {"error": "agent"}
+    finally:
+        writer.close()
+
+
+class Plugin:
+    async def status(self) -> dict:
+        return await _ask({"op": "status"})
+
+    async def action(self, name: str, data: dict = None) -> dict:
+        return await _ask({"op": "action", "name": str(name), "data": data or {}})
+
+    async def _main(self):
+        log.info("Ally Hub panel loaded")
+
+    async def _unload(self):
+        pass
+'''
+QAM_INDEX_JS = r'''// Ally Hub's Quick Access panel. Plain JavaScript on Decky's own React and UI library (no build step).
+// Lucide "gamepad-2" icon (ISC License, lucide.dev).
+const React = window.SP_REACT;
+const h = React.createElement;
+const { useState, useEffect, useRef } = React;
+const { PanelSection, PanelSectionRow, ToggleField, SliderField, DropdownItem, ButtonItem, Field, staticClasses } = window.DFL;
+const API = window.__DECKY_SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED_deckyLoaderAPIInit.connect(1, "Ally Hub");
+
+const call = (method, ...args) => API.call(method, ...args).catch((e) => ({ error: String(e) }));
+const toast = (body) => { try { API.toaster.toast({ title: "Ally Hub", body }); } catch (e) {} };
+
+const GAME_SWITCHES = [
+  ["fsr4", "FSR 4 upgrade", "Sharper upscaling. Needs GE-Proton or Proton-CachyOS."],
+  ["lsfg", "Frame generation", "Lossless Scaling. Set the multiplier in its plugin."],
+  ["deck", "Steam Deck mode", "Handheld presets and on-screen keyboard."],
+];
+
+function Icon() {
+  return h("svg", { viewBox: "0 0 24 24", width: "1em", height: "1em", fill: "none", stroke: "currentColor",
+                    strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round" },
+    h("line", { x1: 6, x2: 10, y1: 11, y2: 11 }), h("line", { x1: 8, x2: 8, y1: 9, y2: 13 }),
+    h("line", { x1: 15, x2: 15.01, y1: 12, y2: 12 }), h("line", { x1: 18, x2: 18.01, y1: 10, y2: 10 }),
+    h("path", { d: "M17.32 5H6.68a4 4 0 0 0-3.978 3.59c-.006.052-.01.101-.017.152C2.604 9.416 2 14.456 2 16a3 3 0 0 0 3 3c1 0 1.5-.5 2-1l1.414-1.414A2 2 0 0 1 9.828 16h4.344a2 2 0 0 1 1.414.586L17 18c.5.5 1 1 2 1a3 3 0 0 0 3-3c0-1.545-.604-6.584-.685-7.258-.007-.05-.011-.1-.017-.151A4 4 0 0 0 17.32 5z" }));
+}
+
+function temp(v) { return v === null || v === undefined ? "–" : `${Math.round(v)}°`; }
+
+function Content() {
+  const [s, setS] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const bright = useRef(null);
+  const load = async () => setS(await call("status"));
+  useEffect(() => {
+    load();
+    const t = setInterval(load, 3000);
+    return () => clearInterval(t);
+  }, []);
+  const act = async (name, data = {}, quiet = false) => {
+    setBusy(true);
+    const r = await call("action", name, data);
+    setBusy(false);
+    if (r && r.message && !quiet) toast(r.message);
+    else if (r && r.error) toast("Ally Hub's agent didn't answer.");
+    load();
+  };
+
+  if (!s) return h(PanelSection, null, h(PanelSectionRow, null, h(Field, { label: "Loading…", focusable: true })));
+  if (s.error) {
+    return h(PanelSection, { title: "Ally Hub" },
+      h(PanelSectionRow, null, h(Field, { focusable: true, label: "Ally Hub's background agent isn't running",
+        description: "Open Ally Hub and turn on the agent under Customize → Automation." })));
+  }
+
+  const sections = [];
+  sections.push(h(PanelSection, { title: "Status", key: "status" },
+    h(PanelSectionRow, null, h(Field, { focusable: true, label: "Battery",
+      description: `${s.battery}${s.time_left && s.time_left !== "n/a" ? " · " + s.time_left + " left" : ""}${s.watts ? " · " + s.watts + " W" : ""}` })),
+    h(PanelSectionRow, null, h(Field, { focusable: true, label: "Temperatures",
+      description: `CPU ${temp(s.cpu)} · GPU ${temp(s.gpu)}${s.fan ? " · fan " + s.fan + " rpm" : ""}` }))));
+
+  if (s.game) {
+    const flags = s.game_flags;
+    const rows = [h(PanelSectionRow, { key: "name" }, h(Field, { focusable: true, label: s.game_name || "This game",
+      description: flags ? "Switches apply the next time you start it." : "Reading this game's settings…" }))];
+    if (flags) {
+      for (const [key, title, desc] of GAME_SWITCHES) {
+        if (key === "lsfg" && !s.lsfg && !flags.includes(key)) continue;
+        rows.push(h(PanelSectionRow, { key }, h(ToggleField, { label: title, description: desc,
+          checked: flags.includes(key), disabled: busy || !s.game_live,
+          onChange: (on) => act("game_flag", { key, on }) })));
+      }
+    }
+    sections.push(h(PanelSection, { title: "This game", key: "game" }, ...rows));
+  }
+
+  sections.push(h(PanelSection, { title: "Performance", key: "perf" },
+    h(PanelSectionRow, null, h(ToggleField, { label: "Game Boost", checked: !!s.boost, disabled: busy,
+      description: s.boost && s.boost_note ? `CPU: ${s.boost_note}` : "Performance CPU setting while you play.",
+      onChange: (on) => act("boost", { on }) }))));
+
+  if (s.lighting === "allyhub") {
+    const opts = (s.effects || []).map((n) => ({ data: n, label: n }));
+    sections.push(h(PanelSection, { title: "Lighting", key: "light" },
+      h(PanelSectionRow, null, h(DropdownItem, { label: "Effect", rgOptions: opts,
+        selectedOption: s.effect, strDefaultLabel: s.effect || "Pick one",
+        onChange: (o) => act("preset", { name: o.data }) })),
+      h(PanelSectionRow, null, h(SliderField, { label: "Brightness", value: Math.round((s.brightness || 0) / 2.55),
+        min: 0, max: 100, step: 5, showValue: true, valueSuffix: "%",
+        onChange: (v) => { clearTimeout(bright.current);
+          bright.current = setTimeout(() => act("brightness", { value: Math.round(v * 2.55) }, true), 300); } })),
+      h(PanelSectionRow, null, h(ButtonItem, { layout: "below", disabled: busy,
+        onClick: () => act("lights") }, "Lights off"))));
+  }
+
+  if (s.backup) {
+    sections.push(h(PanelSection, { title: "Saves", key: "saves" },
+      h(PanelSectionRow, null, h(ButtonItem, { layout: "below", disabled: busy || s.backup_running,
+        onClick: () => act("backup") }, s.backup_running ? "Backing up…" : "Back up saves now"))));
+  }
+  return h("div", null, ...sections);
+}
+
+export default function () {
+  return {
+    name: "Ally Hub",
+    titleView: h("div", { className: staticClasses.Title }, "Ally Hub"),
+    content: h(Content),
+    icon: h(Icon),
+    onDismount() {},
+  };
+}
+'''
+
+
+def qam_files() -> dict:
+    return {"plugin.json": QAM_PLUGIN_JSON, "main.py": QAM_MAIN_PY, "dist/index.js": QAM_INDEX_JS,
+            "package.json": json.dumps({"name": "allyhub-panel", "version": QAM_VERSION, "type": "module",
+                                        "license": "GPL-3.0"}, indent=2) + "\n"}
+
+
+def qam_installed() -> Optional[str]:
+    """The installed panel's version, or None."""
+    try:
+        return json.loads((QAM_DIR / "package.json").read_text()).get("version") or "0"
+    except (OSError, ValueError):
+        return "0" if (QAM_DIR / "plugin.json").exists() else None
+
+
+def qam_stage() -> Path:
+    shutil.rmtree(QAM_STAGE, ignore_errors=True)
+    for name, text in qam_files().items():
+        p = QAM_STAGE / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+    return QAM_STAGE
+
+
+def qam_install_cmd() -> str:
+    """Copy the panel into Decky's plugin folder (root's) and restart Decky so it shows up."""
+    stage, dest = shlex.quote(str(qam_stage())), shlex.quote(str(QAM_DIR))
+    return (f'sudo mkdir -p {shlex.quote(str(QAM_DIR.parent))} && sudo rm -rf {dest} && '
+            f'sudo cp -r {stage} {dest} && sudo chown -R ":" {dest} && '
+            'sudo systemctl restart plugin_loader && echo "Quick Access panel ready."')
+
+
+def qam_uninstall_cmd() -> str:
+    return (f"sudo rm -rf {shlex.quote(str(QAM_DIR))} && sudo systemctl restart plugin_loader && "
+            "echo 'Quick Access panel removed.'")
 
 
 def decky_version(item, state: dict) -> str:

@@ -3544,6 +3544,8 @@ class GamesPage(QWidget):
     def show_list(self):
         self.game = None
         clear_layout(self.body)
+        self.body.addWidget(self.qam_card())
+        self.body.addWidget(label("YOUR GAMES", "section"))
         if not self.live:
             self.body.addWidget(label("⚠ Steam's connection for plugins is off, so settings can be viewed but not "
                                       "saved. It comes with Decky Loader (Install → Mods).", "cardWarn", wrap=True))
@@ -3568,6 +3570,51 @@ class GamesPage(QWidget):
     def expand(self, *_args):
         self.show_all = True
         self.show_list()
+
+    # ---- Quick Access panel ----
+    def qam_card(self) -> QWidget:
+        have = core.qam_installed()
+        card, cv = titled_card("gamepad-2", "#14b8a6", "Quick Access panel",
+                               "Ally Hub in the ••• menu while you play: battery and temperatures, this game's "
+                               "switches, Game Boost, lighting and a save backup button. Needs Decky Loader.")
+        row = QHBoxLayout()
+        if not have:
+            row.addWidget(button("Add to Quick Access", self.qam_install, "primary"))
+        elif core.parse_version(have) < core.parse_version(core.QAM_VERSION):
+            row.addWidget(button("Update the panel", self.qam_install, "primary"))
+            row.addWidget(button("Remove", self.qam_remove))
+        else:
+            cv.addWidget(label("✔ In your Quick Access menu. Press ••• while playing and open the plug icon.",
+                               "cardMeta", wrap=True))
+            row.addWidget(button("Remove", self.qam_remove))
+        row.addStretch()
+        cv.addLayout(row)
+        return card
+
+    def qam_install(self, *_args):
+        if not CATALOG_BY_ID["decky"].check(self.hub.state):
+            if ask(self, "The Quick Access panel runs inside Decky Loader, which isn't installed yet.\n\nInstall "
+                         "Decky Loader now?"):
+                self.hub.on_item_action("decky", "install")
+            return
+        if self.hub.needs_password():
+            return
+        if not load_config()["agent"].get("enabled") or not core.agent_running():
+            self.hub.enable_agent()                       # the panel gets everything from the agent
+        self.hub.runner.submit("Adding Ally Hub to Quick Access", core.qam_install_cmd(), "qam-install")
+
+    def qam_remove(self, *_args):
+        if self.hub.needs_password():
+            return
+        if ask(self, "Remove Ally Hub from the Quick Access menu?"):
+            self.hub.runner.submit("Removing the Quick Access panel", core.qam_uninstall_cmd(), "qam-remove")
+
+    def qam_done(self, ok: bool, key: str):
+        if ok and key == "qam-install":
+            msg_info(self, APP_NAME, "Ally Hub is in your Quick Access menu now. In Game Mode, press ••• and open "
+                                     "the plug icon, then Ally Hub.")
+        if self.game is None:
+            self.show_list()
 
     # ---- one game ----
     def open_game(self, g: dict):
@@ -5465,6 +5512,8 @@ class Hub(QMainWindow):
             self.launchers.refresh()
         elif key == "storage-clean":
             self.storage.job_done(code == 0)
+        elif key in ("qam-install", "qam-remove"):
+            self.games.qam_done(code == 0, key)
         elif key == "game-reset" and code == 0:
             self.toast("Reset done. Start the game to make fresh Windows files.")
         if key == "decky" and CATALOG_BY_ID["decky"].check(self.state):

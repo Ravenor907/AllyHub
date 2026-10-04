@@ -760,6 +760,70 @@ check(any(i["label"].startswith("Old Windows files of Big Game") and i["group"] 
 check(core.storage_clean_cmd([bk[0]]) and core.reset_prefix_cmd(424242) is None, "the backup can be cleared; no prefix, no reset")
 (Path(HOME) / "steam-100.log").write_text("err: missing d3dx9_43.dll\n")
 check("d3dx9_43" in core.proton_log(100) and core.proton_log(5) == "", "reads Proton's log for the report")
+# ---- Quick Access panel: the Decky plugin Ally Hub installs ----
+import py_compile as _pc, shutil as _sh
+qf = core.qam_files()
+_qd = Path(HOME) / "qam-check"; _qd.mkdir()
+(_qd / "main.py").write_text(qf["main.py"]); _pc.compile(str(_qd / "main.py"), doraise=True)
+_pkg, _pj = json.loads(qf["package.json"]), json.loads(qf["plugin.json"])
+check(_pkg["version"] == core.QAM_VERSION and _pkg["type"] == "module" and _pj["api_version"] == 1 and not _pj["flags"],
+      "panel files: ES module (Decky's modern loader), API 1, runs as the user (no root flag)")
+check(f'connect(1, "{_pj["name"]}")' in qf["dist/index.js"], "the panel's frontend and backend use the same plugin name")
+check("socket" not in qf["dist/index.js"] and "fetch(" not in qf["dist/index.js"] and "urllib" not in qf["main.py"]
+      and "http" not in qf["main.py"], "the panel never talks to the network, only the local agent")
+check(core.qam_installed() is None, "panel not installed yet")
+qc = core.qam_install_cmd()
+check(all((core.QAM_STAGE / n).exists() for n in qf) and "plugin_loader" in qc and str(core.QAM_DIR) in qc,
+      "install stages the files and restarts Decky")
+core.QAM_DIR.mkdir(parents=True); (core.QAM_DIR / "package.json").write_text('{"version": "0.9.0"}')
+check(core.qam_installed() == "0.9.0", "knows the installed panel's version (for updates)")
+_sh.rmtree(core.QAM_DIR)
+if shutil.which("node"):
+    harness = Path(HOME) / "qam-harness.mjs"
+    (_qd / "index.js").write_text(qf["dist/index.js"])
+    harness.write_text('''
+const calls = [];
+let STATE = [];
+const named = (k) => ({ [k]: function () {} })[k];
+const el = (t, p, ...c) => ({ t: typeof t === "function" ? t.name : t, f: typeof t === "function" ? t : null, p: p || {}, c });
+globalThis.window = {
+  SP_REACT: { createElement: el, useState: (v) => [STATE.length ? STATE.shift() : v, () => {}],
+              useEffect: () => {}, useRef: () => ({ current: null }) },
+  DFL: new Proxy({}, { get: (o, k) => k === "staticClasses" ? { Title: "t" } : named(String(k)) }),
+  __DECKY_SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED_deckyLoaderAPIInit: {
+    connect: (v, name) => { calls.push([v, name]); return { call: async () => ({}), toaster: { toast() {} } }; } },
+};
+const mod = await import(process.argv[2]);
+const plugin = mod.default();
+const render = (s) => { STATE = [s, false]; return plugin.content.f(plugin.content.p); };
+const labels = (n, out = []) => {
+  if (n && typeof n === "object") {
+    if (n.p && n.p.label) out.push(n.t + ":" + n.p.label + (n.p.checked ? "=on" : ""));
+    if (n.p && n.p.title) out.push("section:" + n.p.title);
+    if (n.t === "ButtonItem") out.push("button:" + n.c.join(""));
+    (n.c || []).forEach((x) => labels(x, out));
+  }
+  return out;
+};
+const full = { battery: "80%", time_left: "2 h", watts: 12, cpu: 60, gpu: 55, fan: 3000, game: "1", game_name: "Halo",
+  game_flags: ["fsr4"], game_live: true, lsfg: false, boost: true, boost_note: "performance", lighting: "allyhub",
+  effects: ["Aurora"], effect: "Aurora", brightness: 255, backup: true, backup_running: false };
+console.log(JSON.stringify({ name: plugin.name, connect: calls[0], icon: plugin.icon.t,
+  loading: labels(render(null)), error: labels(render({ error: "agent" })), full: labels(render(full)),
+  shelved: labels(render({ battery: "80%", lighting: "huesync", game: null, backup: false })) }));
+''')
+    r = subprocess.run(["node", str(harness), str(_qd / "index.js")], capture_output=True, text=True, timeout=30)
+    out = json.loads(r.stdout.strip().splitlines()[-1]) if r.stdout.strip() else {}
+    check(out.get("name") == "Ally Hub" and out.get("connect") == [1, "Ally Hub"] and out.get("icon") == "Icon",
+          "the panel loads in a Decky-like page and registers itself: " + (r.stderr[-400:] or str(out)))
+    check(any("isn't running" in x for x in out["error"]), "agent off: the panel says how to turn it on")
+    full = out["full"]
+    check("ToggleField:FSR 4 upgrade=on" in full and "ToggleField:Steam Deck mode" in full
+          and not any("Frame generation" in x for x in full), "this game's switches, frame gen only when installed: " + str(full))
+    check("ToggleField:Game Boost=on" in full and "DropdownItem:Effect" in full and "SliderField:Brightness" in full
+          and "button:Back up saves now" in full, "Game Boost, lighting and save backup controls")
+    check("section:Lighting" not in out["shelved"] and "section:This game" not in out["shelved"],
+          "no lighting controls while HueSync runs the rings, no game section without a game")
 # ---- reports: attachments, snapshot, instant upload, per-version repeats, manual reports ----
 posts = []
 def _fake_gh(method, path, data=None, **kw):
@@ -888,6 +952,52 @@ check(core.read_health(), "health log written")
 check(list((core.BACKUP_DIR / "auto").glob("*.tar.gz")), "daily settings snapshot")
 core.update_config(lambda c: c["game_colors"].__setitem__("1240440", "#00ff00")); time.sleep(2)
 check(a.led_reason == "game lighting" and (led / "multi_intensity").read_text() == "0 255 0", "per-game color wins")
+# Quick Access panel: the agent's local socket, and the Decky plugin's backend talking to it
+import socket as _so, asyncio as _aio, importlib.util as _iu, stat as _stat
+check(core.CONTROL_SOCK.exists() and _stat.S_IMODE(core.CONTROL_SOCK.stat().st_mode) == 0o600,
+      "the panel's socket exists and only this user can open it")
+def _ask(req, raw=None):
+    c = _so.socket(_so.AF_UNIX); c.settimeout(10); c.connect(str(core.CONTROL_SOCK))
+    c.sendall(raw if raw is not None else json.dumps(req).encode() + b"\n")
+    data = b""
+    while not data.endswith(b"\n"):
+        chunk = c.recv(65536)
+        if not chunk:
+            break
+        data += chunk
+    c.close()
+    return json.loads(data)
+st = _ask({"op": "status"})
+check(st["game"] == "1240440" and st["game_name"] == "Halo Infinite" and st["battery"].startswith("42%")
+      and st["lighting"] == "allyhub" and st["effects"] and st["watts"] == 15.0, "panel status: game, battery, lighting: " + str(st)[:300])
+check(_ask({"op": "action", "name": "boost", "data": {"on": True}})["ok"] and core.load_config()["performance"]["boost"],
+      "panel turns Game Boost on")
+_ask({"op": "action", "name": "boost", "data": {"on": False}})
+check(_ask({"op": "action", "name": "brightness", "data": {"value": 128}})["ok"] and core.load_config()["rgb"]["brightness"] == 128,
+      "panel brightness slider")
+check("error" in _ask(None, raw=b"not json\n") and _ask({"op": "status"})["game"] == "1240440",
+      "a bad request gets an error and the agent keeps going")
+check(not _ask({"op": "action", "name": "rm -rf"})["ok"], "unknown actions are refused")
+_gs, _ag, _sent = core.game_settings, core.apply_game_settings, []
+core.game_settings = lambda appid, kind="steam": {"options": "", "tool": "", "tools": [], "live": True}
+core.apply_game_settings = lambda appid, opts, tool=None: (_sent.append((appid, opts, tool)), ["options"])[1]
+a.read_game_flags(a.game)
+check(_ask({"op": "status"})["game_flags"] == [] and _ask({"op": "status"})["game_live"], "reads the running game's switches")
+r = _ask({"op": "action", "name": "game_flag", "data": {"key": "fsr4", "on": True}})
+check(r["ok"] and _sent[-1] == (1240440, "PROTON_FSR4_UPGRADE=1 %command%", None) and _ask({"op": "status"})["game_flags"] == ["fsr4"],
+      "panel switch sets the game's launch options through Steam: " + str(r))
+check(a._steam_appid(str((123 << 32) | 0x02000000)) == 123, "non-Steam game ids map to their tile")
+core.game_settings, core.apply_game_settings = _gs, _ag
+check(_ask({"op": "action", "name": "backup"})["ok"], "panel can ask for a save backup")
+_spec = _iu.spec_from_loader("qam_main", loader=None)
+qam = _iu.module_from_spec(_spec)
+exec(core.QAM_MAIN_PY, qam.__dict__)
+check(qam.SOCK == str(core.CONTROL_SOCK), "the plugin finds the agent's socket")
+st2 = _aio.run(qam.Plugin().status())
+check(st2.get("game") == "1240440", "the Decky plugin's backend reads status from the agent")
+check(_aio.run(qam.Plugin().action("boost", {"on": False})).get("ok"), "and sends actions")
+qam.SOCK = "/nonexistent/agent.sock"
+check(_aio.run(qam.Plugin().status()) == {"error": "agent"}, "agent off: the plugin says so instead of hanging")
 base = "http://127.0.0.1:18911"
 check(b"password" in urllib.request.urlopen(base + "/").read(), "remote shows PIN page")
 try:
@@ -1523,6 +1633,20 @@ gui.ask_item = _ai
 tryit("games back", hub.games.back)
 tryit("games load failed", lambda: (hub.games.open_game(_gm), hub.games._loaded(_gm, {"error": "x"})))
 tryit("game reset done", lambda: hub.on_job_finished("game-reset", 0, ""))
+tryit("panel card", hub.games.qam_card)
+_lj.clear()
+hub.runner.submit = lambda label, cmd, key="": _lj.append((key, cmd))
+hub.state["decky"] = {"x": {"dir": "/x", "name": "x"}}
+_np = hub.needs_password
+hub.needs_password = lambda: False
+_dk = gui.CATALOG_BY_ID["decky"].check
+gui.CATALOG_BY_ID["decky"].check = lambda st: True
+tryit("panel install", hub.games.qam_install)
+check(_lj and _lj[-1][0] == "qam-install" and "plugin_loader" in _lj[-1][1], "Add to Quick Access runs one job")
+gui.CATALOG_BY_ID["decky"].check = _dk
+hub.needs_password = _np
+tryit("panel remove", hub.games.qam_remove)
+tryit("panel done", lambda: hub.on_job_finished("qam-install", 0, ""))
 hub.runner.submit = _sub2
 tryit("NSL card opens the page", lambda: hub.on_item_action("nonsteamlaunchers", "install"))
 check(hub.current_page() is hub.launchers, "the catalog card opens the themed page, not the script's windows")
