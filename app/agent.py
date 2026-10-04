@@ -19,6 +19,7 @@ import os
 import secrets
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tarfile
@@ -411,6 +412,9 @@ class Agent:
         self.boost_note = ""
         self.boost_tried = None    # last target that changed nothing, so it isn't retried every 3 s
         self.stopping = False      # set by SIGTERM; the loop exits and Game Boost is put back
+        self.control = None        # local socket for the Quick Access panel (see serve_control)
+        self.backup_now = False
+        self.qam_game = {}         # the running game's switches, read from Steam once per game
 
     # ---- config ----
     def reload_config(self):
@@ -518,6 +522,151 @@ class Agent:
                 log(f"remote failed: {e}")
                 self.server = None
 
+    # ---- Quick Access panel (a Decky plugin talks to this socket; only this user can open it) ----
+    def serve_control(self):
+        path = core.CONTROL_SOCK
+        try:
+            path.unlink(missing_ok=True)
+            srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            old = os.umask(0o177)                   # the socket is born 0600: no window for other users
+            try:
+                srv.bind(str(path))
+            finally:
+                os.umask(old)
+            os.chmod(path, 0o600)
+            srv.listen(4)
+        except OSError as e:
+            log(f"control socket failed: {e}")
+            self.control = False                    # don't retry every 30 s; the next start tries again
+            return
+        self.control = srv
+        threading.Thread(target=self._control_loop, args=(srv,), daemon=True).start()
+        log("quick access socket ready")
+
+    def _control_loop(self, srv):
+        while not self.stopping:
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._control_client, args=(conn,), daemon=True).start()
+
+    def _control_client(self, conn):
+        with conn:
+            try:
+                conn.settimeout(10)
+                buf = b""
+                while b"\n" not in buf and len(buf) < 65536:
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        break
+                    buf += chunk
+                req = json.loads(buf.split(b"\n", 1)[0] or b"{}")
+                if req.get("op") == "status":
+                    out = self.qam_status()
+                elif req.get("op") == "action":
+                    out = self.qam_action(str(req.get("name", "")), req.get("data") or {})
+                else:
+                    out = {"error": "unknown request"}
+            except Exception as e:                   # a bad request never takes the agent down
+                out = {"error": f"{type(e).__name__}: {e}"}
+            try:
+                conn.sendall(json.dumps(out).encode() + b"\n")
+            except OSError:
+                pass
+
+    def _steam_appid(self, game):
+        try:
+            n = int(game)
+        except (TypeError, ValueError):
+            return None
+        return n >> 32 if n > 0xFFFFFFFF else n         # non-Steam game ids carry the tile's id on top
+
+    def read_game_flags(self, game):
+        appid = self._steam_appid(game)
+        if appid is None:
+            return
+        st = core.game_settings(appid, "shortcut" if int(game) > 0xFFFFFFFF else "steam")
+        if self.game == game:
+            self.qam_game = {"game": game, "appid": appid, "live": st.get("live"), "options": st.get("options", ""),
+                             "tool": st.get("tool", ""), "flags": sorted(core.launch_flags(st.get("options", "")))}
+
+    def qam_status(self) -> dict:
+        s = core.sensors()
+        light = self.cfg.get("lighting") or {}
+        rgb = self.cfg.get("rgb") or {}
+        names = list(core.PRESETS) + list(light.get("custom") or {})
+        eff = light.get("effect") or None
+        g = self.qam_game if self.qam_game.get("game") == self.game else {}
+        watts = core.battery_power_w()
+        return {
+            "version": core.display_version(),
+            "battery": core.battery_percent(), "time_left": core.time_left_text(),
+            "watts": round(watts, 1) if watts else None,
+            "cpu": s.get("cpu_temp"), "gpu": s.get("gpu_temp"), "fan": s.get("fan_rpm"),
+            "game": self.game, "game_name": self.seen.get(self.game) if self.game else None,
+            "game_flags": g.get("flags"), "game_live": bool(g.get("live")),
+            "game_tool": g.get("tool", ""), "lsfg": core.LSFG_WRAPPER.exists(),
+            "boost": bool((self.cfg.get("performance") or {}).get("boost")), "boost_note": self.boost_note,
+            "lighting": "huesync" if core.lighting_shelved(self.cfg) else "allyhub",
+            "effects": names, "effect": core.effect_label(eff) if eff else "",
+            "brightness": int(rgb.get("brightness", 255)),
+            "backup": self.ludusavi_ready(),
+            "backup_running": self.save_proc is not None,
+        }
+
+    def ludusavi_ready(self) -> bool:
+        """Ludusavi (the save backup tool) is installed; checked at most once a minute."""
+        now = time.time()
+        if now - getattr(self, "_ludusavi_t", 0) > 60:
+            self._ludusavi_t = now
+            self._ludusavi = core.run_quiet(["flatpak", "info", core.LUDUSAVI_ID])[0] == 0
+        return self._ludusavi
+
+    def qam_action(self, name: str, data: dict) -> dict:
+        if name == "boost":
+            on = bool(data.get("on"))
+            self.cfg = core.update_config(lambda c: c.setdefault("performance", {}).__setitem__("boost", on))
+            self.wake.set()
+            return {"ok": True, "message": f"Game Boost {'on' if on else 'off'}"}
+        if name in ("preset", "lights"):
+            return {"ok": True, "message": self.remote_action(name, data)}
+        if name == "brightness":
+            try:
+                b = max(0, min(255, int(data.get("value", 255))))
+            except (TypeError, ValueError):
+                return {"ok": False, "message": "Bad brightness"}
+
+            def fn(cfg):
+                old = cfg.get("rgb") or {"rgb": [225, 29, 72], "enums": {}}
+                old["brightness"] = b
+                cfg["rgb"] = old
+            self.cfg = core.update_config(fn)
+            self.last_led = None
+            self.wake.set()
+            return {"ok": True, "message": ""}
+        if name == "game_flag":
+            key, on = str(data.get("key", "")), bool(data.get("on"))
+            g = self.qam_game if self.qam_game.get("game") == self.game else {}
+            if key not in core.GAME_TOGGLES or not g.get("appid"):
+                return {"ok": False, "message": "No game to change"}
+            flags = set(core.launch_flags(g.get("options", "")))
+            flags = flags | {key} if on else flags - {key}
+            opts = core.set_launch_flags(g.get("options", ""), flags)
+            done = core.apply_game_settings(g["appid"], opts, None)
+            if "options" not in done:
+                return {"ok": False, "message": "Steam didn't take the change"}
+            g.update(options=opts, flags=sorted(flags))
+            return {"ok": True, "message": f"{core.GAME_TOGGLES[key][0]} {'on' if on else 'off'} next time you start "
+                                           f"{self.seen.get(self.game) or 'the game'}"}
+        if name == "backup":
+            if self.save_proc is not None:
+                return {"ok": True, "message": "A save backup is already running"}
+            self.backup_now = True
+            self.wake.set()
+            return {"ok": True, "message": "Backing up your saves"}
+        return {"ok": False, "message": "Unknown action"}
+
     # ---- features ----
     def update_lighting(self, battery: dict):
         if core.lighting_shelved(self.cfg):
@@ -565,6 +714,9 @@ class Agent:
                 self.seen[g] = core.game_name(g)
                 core.write_json(SEEN_FILE, self.seen)
             log(f"game: {self.seen.get(g) if g else 'none'}")
+            self.qam_game = {}
+            if g and self.control:
+                threading.Thread(target=self.read_game_flags, args=(g,), daemon=True).start()
 
     # ---- Game Boost (Tools > Performance) ----
     def recover_boost(self):
@@ -674,13 +826,15 @@ class Agent:
             log(f"save backup finished rc={rc}")
             self.save_proc = None
             return
-        if not a.get("save_backup") or self.game or self.tick % 60:
+        now = self.backup_now
+        self.backup_now = False
+        if not now and (not a.get("save_backup") or self.game or self.tick % 60):
             return
         st = core.read_json(core.DATA_DIR / "save_backup.json", {}) or {}
-        if time.time() - st.get("last", 0) < float(a.get("save_backup_hours", 24)) * 3600:
+        if not now and time.time() - st.get("last", 0) < float(a.get("save_backup_hours", 24)) * 3600:
             return
         pct = core.read_int(battery["path"] / "capacity") if battery else 100
-        if battery and battery.get("status") == "Discharging" and (pct or 0) < 30:
+        if not now and battery and battery.get("status") == "Discharging" and (pct or 0) < 30:
             return
         if core.run_quiet(["flatpak", "info", core.LUDUSAVI_ID])[0] != 0:
             return
@@ -755,6 +909,8 @@ class Agent:
                 log("agent disabled in config, exiting")
                 return
             self.safely("remote", self.ensure_server)
+            if self.control is None and self.tick % 30 == 0:
+                self.safely("control", self.serve_control)
             battery = core.battery_info()
             if self.tick % 3 == 0:
                 self.safely("game", self.update_game)
