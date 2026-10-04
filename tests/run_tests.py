@@ -663,6 +663,222 @@ hdr = core._recv_exact(b, 2); n = int.from_bytes(core._recv_exact(b, 8), "big");
 body = core._recv_exact(b, n)
 check(bytes(c ^ m[i % 4] for i, c in enumerate(body)).decode() == _payload, "big messages to Steam are masked correctly")
 a.close(); b.close()
+# ---- Storage saver: leftovers of removed games, unused Proton builds, the trash ----
+sa = core.STEAM_ROOT / "steamapps"
+(sa / "appmanifest_100.acf").write_text('"AppState"\n{\n\t"appid"\t\t"100"\n\t"name"\t\t"Big Game"\n\t"installdir"\t\t"Big Game"\n\t"SizeOnDisk"\t\t"5000000"\n}\n')
+(sa / "common/Big Game").mkdir(parents=True, exist_ok=True)
+def _blob(p, n):
+    p.mkdir(parents=True, exist_ok=True); (p / "f.bin").write_bytes(b"x" * n)
+_blob(sa / "shadercache/100", 3000); _blob(sa / "compatdata/100", 4000)
+_blob(sa / "shadercache/200", 2000); _blob(sa / "compatdata/200/pfx", 6000)
+_blob(sa / "compatdata/3123456789", 1000)          # the Battle.net tile from the art tests: in use
+_blob(sa / "downloading/300", 7000); _blob(sa / "downloading/100", 500)
+_tools = core.STEAM_ROOT / "compatibilitytools.d"
+for n in ("GE-Proton8-1", "GE-Proton9-27", "GE-Proton99-1"):
+    _blob(_tools / n, 1500)
+(core.STEAM_ROOT / "config").mkdir(parents=True, exist_ok=True)
+(core.STEAM_ROOT / "config/config.vdf").write_text('"InstallConfigStore"\n{\n\t"Software"\n\t{\n\t\t"Valve"\n\t\t{\n\t\t\t"Steam"\n\t\t\t{\n'
+    '\t\t\t\t"CompatToolMapping"\n\t\t\t\t{\n\t\t\t\t\t"555"\n\t\t\t\t\t{\n\t\t\t\t\t\t"name"\t\t"GE-Proton8-1"\n\t\t\t\t\t}\n\t\t\t\t}\n'
+    '\t\t\t\t"Other"\t\t"1"\n\t\t\t}\n\t\t}\n\t}\n}\n')
+_blob(core.TRASH_DIR / "files", 2 * 1024 * 1024)
+check(core.compat_tools_in_use() == {"GE-Proton8-1"}, "knows which Proton builds Steam uses")
+check([a["name"] for a in core.steam_apps()] == ["Big Game"], "lists installed Steam games from their manifests")
+_cef = core.cef_eval
+core.cef_eval = lambda js, timeout=20, port=None: '[["200","Old Game"],["300",""]]' if "GetAppOverviewByAppID" in js else None
+res = core.storage_scan()
+core.cef_eval = _cef
+labels = {i["label"]: i for i in res["items"]}
+g = res["games"][0]
+check(g["name"] == "Big Game" and g["shaders"] == 3000 and g["prefix"] == 4000 and g["total"] == 5007000,
+      "each game's size includes its shader cache and Windows files: " + str({k: g[k] for k in ("shaders", "prefix", "total")}))
+check(labels.get("Shader cache of Old Game", {}).get("group") == "safe", "a removed game's shader cache can go (named from Steam's library)")
+check(labels.get("Windows files of Old Game", {}).get("group") == "check" and labels["Windows files of Old Game"]["warn"],
+      "a removed game's Windows files start unticked: they can hold saves")
+check(labels.get("Unfinished download of a removed game (app 300)", {}).get("group") == "safe", "abandoned downloads can go")
+check(labels.get("Unfinished update for Big Game", {}).get("group") == "check", "a pending update is offered but unticked")
+check(not any("3123456789" in str(i["path"]) for i in res["items"]), "non-Steam tiles' files are never leftovers")
+check(any(i["label"].startswith("GE-Proton9-27") for i in res["items"]) and
+      not any(i["label"].startswith(("GE-Proton8-1", "GE-Proton99-1")) for i in res["items"]),
+      "offers only Proton builds no game uses, and keeps the newest of each kind")
+check("Desktop Mode trash" in labels and res["drives"] and res["drives"][0]["label"] == "Internal storage", "trash and drives")
+paths = [i["path"] for i in res["items"]]
+cmd = core.storage_clean_cmd(paths + [sa / "common/Big Game", Path("/etc"), Path(HOME) / "Documents", sa / "compatdata/../.."])
+check(cmd and "Big Game" not in cmd and "/etc" not in cmd and "Documents" not in cmd and "/.." not in cmd,
+      "cleanup only ever deletes the kinds of folders the scan offers, never a game: " + str(cmd)[:200])
+subprocess.run(["bash", "-c", cmd])
+check(not (sa / "shadercache/200").exists() and not (sa / "downloading/300").exists() and (sa / "common/Big Game").exists()
+      and (sa / "shadercache/100").exists() and (core.TRASH_DIR / "files").exists() and not any((core.TRASH_DIR / "files").iterdir())
+      and (_tools / "GE-Proton8-1").exists() and not (_tools / "GE-Proton9-27").exists(), "deletes what was picked and nothing else")
+check(core.storage_clean_cmd([Path("/")]) is None, "nothing safe picked -> no command")
+(core.STEAM_ROOT / "config/config.vdf").write_text('"InstallConfigStore"\n{\n\t"Software"\n\t{\n\t\t"Valve"\n\t\t{\n\t\t\t"Steam"\n\t\t\t{\n'
+    '\t\t\t\t"CompatToolMapping"\n\t\t\t\t{\n\t\t\t\t\t"0"\n\t\t\t\t\t{\n\t\t\t\t\t\t"name"\t\t"proton_9"\n\t\t\t\t\t}\n'
+    '\t\t\t\t\t"1245620"\n\t\t\t\t\t{\n\t\t\t\t\t\t"name"\t\t"GE-Proton9-20"\n\t\t\t\t\t}\n'
+    '\t\t\t\t\t"777"\n\t\t\t\t\t{\n\t\t\t\t\t\t"name"\t\t"Custom-Internal-Id"\n\t\t\t\t\t}\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n}\n')
+check(core.compat_tools_in_use() == {"proton_9", "GE-Proton9-20", "Custom-Internal-Id"}, "reads every Proton choice, not just the first")
+for n in ("GE-Proton9-20", "my-folder"):
+    _blob(_tools / n, 100)
+(_tools / "my-folder/compatibilitytool.vdf").write_text('"compatibilitytools"\n{\n "compat_tools"\n {\n  "Custom-Internal-Id"\n  {\n   "install_path" "."\n  }\n }\n}\n')
+_blob(_tools / "linked-target", 100); (_tools / "latest").symlink_to(_tools / "linked-target")
+inuse = core.tools_in_use_folders()
+check((_tools / "GE-Proton9-20").resolve() in inuse and (_tools / "my-folder").resolve() in inuse
+      and (_tools / "linked-target").resolve() in inuse, "a Proton in use is known by folder, internal id or symlink")
+check(core.storage_clean_cmd([_tools / "GE-Proton9-20", _tools / "my-folder", _tools / "linked-target", _tools / "latest"]) is None,
+      "Proton builds in use are never deleted, even from an old scan")
+_blob(sa / "compatdata/100", 10)
+check(core.storage_clean_cmd([sa / "compatdata/100", sa / "compatdata/3123456789"]) is None,
+      "an installed game's or a non-Steam tile's Windows files are never deleted")
+(sa / "libraryfolders.vdf").write_text('"libraryfolders"\n{\n\t"1"\n\t{\n\t\t"path"\t\t"/run/media/deck/SD"\n\t\t"apps"\n\t\t{\n\t\t\t"4242"\t\t"1"\n\t\t}\n\t}\n}\n')
+_blob(sa / "compatdata/4242", 10)
+check("4242" in core.library_app_ids() and core.storage_clean_cmd([sa / "compatdata/4242"]) is None,
+      "games on an SD card that isn't inserted still count as installed")
+(sa / "libraryfolders.vdf").unlink()
+_blob(sa / "shadercache/100", 10)
+c = core.storage_clean_cmd([sa / "shadercache/100"])
+check(c and "exit $rc" in c and subprocess.run(["bash", "-c", c]).returncode == 0, "clearing a shader cache reports real success")
+# ---- Game settings: launch options as switches, Proton picker, rescue ----
+check(core.launch_flags("PROTON_LOG=1 mangohud %command% -dx11") == {"log"}, "reads which switches are on")
+check(core.set_launch_flags("PROTON_LOG=1 mangohud %command% -dx11", {"fsr4", "lsfg"})
+      == "PROTON_FSR4_UPGRADE=1 mangohud ~/lsfg %command% -dx11", "switches go in, the owner's own options stay")
+check(core.set_launch_flags("-dx11", {"fsr4"}) == "PROTON_FSR4_UPGRADE=1 %command% -dx11", "plain game arguments get %command%")
+check(core.set_launch_flags("PROTON_FSR4_UPGRADE=1 %command%", set()) == "", "turning the last switch off leaves nothing behind")
+check(core.set_launch_flags("PROTON_FSR4_UPGRADE=1 %command% -skip", set()) == "%command% -skip", "game arguments survive")
+q = 'WINEDLLOVERRIDES="dxgi=n,b" %command%'
+check(core.set_launch_flags(q, {"deck"}) == 'SteamDeck=1 WINEDLLOVERRIDES="dxgi=n,b" %command%', "quoted values are kept whole")
+check(core.launch_flags(core.set_launch_flags("", set(core.GAME_TOGGLES))) == set(core.GAME_TOGGLES), "every switch round-trips")
+check(core.launch_flags(f"{HOME}/lsfg %command%") == {"lsfg"}, "frame generation is found by its full path too")
+check(not core.launch_parseable("--name=Don't %command%") and not core.launch_parseable('bash -c "echo; %command%"')
+      and core.launch_parseable('A="b c" %command% -x') and core.launch_parseable("-dx11"), "spots launch options the switches can't edit safely")
+check(core.set_launch_flags("SteamDeck=0 PROTON_LOG=2 %command%", set()) == "SteamDeck=0 PROTON_LOG=2 %command%",
+      "the owner's own values of the same variables are left alone")
+check(core.set_launch_flags("SteamDeck=0 %command%", {"deck"}) == "SteamDeck=1 %command%", "turning a switch on replaces its variable")
+check(core.steam_appid_of(str((7 << 32) | 0x02000000)) == 7 and core.steam_appid_of("1240440") == 1240440
+      and core.steam_appid_of(None) is None, "running non-Steam games map to their tile")
+t = core.parse_vdf_text('"a"\n{\n\t"b"\t\t"x \\"y\\""\n\t"c"\n\t{\n\t\t"d"\t\t"1"\n\t}\n}\n')
+check(t == {"a": {"b": 'x "y"', "c": {"d": "1"}}}, "reads Steam's text files: " + str(t))
+lc = Path(HOME) / ".steam/root/userdata" / core.steam_user_id3() / "config/localconfig.vdf"
+lc.write_text('"UserLocalConfigStore"\n{\n\t"Software"\n\t{\n\t\t"Valve"\n\t\t{\n\t\t\t"Steam"\n\t\t\t{\n\t\t\t\t"apps"\n\t\t\t\t{\n'
+              '\t\t\t\t\t"100"\n\t\t\t\t\t{\n\t\t\t\t\t\t"LastPlayed"\t\t"1700000000"\n\t\t\t\t\t\t"LaunchOptions"\t\t"PROTON_LOG=1 %command%"\n\t\t\t\t\t}\n'
+              '\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n}\n')
+(sa / "appmanifest_1493710.acf").write_text('"AppState"\n{\n\t"appid"\t\t"1493710"\n\t"name"\t\t"Proton Experimental"\n\t"installdir"\t\t"Proton - Experimental"\n}\n')
+gc = core.game_choices()
+check([g["name"] for g in gc][:1] == ["Big Game"] and "Proton Experimental" not in [g["name"] for g in gc]
+      and "Ally Hub" not in [g["name"] for g in gc] and any(g["kind"] == "shortcut" for g in gc),
+      "lists games (recently played first) and non-Steam tiles, not Proton or Ally Hub: " + str([g["name"] for g in gc]))
+_cef = core.cef_eval
+core.cef_eval = lambda js, timeout=20, port=None: None
+st = core.game_settings(100)
+check(st == {"options": "PROTON_LOG=1 %command%", "tool": "", "tools": [], "live": False}, "Steam's debugger off: reads the files, can't save: " + str(st))
+core.cef_eval = lambda js, timeout=20, port=None: json.dumps({"found": True, "options": "SteamDeck=1 %command%", "tool": "GE-Proton9-27",
+                                                              "tools": [["GE-Proton9-27", "GE-Proton9-27"], ["proton_experimental", "Proton Experimental"]]})
+st = core.game_settings(100)
+check(st["live"] and st["tool"] == "GE-Proton9-27" and ("proton_experimental", "Proton Experimental") in st["tools"], "reads live settings from Steam")
+sent = []
+core.cef_eval = lambda js, timeout=20, port=None: (sent.append(js), '["options", "tool"]')[1]
+done = core.apply_game_settings(100, 'A="b c" %command%', "proton_experimental")
+check(done == ["options", "tool"] and 'SetAppLaunchOptions(id, opts)' in sent[0] and '"A=\\"b c\\" %command%"' in sent[0]
+      and "SpecifyCompatTool" in sent[0], "hands launch options and Proton to Steam, safely quoted")
+core.apply_game_settings(100, "", None)
+check("const id = 100, opts = \"\", tool = null" in sent[-1], "Proton left alone when it didn't change")
+core.cef_eval = _cef
+cmd = core.reset_prefix_cmd(100)
+subprocess.run(["bash", "-c", cmd])
+bk = [d for d in (sa / "compatdata").iterdir() if d.name.startswith("100_allyhub_backup_")]
+check(not (sa / "compatdata/100").exists() and len(bk) == 1 and (bk[0] / "f.bin").exists(), "reset moves the Windows files aside, never deletes")
+core.cef_eval = lambda js, timeout=20, port=None: None
+items = core.storage_scan()["items"]
+core.cef_eval = _cef
+check(any(i["label"].startswith("Old Windows files of Big Game") and i["group"] == "check" for i in items),
+      "Storage offers the set-aside folder later, unticked")
+check(core.storage_clean_cmd([bk[0]]) and core.reset_prefix_cmd(424242) is None, "the backup can be cleared; no prefix, no reset")
+(Path(HOME) / "steam-100.log").write_text("err: missing d3dx9_43.dll\n")
+check("d3dx9_43" in core.proton_log(100) and core.proton_log(5) == "", "reads Proton's log for the report")
+# ---- Quick Access panel: the Decky plugin Ally Hub installs ----
+import py_compile as _pc, shutil as _sh
+qf = core.qam_files()
+_qd = Path(HOME) / "qam-check"; _qd.mkdir()
+(_qd / "main.py").write_text(qf["main.py"]); _pc.compile(str(_qd / "main.py"), doraise=True)
+_pkg, _pj = json.loads(qf["package.json"]), json.loads(qf["plugin.json"])
+check(_pkg["version"] == core.QAM_VERSION and _pkg["type"] == "module" and _pj["api_version"] == 1 and not _pj["flags"],
+      "panel files: ES module (Decky's modern loader), API 1, runs as the user (no root flag)")
+check(f'connect(2, "{_pj["name"]}")' in qf["dist/index.js"], "the panel's frontend and backend use the same plugin name")
+check("socket" not in qf["dist/index.js"] and "fetch(" not in qf["dist/index.js"] and "urllib" not in qf["main.py"]
+      and "http" not in qf["main.py"], "the panel never talks to the network, only the local agent")
+check(core.qam_installed() is None, "panel not installed yet")
+qc = core.qam_install_cmd()
+check(all((core.QAM_STAGE / n).exists() for n in qf) and "plugin_loader" in qc and str(core.QAM_DIR) in qc,
+      "install stages the files and restarts Decky")
+core.QAM_DIR.mkdir(parents=True); (core.QAM_DIR / "package.json").write_text('{"version": "0.9.0"}')
+check(core.qam_installed() == "0.9.0", "knows the installed panel's version (for updates)")
+_sh.rmtree(core.QAM_DIR)
+if shutil.which("node"):
+    harness = Path(HOME) / "qam-harness.mjs"
+    (_qd / "index.js").write_text(qf["dist/index.js"])
+    harness.write_text('''
+const calls = [];
+let STATE = [];
+const named = (k) => ({ [k]: function () {} })[k];
+const el = (t, p, ...c) => ({ t: typeof t === "function" ? t.name : t, f: typeof t === "function" ? t : null, p: p || {}, c });
+globalThis.window = {
+  SP_REACT: { createElement: el, useState: (v) => [STATE.length ? STATE.shift() : v, () => {}],
+              useEffect: () => {}, useRef: () => ({ current: null }) },
+  DFL: new Proxy({}, { get: (o, k) => k === "staticClasses" ? { Title: "t" } : named(String(k)) }),
+  __DECKY_SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED_deckyLoaderAPIInit: {
+    connect: (v, name) => { calls.push([v, name]); return { call: async () => ({}), toaster: { toast() {} } }; } },
+};
+const mod = await import(process.argv[2]);
+const plugin = mod.default();
+const render = (s) => { STATE = [s, null]; return plugin.content.f(plugin.content.p); };
+const labels = (n, out = []) => {
+  if (n && typeof n === "object") {
+    if (n.p && n.p.label) out.push(n.t + ":" + n.p.label + (n.p.checked ? "=on" : ""));
+    if (n.p && n.p.title) out.push("section:" + n.p.title);
+    if (n.t === "ButtonItem") out.push("button:" + n.c.join(""));
+    (n.c || []).forEach((x) => labels(x, out));
+  }
+  return out;
+};
+const full = { battery: "80%", time_left: "2 h", watts: 12, cpu: 60, gpu: 55, fan: 3000, game: "1", game_name: "Halo",
+  game_flags: ["fsr4"], game_live: true, lsfg: false, boost: true, boost_note: "performance", lighting: "allyhub",
+  effects: ["Aurora"], effect: "Aurora", brightness: 255, backup: true, backup_running: false };
+console.log(JSON.stringify({ name: plugin.name, connect: calls[0], icon: plugin.icon.t,
+  loading: labels(render(null)), error: labels(render({ error: "agent" })), full: labels(render(full)),
+  shelved: labels(render({ battery: "80%", lighting: "huesync", game: null, backup: false })) }));
+''')
+    r = subprocess.run(["node", str(harness), str(_qd / "index.js")], capture_output=True, text=True, timeout=30)
+    out = json.loads(r.stdout.strip().splitlines()[-1]) if r.stdout.strip() else {}
+    check(out.get("name") == "Ally Hub" and out.get("connect") == [2, "Ally Hub"] and out.get("icon") == "Icon",
+          "the panel loads in a Decky-like page and registers itself: " + (r.stderr[-400:] or str(out)))
+    check(any("isn't running" in x for x in out["error"]), "agent off: the panel says how to turn it on")
+    full = out["full"]
+    check("ToggleField:FSR 4 upgrade=on" in full and "ToggleField:Steam Deck mode" in full
+          and not any("Frame generation" in x for x in full), "this game's switches, frame gen only when installed: " + str(full))
+    check("ToggleField:Game Boost=on" in full and "DropdownItem:Effect" in full and "SliderField:Brightness" in full
+          and "button:Back up saves now" in full, "Game Boost, lighting and save backup controls")
+    check("section:Lighting" not in out["shelved"] and "section:This game" not in out["shelved"],
+          "no lighting controls while HueSync runs the rings, no game section without a game")
+# ---- turning Decky plugins off without uninstalling ----
+_ds = Path(HOME) / "decky-settings/loader.json"
+_ds.parent.mkdir(parents=True); _ds.write_text('{"developer.enabled": true, "disabled_plugins": ["Old"]}')
+for mode, names in (("off", ["HueSync", "Ally Hub"]), ("on", ["Ally Hub"])):
+    subprocess.run(["python3", "-c", core._DECKY_TOGGLE_PY, str(_ds), mode, json.dumps(names)], check=True)
+_dj = json.loads(_ds.read_text())
+check(_dj["disabled_plugins"] == ["Old", "HueSync"] and _dj["developer.enabled"] is True,
+      "Decky's off list gains and loses plugins, its other settings stay")
+core.DECKY_SETTINGS = _ds
+check(core.decky_disabled() == {"Old", "HueSync"}, "reads which plugins are off")
+import shlex
+_tc = core.decky_toggle_cmd(["x'; rm -rf ~; '"], True)
+check("plugin_loader" in _tc and "x'; rm -rf ~; '" in shlex.split(_tc.split("python3 -c ", 1)[1])[3],
+      "plugin names are passed safely: " + _tc[-160:])
+check(core.decky_toggle_cmd([], True) is None, "nothing to toggle -> no command")
+_st = {"decky": {"allycenter": {"dir": "/h/homebrew/plugins/AllyCenter", "name": "Ally Center", "version": "1"}}}
+check(core.decky_item_names(core.CATALOG_BY_ID["allycenter"], _st) == ["Ally Center"], "finds the Decky name behind a catalog card")
+check("decky_off" in core.gather_state(), "the app knows which plugins are off")
+check("EmuDeck/backend/uninstall.sh" in core.CATALOG_BY_ID["emudeck"].uninstall, "EmuDeck can be removed with its own uninstaller")
+core.EMUDECK_PATH.parent.mkdir(parents=True, exist_ok=True); core.EMUDECK_PATH.write_text("app")
+_r = subprocess.run(["bash", "-c", core.emudeck_uninstall_cmd()], capture_output=True, text=True)
+check(_r.returncode == 0 and not core.EMUDECK_PATH.exists() and "never set up" in _r.stdout,
+      "EmuDeck that was never set up is removed cleanly (no missing-uninstaller error)")
 # ---- reports: attachments, snapshot, instant upload, per-version repeats, manual reports ----
 posts = []
 def _fake_gh(method, path, data=None, **kw):
@@ -706,10 +922,14 @@ core.update_config(lambda c: c["updates"].__setitem__("reporting", False))
 check(core.queue_report("crash", "auto", "x", "fp-auto") is None, "automatic reports still respect the off switch")
 posts.clear()
 jl = core.job_log_path("nonsteamlaunchers"); jl.parent.mkdir(parents=True, exist_ok=True); jl.write_text("full job output here")
+_us = core.upload_soon
+core.upload_soon = lambda: None                   # read the queued report before the upload thread removes it
 up = core.user_report("Battle.net still missing", "Launchers")
 check(up is not None and json.loads(up.read_text())["kind"] == "user", "Report a problem works even with automatic reports off")
 check(json.loads(up.read_text())["channel"] == "stable", "reports note the update channel")
 check(any("Job output" in a["name"] for a in json.loads(up.read_text())["attachments"]), "it attaches the latest task output")
+core.upload_soon = _us
+core.upload_soon()
 time.sleep(1.5)                                   # upload_soon runs on a thread
 check(any(x[1].endswith("/issues") and x[2]["title"].startswith("[report] Battle.net") for x in posts if x[2]),
       "and it's sent at once as a [report] issue")
@@ -792,6 +1012,57 @@ check(core.read_health(), "health log written")
 check(list((core.BACKUP_DIR / "auto").glob("*.tar.gz")), "daily settings snapshot")
 core.update_config(lambda c: c["game_colors"].__setitem__("1240440", "#00ff00")); time.sleep(2)
 check(a.led_reason == "game lighting" and (led / "multi_intensity").read_text() == "0 255 0", "per-game color wins")
+# Quick Access panel: the agent's local socket, and the Decky plugin's backend talking to it
+import socket as _so, asyncio as _aio, importlib.util as _iu, stat as _stat
+check(core.CONTROL_SOCK.exists() and _stat.S_IMODE(core.CONTROL_SOCK.stat().st_mode) == 0o600,
+      "the panel's socket exists and only this user can open it")
+def _ask(req, raw=None):
+    c = _so.socket(_so.AF_UNIX); c.settimeout(10); c.connect(str(core.CONTROL_SOCK))
+    c.sendall(raw if raw is not None else json.dumps(req).encode() + b"\n")
+    data = b""
+    while not data.endswith(b"\n"):
+        chunk = c.recv(65536)
+        if not chunk:
+            break
+        data += chunk
+    c.close()
+    return json.loads(data)
+st = _ask({"op": "status"})
+check(st["game"] == "1240440" and st["game_name"] == "Halo Infinite" and st["battery"].startswith("42%")
+      and st["lighting"] == "allyhub" and st["effects"] and st["watts"] == 15.0, "panel status: game, battery, lighting: " + str(st)[:300])
+check(_ask({"op": "action", "name": "boost", "data": {"on": True}})["ok"] and core.load_config()["performance"]["boost"],
+      "panel turns Game Boost on")
+_ask({"op": "action", "name": "boost", "data": {"on": False}})
+check(_ask({"op": "action", "name": "brightness", "data": {"value": 128}})["ok"] and core.load_config()["rgb"]["brightness"] == 128,
+      "panel brightness slider")
+check("error" in _ask(None, raw=b"not json\n") and _ask({"op": "status"})["game"] == "1240440",
+      "a bad request gets an error and the agent keeps going")
+check(not _ask({"op": "action", "name": "rm -rf"})["ok"], "unknown actions are refused")
+_gs, _ag, _sent = core.game_settings, core.apply_game_settings, []
+core.game_settings = lambda appid, kind="steam": {"options": "", "tool": "", "tools": [], "live": True}
+core.apply_game_settings = lambda appid, opts, tool=None: (_sent.append((appid, opts, tool)), ["options"])[1]
+a.read_game_flags(a.game)
+check(_ask({"op": "status"})["game_flags"] == [] and _ask({"op": "status"})["game_live"], "reads the running game's switches")
+r = _ask({"op": "action", "name": "game_flag", "data": {"key": "fsr4", "on": True}})
+check(r["ok"] and _sent[-1] == (1240440, "PROTON_FSR4_UPGRADE=1 %command%", None) and _ask({"op": "status"})["game_flags"] == ["fsr4"],
+      "panel switch sets the game's launch options through Steam: " + str(r))
+check(a._steam_appid(str((123 << 32) | 0x02000000)) == 123, "non-Steam game ids map to their tile")
+check(not _ask({"op": "action", "name": "game_flag", "data": {"key": "lsfg", "on": True}})["ok"],
+      "frame generation can't be turned on before its plugin is installed (the game wouldn't start)")
+a.qam_game["options"] = "--name=Don't %command%"
+check(not _ask({"op": "action", "name": "game_flag", "data": {"key": "deck", "on": True}})["ok"]
+      and not _ask({"op": "status"})["game_live"], "launch options the switches can't parse are never touched")
+core.game_settings, core.apply_game_settings = _gs, _ag
+check(_ask({"op": "action", "name": "backup"})["ok"], "panel can ask for a save backup")
+_spec = _iu.spec_from_loader("qam_main", loader=None)
+qam = _iu.module_from_spec(_spec)
+exec(core.QAM_MAIN_PY, qam.__dict__)
+check(qam.SOCK == str(core.CONTROL_SOCK), "the plugin finds the agent's socket")
+st2 = _aio.run(qam.Plugin().status())
+check(st2.get("game") == "1240440", "the Decky plugin's backend reads status from the agent")
+check(_aio.run(qam.Plugin().action("boost", {"on": False})).get("ok"), "and sends actions")
+qam.SOCK = "/nonexistent/agent.sock"
+check(_aio.run(qam.Plugin().status()) == {"error": "agent"}, "agent off: the plugin says so instead of hanging")
 base = "http://127.0.0.1:18911"
 check(b"password" in urllib.request.urlopen(base + "/").read(), "remote shows PIN page")
 try:
@@ -1096,7 +1367,16 @@ core.CATALOG_BY_ID["decky"].check = _old_decky
 check(got == [("HueSync", "install")], "Install HueSync uses the Decky plugin store")
 del hub.on_store_action
 tryit("interface size", lambda: (hub.appearance.refresh(), hub.appearance.save_ui_size(3)))
-check(core.load_config()["theme"]["ui_scale"] == 1.5, "interface size saved")
+_th = core.load_config()["theme"]
+check(core.theme_size(_th, "ui_scale", gui.GAMEMODE) == 1.5 and _th["ui_scale"] == "auto"
+      and core.theme_size(_th, "ui_scale", not gui.GAMEMODE) == "auto", "interface size saved for this mode only")
+tryit("text size", lambda: (hub.appearance.scale.setValue(130), hub.appearance.save_scale()))
+check(core.load_config()["theme"][f"scale_{core.mode_key(gui.GAMEMODE)}"] is not None, "text size saved for this mode only")
+check(core.theme_size({"scale": 110}, "scale", True) == 110 and core.theme_size({"scale": 110, "scale_gamemode": 140}, "scale", True) == 140
+      and core.ui_scale({"ui_scale": "auto", "ui_scale_desktop": 1.25}, False) == 1.25,
+      "each mode uses its own size, older saved sizes still count")
+check("never set up" in core.emudeck_uninstall_cmd() and "uninstall.sh" in core.emudeck_uninstall_cmd(),
+      "EmuDeck removal works whether or not EmuDeck was ever set up")
 tryit("health", lambda: (hub.health.refresh(), hub.health.set_range(12 * 3600), hub.health.set_series("w")))
 check([s for s, _ in hub.health.RANGES] == [60, 3600, 12 * 3600], "history ranges are 1 minute, 1 hour, 12 hours")
 H = hub.health
@@ -1418,6 +1698,83 @@ core.queue_report = _qr
 gui.rasterize_svg = _ras
 tryit("own picture", hub.launchers.own_picture)
 check(hub.launchers.btn_art.isEnabled is not None, "the art button exists")
+hub.go("Storage")
+check(hub.current_page() is hub.storage, "Storage lives under Tools")
+tryit("storage refresh", hub.storage.refresh)
+tryit("storage scan", hub.storage.scan)
+_sr = {"drives": [{"label": "Internal storage", "free": 10, "total": 100}],
+       "items": [{"label": "Shader cache of X", "path": Path(HOME) / "a", "size": 5, "warn": "", "group": "safe"},
+                 {"label": "Windows files of X", "path": Path(HOME) / "b", "size": 7, "warn": "saves", "group": "check"}],
+       "games": [{"appid": "100", "name": "Big Game", "size": 9, "shaders": 3, "prefix": 4, "total": 16,
+                  "shader_paths": [Path(HOME) / "c"], "lib": "/run/media/sd", "dir": ""}]}
+tryit("storage scanned", lambda: hub.storage._scanned(_sr))
+check(len(hub.storage.boxes) == 2, "lists every leftover with a checkbox")
+tryit("storage clean", hub.storage.clean)
+tryit("storage scan failed", lambda: hub.storage._scanned({"error": "boom"}))
+_ai = gui.ask_item
+gui.ask_item = lambda *a, **k: ("Clear its shader cache", True)
+tryit("storage game menu", lambda: hub.storage.game_menu(_sr["games"][0]))
+gui.ask_item = lambda *a, **k: ("Uninstall it in Steam", True)
+tryit("storage uninstall", lambda: hub.storage.game_menu(_sr["games"][0]))
+gui.ask_item = _ai
+tryit("storage job done", lambda: hub.on_job_finished("storage-clean", 0, ""))
+hub.go("Games")
+check(hub.current_page() is hub.games, "Game settings live under Tools")
+tryit("games refresh", hub.games.refresh)
+_gm = {"appid": 100, "name": "Big Game", "kind": "steam", "last": 1}
+tryit("games listed", lambda: hub.games._listed({"games": [_gm, {"appid": 7, "name": "Tile", "kind": "shortcut", "last": 0}] * 15, "live": False}))
+tryit("games show all", hub.games.expand)
+tryit("games open", lambda: hub.games.open_game(_gm))
+_gs = {"options": "PROTON_LOG=1 mangohud %command%", "tool": "", "tools": [("GE-Proton9-27", "GE-Proton9-27")], "live": True}
+tryit("games loaded", lambda: hub.games._loaded(_gm, _gs))
+check(hub.games.other == "mangohud %command%" and set(hub.games.checks) == set(core.GAME_TOGGLES), "one game's switches and its other options")
+_at = gui.ask_text
+gui.ask_text = lambda *a, **k: ("-dx11", True)
+tryit("games edit other", hub.games.edit_other)
+gui.ask_text = _at
+check(hub.games.other == "-dx11", "other options can be edited")
+tryit("games save", hub.games.save)
+tryit("games saved", lambda: hub.games._saved(_gm, "x", "", ["options"]))
+tryit("games save failed", lambda: hub.games._saved(_gm, "x", "", []))
+_ai = gui.ask_item
+for _c in ("Try a different Proton", "Turn on the troubleshooting log", "Send the log from the last launch",
+           "Reset its Windows files (the old ones are kept)", "Check the game's files in Steam"):
+    gui.ask_item = lambda *a, _c=_c, **k: (_c if "Game won't" in a[1] else "GE-Proton9-27", True)
+    tryit("games rescue " + _c, hub.games.rescue)
+gui.ask_item = _ai
+tryit("games back", hub.games.back)
+tryit("games load failed", lambda: (hub.games.open_game(_gm), hub.games._loaded(_gm, {"error": "x"})))
+tryit("game reset done", lambda: hub.on_job_finished("game-reset", 0, ""))
+_ss, _later = gui.QTimer.singleShot, []
+gui.QTimer.singleShot = staticmethod(lambda ms, fn: _later.append(fn))
+hub._sheet = object()
+gui.msg_info(None, "t", "x")
+hub._sheet = None
+gui.QTimer.singleShot = _ss
+check(len(_later) == 1, "a message while a pop-up is open waits instead of opening a window")
+tryit("deferred message shows later", _later[0])
+tryit("games loaded (unparseable)", lambda: (setattr(hub.games, "game", _gm), hub.games._loaded(_gm, dict(_gs, options="--name=Don't %command%"))))
+check(not hub.games.parseable and hub.games.new_options() == "--name=Don't %command%", "unparseable options are saved back untouched")
+tryit("games loaded again", lambda: (setattr(hub.games, "game", _gm), hub.games._loaded(_gm, _gs)))
+for _k, _cb in hub.games.checks.items():           # the mock's checkboxes don't remember their state
+    _cb.isChecked = (lambda _k=_k: _k in hub.games.flags0)
+check(hub.games.new_options() == _gs["options"], "unchanged settings save the exact original text")
+hub.games.checks["deck"].isChecked = lambda: True
+check(hub.games.new_options() == "SteamDeck=1 PROTON_LOG=1 mangohud %command%", "one switch changes only its own token")
+tryit("panel card", hub.games.qam_card)
+_lj.clear()
+hub.runner.submit = lambda label, cmd, key="": _lj.append((key, cmd))
+hub.state["decky"] = {"x": {"dir": "/x", "name": "x"}}
+_np = hub.needs_password
+hub.needs_password = lambda: False
+_dk = gui.CATALOG_BY_ID["decky"].check
+gui.CATALOG_BY_ID["decky"].check = lambda st: True
+tryit("panel install", hub.games.qam_install)
+check(_lj and _lj[-1][0] == "qam-install" and "plugin_loader" in _lj[-1][1], "Add to Quick Access runs one job")
+gui.CATALOG_BY_ID["decky"].check = _dk
+hub.needs_password = _np
+tryit("panel remove", hub.games.qam_remove)
+tryit("panel done", lambda: hub.on_job_finished("qam-install", 0, ""))
 hub.runner.submit = _sub2
 hub.go("Updates")
 tryit("channel to testing", lambda: (hub.updates.channel.setCurrentIndex(1), hub.updates.change_channel()))
@@ -1430,6 +1787,43 @@ tryit("channel checked: update", lambda: hub.updates._channel_checked("testing",
 tryit("channel checked: offline", lambda: hub.updates._channel_checked("testing", {"error": "x"}))
 hub.updates.channel.currentData = _cd
 core.update_config(lambda c: c["updates"].__setitem__("channel", "stable"))
+# plugins: off/on from cards, the store list and safe mode
+_sub3 = hub.runner.submit
+_lj.clear()
+hub.runner.submit = lambda label, cmd, key="": _lj.append((key, cmd))
+_np2 = hub.needs_password
+hub.needs_password = lambda: False
+hub.state["decky"] = {"allycenter": {"dir": "/h/homebrew/plugins/AllyCenter", "name": "Ally Center", "version": "1"},
+                      "huesync": {"dir": "/h/homebrew/plugins/HueSync", "name": "HueSync", "version": "2"}}
+hub.state["decky_off"] = ["HueSync"]
+tryit("plugin card off", lambda: hub.on_item_action("allycenter", "disable"))
+check(_lj and _lj[-1][0] == "allycenter" and "Ally Center" in _lj[-1][1] and " off " in _lj[-1][1], "a plugin card turns it off")
+tryit("plugin card on", lambda: hub.on_item_action("allycenter", "enable"))
+check(" on " in _lj[-1][1], "and back on")
+tryit("your plugins list", hub.store_page.show_mine)
+core.DECKY_SAFE_MODE.unlink(missing_ok=True)
+tryit("safe mode off", hub.store_page.safe_mode)
+check(core.read_json(core.DECKY_SAFE_MODE) == ["Ally Center"] and _lj[-1][0] == "decky-safe",
+      "safe mode turns off every plugin that was on, and remembers which")
+tryit("safe mode back on", hub.store_page.safe_mode)
+check(" on " in _lj[-1][1] and "Ally Center" in _lj[-1][1], "and turns exactly those back on")
+_gs2 = core.gather_state
+core.gather_state = lambda: {"flatpaks": [], "decky": hub.state["decky"], "decky_off": []}
+tryit("safe mode job done", lambda: hub.on_job_finished("decky-safe", 0, ""))
+core.gather_state = _gs2
+check(not core.DECKY_SAFE_MODE.exists(), "safe mode clears once they're back on")
+tryit("remove from your plugins", lambda: hub.remove_decky(hub.state["decky"]["huesync"]))
+check(_lj[-1][0] == "decky-mine:HueSync" and "HueSync" in _lj[-1][1], "any installed plugin can be removed from the list")
+tryit("store row toggle", lambda: hub.on_store_action({"name": "HueSync"}, "enable"))
+tryit("update cards with an off plugin", hub.update_cards)
+hub.needs_password = _np2
+# launchers: hide from Steam, quick restore
+hub.launchers.picked = lambda: ["Youtube"]
+tryit("launchers hide", hub.launchers.hide)
+check(hub.launchers.restorable(["Youtube"]) and not hub.launchers.restorable(["Battle.net"]) and not hub.launchers.restorable([]),
+      "web launchers and installed stores can come back without reinstalling")
+tryit("launchers quick restore", hub.launchers.add)
+hub.runner.submit = _sub3
 tryit("NSL card opens the page", lambda: hub.on_item_action("nonsteamlaunchers", "install"))
 check(hub.current_page() is hub.launchers, "the catalog card opens the themed page, not the script's windows")
 # header/footer on the sides

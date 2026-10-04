@@ -124,6 +124,39 @@ owner's own art, kind by kind. "Use my own picture" passes `mine=True` (always w
 Runs after a successful launcher install and after "Add Ally Hub to Steam". Brand logos are never drawn:
 the only real artwork used is the program's own icon from the owner's installed copy.
 
+**Game settings (Tools → Games, `GamesPage`):** launch options as switches (`GAME_TOGGLES`: env tokens before
+`%command%`, `~/lsfg` as a wrapper), Proton per game, and "Game won't start?" (other Proton, `PROTON_LOG` + send
+`proton_log`, `reset_prefix_cmd` renames compatdata/<id> to `<id>_allyhub_backup_<ts>`, steam://validate).
+Read/write only through Steam (`game_settings`: RegisterForAppDetails strLaunchOptions/strCompatToolName;
+`apply_game_settings`: SetAppLaunchOptions/SpecifyCompatTool); files are the read-only fallback. Rules: switches
+only edit options `launch_parseable` accepts (else the text is saved back untouched); only our exact tokens are
+removed; unchanged options are sent back byte for byte. For a non-Steam tile, "" Proton means no tool at all.
+The page swaps list/detail views in one layout: never open a dialog from inside another (nested = new window).
+
+**Storage saver (Tools → Storage, `StoragePage`):** `storage_scan` sizes games (manifest SizeOnDisk + shader
+cache + prefix) and lists leftovers: shader caches/prefixes/downloads of removed games, reset backups, Proton
+builds no game uses (keeps the newest per family), the trash. `storage_clean_cmd` re-checks everything at delete
+time (`_storage_safe`): never an installed game's or non-Steam tile's prefix (incl. apps listed for unmounted SD
+cards, `library_app_ids`), never a Proton in use (`tools_in_use_folders`: folder name, compatibilitytool.vdf ids,
+symlink targets), never symlinks or `..`. Prefixes can hold saves: they start unticked.
+
+**Turning things off (the owner's call: never stuck with a faulty add-on):** Decky plugins turn off/on without
+uninstalling through Decky's own list (`disabled_plugins` in ~/homebrew/settings/loader.json, plugin.json names;
+`decky_toggle_cmd` stops Decky, edits it as root, starts Decky). Catalog cards and store rows have Turn off/on;
+the Plugin store page lists every installed plugin (`StorePage.show_mine`) with on/off and Remove, plus safe mode
+(`DECKY_SAFE_MODE` remembers what "Turn all plugins off" turned off). Launchers: "Hide from Steam" removes tiles
+only; Add restores tiles directly when the launcher is still installed (`LaunchersPage.restorable`). Every new
+catalog item needs a working Remove (EmuDeck uses its own uninstall.sh).
+
+**Quick Access panel (Tools → Games card):** a Decky plugin embedded in core.py (`QAM_PLUGIN_JSON`, `QAM_MAIN_PY`,
+`QAM_INDEX_JS`; bump `QAM_VERSION` when they change) so normal updates deliver it; `qam_install_cmd` copies it
+into ~/homebrew/plugins/AllyHub with sudo and restarts plugin_loader. The frontend is plain ESM on window.SP_REACT /
+window.DFL and Decky's loader handshake (`connect(2, "Ally Hub")`, the same one @decky/api uses; npm is blocked
+here, so no build step). Its backend only talks to the agent's Unix socket `CONTROL_SOCK` (0600, this user):
+`{"op": "status"}` / `{"op": "action", ...}` handled by `Agent.qam_status` / `qam_action` (boost, preset, lights,
+brightness, game_flag, backup). Config writes are serialized by `core._CONFIG_LOCK`. Never add network access to it.
+Messages that arrive while a pop-up is open wait for it (`_wait_for_sheet`).
+
 **Bar position (the owner's call):** `config["theme"]["bars"]` = "top" (default) or "sides".
 `Hub.arrange_bars` rebuilds only the layouts of `top_frame` / `footer_frame` / the central widget (widgets are
 kept), so it switches live. In "sides" GamepadNav enters pages with RIGHT and returns to tabs with LEFT.

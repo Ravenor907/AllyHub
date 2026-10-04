@@ -45,6 +45,7 @@ DATA_DIR = HOME / ".local/share/allyhub"
 CONFIG_DIR = HOME / ".config/allyhub"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 AGENT_STATE = DATA_DIR / "agent_state.json"
+CONTROL_SOCK = DATA_DIR / "agent.sock"     # the Quick Access panel talks to the agent here
 HEALTH_FILE = DATA_DIR / "health.jsonl"
 LED_ROOT = Path("/sys/class/leds")
 UDEV_LED_RULE = "/etc/udev/rules.d/99-allyhub-leds.rules"
@@ -72,6 +73,9 @@ REFUSAL_PATTERNS = re.compile(
 DEFAULT_CONFIG = {
     "theme": {"preset": "ROG Crimson", "accent": None, "accent2": None,
               "scale": 100, "controller_nav": "auto", "ui_scale": "auto",
+              # Game Mode and Desktop Mode show the same size differently, so each remembers its own
+              # (None = use the shared "scale"/"ui_scale" above, which older versions saved)
+              "scale_gamemode": None, "scale_desktop": None, "ui_scale_gamemode": None, "ui_scale_desktop": None,
               "bars": "top",            # "sides": header/footer as icon columns
               "footer": False},         # bottom bar off by default (the owner's call)
     "rgb": None,
@@ -119,18 +123,28 @@ def load_config() -> dict:
     return _merge(DEFAULT_CONFIG, data)
 
 
+_CONFIG_LOCK = threading.RLock()      # the agent writes config from several threads (panel, phone remote)
+
+
 def save_config(cfg: dict) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = CONFIG_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(cfg, indent=2))
-    os.replace(tmp, CONFIG_FILE)
+    with _CONFIG_LOCK:
+        fd, tmp = tempfile.mkstemp(dir=CONFIG_DIR, prefix=".config-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(json.dumps(cfg, indent=2))
+            os.replace(tmp, CONFIG_FILE)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
 
 
 def update_config(fn: Callable[[dict], None]) -> dict:
-    cfg = load_config()
-    fn(cfg)
-    save_config(cfg)
-    return cfg
+    with _CONFIG_LOCK:
+        cfg = load_config()
+        fn(cfg)
+        save_config(cfg)
+        return cfg
 
 
 def read_json(path: Path, default=None):
@@ -450,8 +464,18 @@ def auto_ui_scale() -> float:
     return max(1.0, min(2.0, factor))
 
 
-def ui_scale(theme_cfg: dict) -> float:
-    v = theme_cfg.get("ui_scale", "auto")
+def mode_key(gamemode: bool) -> str:
+    return "gamemode" if gamemode else "desktop"
+
+
+def theme_size(theme_cfg: dict, name: str, gamemode: bool):
+    """This mode's own interface or text size, falling back to the shared one."""
+    v = theme_cfg.get(f"{name}_{mode_key(gamemode)}")
+    return theme_cfg.get(name, "auto" if name == "ui_scale" else 100) if v is None else v
+
+
+def ui_scale(theme_cfg: dict, gamemode: bool = None) -> float:
+    v = theme_cfg.get("ui_scale", "auto") if gamemode is None else theme_size(theme_cfg, "ui_scale", gamemode)
     if v == "auto":
         return auto_ui_scale()
     try:
@@ -2218,9 +2242,12 @@ def _vdf_shortcuts(data: bytes) -> list:
         if len(seg) < 11:
             continue
         ent = {"appid": int.from_bytes(seg[7:11], "little")}
-        for key, field_name in ((rb"appname", "name"), (rb"exe", "exe"), (rb"icon", "icon")):
+        for key, field_name in ((rb"appname", "name"), (rb"exe", "exe"), (rb"icon", "icon"),
+                                (rb"LaunchOptions", "options")):
             m = re.search(rb"\x01" + key + rb"\x00([^\x00]*)\x00", seg, re.I)
             ent[field_name] = m.group(1).decode("utf-8", "replace") if m else ""
+        m = re.search(rb"\x02LastPlayTime\x00(.{4})", seg, re.S | re.I)
+        ent["last"] = int.from_bytes(m.group(1), "little") if m else 0
         if ent["name"]:
             out.append(ent)
     return out
@@ -2822,6 +2849,764 @@ def nsl_clean_cmd(paths: list) -> Optional[str]:
     parts.append("systemctl --user daemon-reload 2>/dev/null; echo 'Leftovers cleaned.'")
     return "; ".join(parts)
 
+
+# ==========================================================================
+# Storage saver: where the space went, and what can safely go
+# Steam never cleans up after uninstalled games: their shader caches, Proton prefixes and half-finished
+# downloads stay behind. Everything here is inside the home folder or a library on the SD card (both the
+# user's own), so no password. Prefixes can hold save files, so they start unticked.
+# ==========================================================================
+
+TRASH_DIR = HOME / ".local/share/Trash"
+
+
+def _acf_values(text: str) -> dict:
+    return {k.lower(): v for k, v in re.findall(r'^\s*"(\w+)"\s+"([^"]*)"', text, re.M)}
+
+
+def library_app_ids() -> set:
+    """Every app Steam lists in its libraries, including ones on an SD card that isn't inserted right now."""
+    text = read_text(STEAM_ROOT / "steamapps/libraryfolders.vdf")
+    ids = set()
+    for lib in (parse_vdf_text(text).get("libraryfolders", {}).values() if text else []):
+        if isinstance(lib, dict):
+            ids |= {k for k in (_ci(lib, "apps") or {}) if k.isdigit()}
+    return ids
+
+
+def steam_apps() -> list:
+    """Installed Steam apps across every library: [{appid, name, lib, dir, size}] (size from Steam's manifest)."""
+    out, seen = [], set()
+    for lib in steam_library_dirs():
+        for f in sorted(lib.glob("appmanifest_*.acf")):
+            v = _acf_values(read_text(f))
+            aid = v.get("appid") or f.stem.split("_", 1)[-1]
+            if not aid.isdigit() or aid in seen:
+                continue
+            seen.add(aid)
+            try:
+                size = int(v.get("sizeondisk") or 0)
+            except ValueError:
+                size = 0
+            out.append({"appid": aid, "name": v.get("name") or f"App {aid}", "lib": lib,
+                        "dir": lib / "common" / v.get("installdir", ""), "size": size})
+    return out
+
+
+def shortcut_ids() -> set:
+    """Ids of every non-Steam tile (their prefixes and shader caches are in use, not leftovers)."""
+    ids = set()
+    for f in (HOME / ".steam/root/userdata").glob("*/config/shortcuts.vdf"):
+        try:
+            ids.update(str(s["appid"]) for s in _vdf_shortcuts(f.read_bytes()))
+        except OSError:
+            pass
+    return ids
+
+
+def compat_tools_in_use() -> set:
+    """Proton builds Steam is set to use (per game, or as the default "0" entry) in config.vdf."""
+    text = read_text(STEAM_ROOT / "config/config.vdf") or read_text(HOME / ".steam/root/config/config.vdf")
+    mapping = _ci(parse_vdf_text(text), "InstallConfigStore", "Software", "Valve", "Steam", "CompatToolMapping")
+    return {str(v.get("name") or v.get("Name") or "") for v in (mapping or {}).values()
+            if isinstance(v, dict)} - {""}
+
+
+def tool_names(folder: Path) -> set:
+    """The names Steam knows a compatibility tool by: its folder and the ids in its compatibilitytool.vdf."""
+    names = {folder.name}
+    tools = _ci(parse_vdf_text(read_text(folder / "compatibilitytool.vdf")), "compatibilitytools", "compat_tools")
+    if isinstance(tools, dict):
+        names |= set(tools)
+    return names
+
+
+def tools_in_use_folders() -> set:
+    """Resolved folders of every tool a game uses, plus anything a symlinked tool points at."""
+    used = compat_tools_in_use()
+    keep = set()
+    for root in _tool_dirs():
+        try:
+            entries = list(root.iterdir())
+        except OSError:
+            continue
+        for p in entries:
+            try:
+                if p.is_symlink():
+                    keep.add(p.resolve())
+                elif p.is_dir() and tool_names(p) & used:
+                    keep.add(p.resolve())
+            except OSError:
+                pass
+    return keep
+
+
+def _du_many(paths: list) -> dict:
+    """Sizes of many folders with one du call: {path string: bytes}."""
+    paths = [str(p) for p in paths if Path(p).exists()]
+    out = {}
+    for i in range(0, len(paths), 200):
+        rc, text = run_quiet(["du", "-sb", "--", *paths[i:i + 200]], timeout=300)
+        for line in (text or "").splitlines():
+            size, _, path = line.partition("\t")
+            if size.isdigit():
+                out[path] = int(size)
+    return out
+
+
+def _proton_family(name: str) -> str:
+    """"GE-Proton10-25" -> "ge-proton", "proton-cachyos-10.0-..." -> "proton-cachyos"."""
+    return re.split(r"\d", name.lower(), maxsplit=1)[0].rstrip("-_. ") or name.lower()
+
+
+def _tool_dirs() -> list:
+    out = []
+    for d in COMPAT_TOOL_DIRS:
+        try:
+            r = d.resolve()
+        except OSError:
+            continue
+        if r not in out:
+            out.append(r)
+    return out
+
+
+def app_names(ids: list) -> dict:
+    """Names of games that are no longer installed, from Steam's own library (needs its debugger)."""
+    if not ids:
+        return {}
+    v = cef_eval("JSON.stringify(%s.map(i=>[i,(window.appStore?.GetAppOverviewByAppID(+i)||{}).display_name||'']))"
+                 % json.dumps([str(i) for i in ids]))
+    try:
+        return {str(k): n for k, n in json.loads(v) if n} if v else {}
+    except (ValueError, TypeError):
+        return {}
+
+
+def storage_scan() -> dict:
+    """{"games": [...biggest first], "items": [...cleanup candidates], "drives": [...]}."""
+    libs = steam_library_dirs()
+    apps = steam_apps()
+    installed = {a["appid"] for a in apps} | library_app_ids()
+    shorts = shortcut_ids()
+    extra = {}                                   # appid -> {"shaders": [paths], "prefix": [paths]}
+    leftovers = []                               # (kind, appid, path)
+    for lib in libs:
+        for kind in ("shadercache", "compatdata"):
+            try:
+                entries = [d for d in (lib / kind).iterdir() if d.is_dir()]
+            except OSError:
+                continue
+            for d in entries:
+                bk = PREFIX_BACKUP.match(d.name) if kind == "compatdata" else None
+                if bk:
+                    leftovers.append(("backup", bk.group(1), d))
+                    continue
+                if not d.name.isdigit() or d.name == "0":
+                    continue
+                if d.name in installed:
+                    extra.setdefault(d.name, {"shaders": [], "prefix": []})[
+                        "shaders" if kind == "shadercache" else "prefix"].append(d)
+                elif d.name not in shorts:
+                    leftovers.append((kind, d.name, d))
+        try:
+            for d in (lib / "downloading").iterdir():
+                if d.is_dir() and d.name.isdigit():
+                    leftovers.append(("downloading", d.name, d))
+        except OSError:
+            pass
+    in_use = tools_in_use_folders()
+    protons = []
+    for root in _tool_dirs():
+        try:
+            protons += [p for p in root.iterdir() if p.is_dir() and not p.is_symlink()]
+        except OSError:
+            pass
+    newest = {}
+    for p in protons:
+        fam = _proton_family(p.name)
+        if fam not in newest or parse_version(p.name) > parse_version(newest[fam].name):
+            newest[fam] = p
+    sizes = _du_many([p for e in extra.values() for ps in e.values() for p in ps] +
+                     [p for _k, _a, p in leftovers] + protons + [TRASH_DIR])
+    games = []
+    for a in apps:
+        e = extra.get(a["appid"], {"shaders": [], "prefix": []})
+        sh = sum(sizes.get(str(p), 0) for p in e["shaders"])
+        pf = sum(sizes.get(str(p), 0) for p in e["prefix"])
+        games.append(dict(a, shaders=sh, prefix=pf, total=a["size"] + sh + pf,
+                          shader_paths=e["shaders"], lib=str(a["lib"]), dir=str(a["dir"])))
+    games.sort(key=lambda g: g["total"], reverse=True)
+    names = app_names(sorted({aid for _k, aid, _p in leftovers if aid not in installed}))
+    items = []
+    for kind, aid, p in leftovers:
+        who = names.get(aid) or f"a removed game (app {aid})"
+        size = sizes.get(str(p), 0)
+        if kind == "shadercache":
+            items.append({"label": f"Shader cache of {who}", "path": p, "size": size, "warn": "", "group": "safe"})
+        elif kind == "backup":
+            who = names.get(aid) or next((a["name"] for a in apps if a["appid"] == aid), f"app {aid}")
+            items.append({"label": f"Old Windows files of {who} (set aside by a reset)", "path": p, "size": size,
+                          "group": "check", "warn": "Holds that game's saves from before the reset, if it kept "
+                                                    "them there."})
+        elif kind == "compatdata":
+            items.append({"label": f"Windows files of {who}", "path": p, "size": size, "group": "check",
+                          "warn": "Can hold save files for games without Steam Cloud. Keep it if you might "
+                                  "reinstall."})
+        elif aid in installed:
+            items.append({"label": f"Unfinished update for {names.get(aid) or next((a['name'] for a in apps if a['appid'] == aid), aid)}",
+                          "path": p, "size": size, "group": "check",
+                          "warn": "Steam downloads it again next time it updates the game."})
+        else:
+            items.append({"label": f"Unfinished download of {who}", "path": p, "size": size, "warn": "",
+                          "group": "safe"})
+    for p in protons:
+        if p.resolve() not in in_use and newest.get(_proton_family(p.name)) is not p:
+            items.append({"label": f"{p.name} (no game uses it, a newer one is installed)", "path": p,
+                          "size": sizes.get(str(p), 0), "warn": "", "group": "safe"})
+    trash = sizes.get(str(TRASH_DIR), 0)
+    if trash > 1024 * 1024:
+        items.append({"label": "Desktop Mode trash", "path": TRASH_DIR, "size": trash, "warn": "", "group": "safe"})
+    items = [i for i in items if i["size"] > 0]
+    items.sort(key=lambda i: (i["group"] != "safe", -i["size"]))
+    drives, devs = [], set()
+    for p in [HOME] + [lib for lib in libs if lib.exists()]:
+        try:
+            dev = os.stat(p).st_dev
+            if dev in devs:
+                continue
+            devs.add(dev)
+            u = shutil.disk_usage(p)
+            sd = str(p).startswith("/run/media/")
+            drives.append({"label": "SD card" if sd else "Internal storage", "path": str(p),
+                           "free": u.free, "total": u.total})
+        except OSError:
+            pass
+    return {"games": games, "items": items, "drives": drives}
+
+
+def _storage_safe(p: str, ctx: dict) -> bool:
+    """Only the kinds of folders storage_scan offers, checked again right before deleting (the library may
+    have changed since the scan): never a game, a prefix in use, a Proton in use, a symlink, or anything else."""
+    path = Path(p)
+    if path == TRASH_DIR:
+        return True
+    if ".." in path.parts or path.is_symlink():
+        return False
+    if path.parent in _tool_dirs() or path.parent in COMPAT_TOOL_DIRS:
+        return path.name not in ("", ".", "..") and path.resolve() not in ctx["tools"]
+    if path.parent.parent not in ctx["libs"]:
+        return False
+    kind, name = path.parent.name, path.name
+    if kind == "compatdata" and PREFIX_BACKUP.match(name):
+        return True
+    if not name.isdigit():
+        return False
+    if kind in ("shadercache", "downloading"):
+        return True                          # rebuilt / re-downloaded by Steam: safe even for installed games
+    return kind == "compatdata" and name not in ctx["installed"] and name not in ctx["shorts"]
+
+
+def storage_clean_cmd(paths: list) -> Optional[str]:
+    ctx = {"libs": steam_library_dirs(), "tools": tools_in_use_folders(), "shorts": shortcut_ids(),
+           "installed": {a["appid"] for a in steam_apps()} | library_app_ids()}
+    safe = [str(p) for p in paths if _storage_safe(str(p), ctx)]
+    if not safe:
+        return None
+    parts = ["rc=0"]
+    for p in safe:
+        if Path(p) == TRASH_DIR:
+            parts.append(f"rm -rf -- {shlex.quote(p + '/files')} {shlex.quote(p + '/info')} "
+                         f"{shlex.quote(p + '/expunged')} || rc=1; mkdir -p {shlex.quote(p + '/files')} "
+                         f"{shlex.quote(p + '/info')}")
+        else:
+            parts.append(f"rm -rf -- {shlex.quote(p)} || rc=1")
+    parts.append('[ "$rc" = 0 ] && echo "Space freed."; exit $rc')
+    return "; ".join(parts)
+
+
+
+# ==========================================================================
+# Game settings: per-game launch options as switches, the Proton picker, and "Game won't start?" help
+# Everything is applied through Steam itself (SetAppLaunchOptions / SpecifyCompatTool over its local
+# debugger), because Steam rewrites its own files and would undo direct edits.
+# ==========================================================================
+
+LSFG_WRAPPER = HOME / "lsfg"          # the launcher script decky-lsfg-vk puts in the home folder
+# key -> (title, what it does, kind, token). "env" tokens go before %command%, "wrap" tokens right before it.
+GAME_TOGGLES = {
+    "fsr4": ("FSR 4 upgrade", "Games with FSR 3.1 use AMD's sharper FSR 4 instead. Looks much better, costs a "
+             "few frames. Needs GE-Proton or Proton-CachyOS.", "env", "PROTON_FSR4_UPGRADE=1"),
+    "lsfg": ("Frame generation", "Lossless Scaling frame generation for this game. Set the multiplier in its "
+             "Decky plugin.", "wrap", "~/lsfg"),
+    "deck": ("Steam Deck mode", "Tells the game it runs on a handheld, so many use their handheld presets and "
+             "on-screen keyboard.", "env", "SteamDeck=1"),
+    "wined3d": ("Older game fix", "Draws with WineD3D instead of DXVK. Try it if an old DirectX 9 or 10 game "
+                "crashes or shows black screens.", "env", "PROTON_USE_WINED3D=1"),
+    "log": ("Troubleshooting log", "Proton writes a log of the next launch, which Ally Hub can attach to a "
+            "report.", "env", "PROTON_LOG=1"),
+}
+STEAM_TOOL_NAMES = re.compile(r"^(Proton|Steam Linux Runtime|Steamworks Common|SteamVR)", re.I)
+PREFIX_BACKUP = re.compile(r"^(\d+)_allyhub_backup_(\d+)$")
+
+_TOKEN = re.compile(r'''(?:[^\s"']+|"[^"]*"|'[^']*')+''')
+
+
+def _env_key(tok: str) -> str:
+    m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)=", tok)
+    return m.group(1) if m else ""
+
+
+def split_launch(opts: str) -> tuple:
+    """(tokens before %command%, text after it, had %command%). Without %command% Steam treats the whole
+    string as arguments for the game."""
+    opts = opts or ""
+    if "%command%" in opts:
+        pre, post = opts.split("%command%", 1)
+        return _TOKEN.findall(pre), post, True
+    return [], (" " + opts.strip()) if opts.strip() else "", False
+
+
+def launch_parseable(opts: str) -> bool:
+    """The switches can only edit launch options they can split cleanly (no stray quotes)."""
+    pre, _post, had = split_launch(opts)
+    if not had:
+        return True
+    head = (opts or "").split("%command%", 1)[0]
+    return re.sub(r"\s+", "", "".join(pre)) == re.sub(r"\s+", "", head)
+
+
+def steam_appid_of(game) -> Optional[int]:
+    """The Steam app id for a running game id: non-Steam games carry their tile's id in the top 32 bits."""
+    try:
+        n = int(game)
+    except (TypeError, ValueError):
+        return None
+    return n >> 32 if n > 0xFFFFFFFF else n
+
+
+def launch_flags(opts: str) -> set:
+    pre, _post, _had = split_launch(opts)
+    on = set()
+    for key, (_t, _d, kind, tok) in GAME_TOGGLES.items():
+        if kind == "env" and tok in pre:
+            on.add(key)
+        elif kind == "wrap" and any(t in (tok, str(HOME / tok[2:])) for t in pre):
+            on.add(key)
+    return on
+
+
+def set_launch_flags(opts: str, keys: set) -> str:
+    """The same launch options with exactly these switches on. Everything else the owner typed is kept: only
+    our exact tokens are removed (a turned-on switch also replaces other values of its own variable)."""
+    pre, post, had = split_launch(opts)
+    ours = {tok for _t, _d, _k, tok in GAME_TOGGLES.values()}
+    ours |= {str(HOME / tok[2:]) for _t, _d, kind, tok in GAME_TOGGLES.values() if kind == "wrap"}
+    turning_on = {_env_key(GAME_TOGGLES[k][3]) for k in keys if k in GAME_TOGGLES and GAME_TOGGLES[k][2] == "env"}
+    keep = [t for t in pre if t not in ours and _env_key(t) not in turning_on]
+    env = [GAME_TOGGLES[k][3] for k in GAME_TOGGLES if k in keys and GAME_TOGGLES[k][2] == "env"]
+    wrap = [GAME_TOGGLES[k][3] for k in GAME_TOGGLES if k in keys and GAME_TOGGLES[k][2] == "wrap"]
+    lead = env + [t for t in keep if _env_key(t)] + [t for t in keep if not _env_key(t)] + wrap
+    if not lead:
+        if not post.strip():
+            return ""
+        return ("%command%" + post).strip() if had else post.strip()
+    return (" ".join(lead) + " %command%" + post).rstrip()
+
+
+def parse_vdf_text(text: str) -> dict:
+    """Steam's text VDF (localconfig.vdf, config.vdf) as nested dicts."""
+    root, stack, key = {}, [], None
+    cur = root
+    for m in re.finditer(r'"((?:[^"\\]|\\.)*)"|([{}])', text):
+        if m.group(2) == "{":
+            new = {}
+            cur[key if key is not None else ""] = new
+            stack.append(cur)
+            cur, key = new, None
+        elif m.group(2) == "}":
+            cur = stack.pop() if stack else root
+            key = None
+        else:
+            s = m.group(1).replace('\\"', '"').replace("\\\\", "\\")
+            if key is None:
+                key = s
+            else:
+                cur[key] = s
+                key = None
+    return root
+
+
+def _ci(d: dict, *path):
+    for p in path:
+        if not isinstance(d, dict):
+            return {}
+        d = next((v for k, v in d.items() if k.lower() == p.lower()), {})
+    return d
+
+
+def _local_apps() -> dict:
+    id3 = steam_user_id3()
+    if not id3:
+        return {}
+    text = read_text(HOME / ".steam/root/userdata" / id3 / "config/localconfig.vdf")
+    return _ci(parse_vdf_text(text), "UserLocalConfigStore", "Software", "Valve", "Steam", "apps") if text else {}
+
+
+def game_choices() -> list:
+    """Games to pick from, most recently played first: installed Steam games and non-Steam tiles."""
+    local = _local_apps()
+    out = []
+    for a in steam_apps():
+        if STEAM_TOOL_NAMES.match(a["name"]):
+            continue
+        try:
+            last = int((local.get(a["appid"]) or {}).get("LastPlayed") or 0)
+        except (ValueError, AttributeError):
+            last = 0
+        out.append({"appid": int(a["appid"]), "name": a["name"], "kind": "steam", "last": last})
+    f = shortcuts_vdf()
+    try:
+        tiles = _vdf_shortcuts(f.read_bytes()) if f and f.exists() else []
+    except OSError:
+        tiles = []
+    for s in tiles:
+        if not is_self_shortcut(s):
+            out.append({"appid": s["appid"], "name": s["name"], "kind": "shortcut", "last": s.get("last", 0)})
+    out.sort(key=lambda g: (-g["last"], g["name"].lower()))
+    return out
+
+
+CEF_GAME_JS = """(async () => {
+  const id = %d;
+  const details = await new Promise(res => {
+    let done = false, h = null;
+    const finish = d => { if (done) return; done = true; try { h && h.unregister(); } catch (e) {} res(d); };
+    try { h = SteamClient.Apps.RegisterForAppDetails(id, d => finish(d)); } catch (e) { finish(null); }
+    setTimeout(() => finish(null), 4000);
+  });
+  let tools = [];
+  try { tools = (await SteamClient.Apps.GetAvailableCompatTools(id)) || []; } catch (e) {}
+  return JSON.stringify({
+    found: !!details,
+    options: details ? (details.strLaunchOptions || "") : "",
+    tool: details ? (details.strCompatToolName || "") : "",
+    tools: tools.map(t => [t.strToolName, t.strDisplayName || t.strToolName])
+  });
+})()"""
+
+CEF_SET_GAME_JS = """(async () => {
+  const id = %d, opts = %s, tool = %s, done = [];
+  try { await SteamClient.Apps.SetAppLaunchOptions(id, opts); done.push('options'); } catch (e) {}
+  if (tool !== null) { try { await SteamClient.Apps.SpecifyCompatTool(id, tool); done.push('tool'); } catch (e) {} }
+  return JSON.stringify(done);
+})()"""
+
+
+def game_settings(appid: int, kind: str = "steam") -> dict:
+    """{"options", "tool", "tools": [(name, label)], "live"}. live False: Steam's debugger is off, so the
+    values come from Steam's files and can't be saved."""
+    v = cef_eval(CEF_GAME_JS % int(appid), timeout=15)
+    try:
+        d = json.loads(v) if v else None
+    except ValueError:
+        d = None
+    if isinstance(d, dict) and d.get("found"):
+        return {"options": d.get("options", ""), "tool": d.get("tool", ""),
+                "tools": [tuple(t) for t in d.get("tools") or [] if isinstance(t, list) and len(t) == 2],
+                "live": True}
+    if kind == "shortcut":
+        f = shortcuts_vdf()
+        try:
+            tiles = _vdf_shortcuts(f.read_bytes()) if f and f.exists() else []
+        except OSError:
+            tiles = []
+        opts = next((s.get("options", "") for s in tiles if s["appid"] == int(appid)), "")
+    else:
+        opts = (_local_apps().get(str(appid)) or {}).get("LaunchOptions", "")
+    cfg = parse_vdf_text(read_text(STEAM_ROOT / "config/config.vdf"))
+    entry = _ci(cfg, "InstallConfigStore", "Software", "Valve", "Steam", "CompatToolMapping", str(appid))
+    tool = entry.get("name", "") if isinstance(entry, dict) else ""
+    return {"options": opts if isinstance(opts, str) else "", "tool": tool, "tools": [], "live": False}
+
+
+def apply_game_settings(appid: int, options: str, tool: Optional[str] = None) -> list:
+    """Hand the new launch options (and Proton choice, "" = Steam's default) to Steam. Returns what took."""
+    v = cef_eval(CEF_SET_GAME_JS % (int(appid), json.dumps(options), json.dumps(tool)), timeout=20)
+    try:
+        return json.loads(v) if v else []
+    except ValueError:
+        return []
+
+
+def game_prefixes(appid) -> list:
+    return [lib / "compatdata" / str(appid) for lib in steam_library_dirs() if (lib / "compatdata" / str(appid)).is_dir()]
+
+
+def reset_prefix_cmd(appid) -> Optional[str]:
+    """Move the game's Windows files aside (never deleted): Steam builds fresh ones on the next launch, and
+    the old folder stays as a backup Storage can clear later."""
+    dirs = game_prefixes(appid)
+    if not dirs:
+        return None
+    stamp = time.strftime("%Y%m%d%H%M%S")
+    return " && ".join(f"mv -- {shlex.quote(str(d))} {shlex.quote(str(d.parent / f'{d.name}_allyhub_backup_{stamp}'))}"
+                       for d in dirs) + " && echo 'Done. Steam makes fresh Windows files on the next launch.'"
+
+
+def proton_log(appid) -> str:
+    """The tail of Proton's log for this game (PROTON_LOG=1 writes ~/steam-<appid>.log)."""
+    p = HOME / f"steam-{int(appid)}.log"
+    try:
+        data = p.read_bytes()
+    except OSError:
+        return ""
+    return data[-200000:].decode("utf-8", "replace")
+
+
+
+# ==========================================================================
+# Quick Access panel: a small Decky plugin (Ally Hub in the ••• menu while you play)
+# Its files live here, inside core.py, so every installed copy gets them with a normal update. The plugin
+# only talks to the agent's local socket (CONTROL_SOCK, this user only). Bump QAM_VERSION when they change.
+# ==========================================================================
+
+QAM_VERSION = "1.0.0"
+QAM_DIR = HOME / "homebrew/plugins/AllyHub"
+QAM_STAGE = DATA_DIR / "qam-plugin"
+QAM_PLUGIN_JSON = r'''{
+  "name": "Ally Hub",
+  "author": "Ravenor907",
+  "flags": [],
+  "api_version": 1,
+  "publish": {
+    "tags": ["ally", "utility"],
+    "description": "Ally Hub in the Quick Access menu: status, per-game switches, Game Boost, lighting and save backups.",
+    "image": ""
+  }
+}
+'''
+QAM_MAIN_PY = r'''# Ally Hub's Quick Access panel: a thin bridge to the Ally Hub agent running on this handheld.
+# Talks only to the agent's local socket (owned by this user, mode 0600). No network.
+import asyncio
+import json
+import os
+
+try:
+    import decky
+    HOME = decky.DECKY_USER_HOME
+    log = decky.logger
+except Exception:                     # outside Decky (tests)
+    import logging
+    HOME = os.path.expanduser("~")
+    log = logging.getLogger("allyhub")
+
+SOCK = os.path.join(HOME, ".local/share/allyhub/agent.sock")
+
+
+async def _ask(req: dict) -> dict:
+    try:
+        reader, writer = await asyncio.wait_for(asyncio.open_unix_connection(SOCK), timeout=3)
+    except (OSError, asyncio.TimeoutError):
+        return {"error": "agent"}
+    try:
+        writer.write(json.dumps(req).encode() + b"\n")
+        await writer.drain()
+        line = await asyncio.wait_for(reader.readline(), timeout=25)
+        return json.loads(line or b"{}")
+    except (OSError, ValueError, asyncio.TimeoutError) as e:
+        log.warning(f"Ally Hub agent request failed: {e!r}")
+        return {"error": "agent"}
+    finally:
+        writer.close()
+
+
+class Plugin:
+    async def status(self) -> dict:
+        return await _ask({"op": "status"})
+
+    async def action(self, name: str, data: dict = None) -> dict:
+        return await _ask({"op": "action", "name": str(name), "data": data or {}})
+
+    async def _main(self):
+        log.info("Ally Hub panel loaded")
+
+    async def _unload(self):
+        pass
+'''
+QAM_INDEX_JS = r'''// Ally Hub's Quick Access panel. Plain JavaScript on Decky's own React and UI library (no build step).
+// Lucide "gamepad-2" icon (ISC License, lucide.dev).
+const React = window.SP_REACT;
+const h = React.createElement;
+const { useState, useEffect, useRef } = React;
+const { PanelSection, PanelSectionRow, ToggleField, SliderField, DropdownItem, ButtonItem, Field, staticClasses } = window.DFL;
+// The same hand-shake @decky/api does. API 2 adds useQuickAccessVisible; older Decky builds still answer.
+const API = window.__DECKY_SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED_deckyLoaderAPIInit.connect(2, "Ally Hub");
+const useVisible = API.useQuickAccessVisible || (() => true);
+
+const call = (method, ...args) => API.call(method, ...args).catch((e) => ({ error: String(e) }));
+const toast = (body) => { try { API.toaster.toast({ title: "Ally Hub", body }); } catch (e) {} };
+
+const GAME_SWITCHES = [
+  ["fsr4", "FSR 4 upgrade", "Sharper upscaling. Needs GE-Proton or Proton-CachyOS."],
+  ["lsfg", "Frame generation", "Lossless Scaling. Set the multiplier in its plugin."],
+  ["deck", "Steam Deck mode", "Handheld presets and on-screen keyboard."],
+];
+
+function Icon() {
+  return h("svg", { viewBox: "0 0 24 24", width: "1em", height: "1em", fill: "none", stroke: "currentColor",
+                    strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round" },
+    h("line", { x1: 6, x2: 10, y1: 11, y2: 11 }), h("line", { x1: 8, x2: 8, y1: 9, y2: 13 }),
+    h("line", { x1: 15, x2: 15.01, y1: 12, y2: 12 }), h("line", { x1: 18, x2: 18.01, y1: 10, y2: 10 }),
+    h("path", { d: "M17.32 5H6.68a4 4 0 0 0-3.978 3.59c-.006.052-.01.101-.017.152C2.604 9.416 2 14.456 2 16a3 3 0 0 0 3 3c1 0 1.5-.5 2-1l1.414-1.414A2 2 0 0 1 9.828 16h4.344a2 2 0 0 1 1.414.586L17 18c.5.5 1 1 2 1a3 3 0 0 0 3-3c0-1.545-.604-6.584-.685-7.258-.007-.05-.011-.1-.017-.151A4 4 0 0 0 17.32 5z" }));
+}
+
+function temp(v) { return v === null || v === undefined ? "–" : `${Math.round(v)}°`; }
+
+function Content() {
+  const [s, setS] = useState(null);
+  const [level, setLevel] = useState(null);       // brightness while the slider moves
+  const busy = useRef(false);
+  const bright = useRef(null);
+  const seq = useRef(0);
+  const visible = useVisible();
+  const load = async () => {
+    const mine = ++seq.current;                   // an older, slower answer never overwrites a newer one
+    const r = await call("status");
+    if (mine === seq.current) setS(r);
+  };
+  useEffect(() => {
+    if (!visible) return undefined;               // no polling while the menu is closed
+    load();
+    const t = setInterval(load, 3000);
+    return () => clearInterval(t);
+  }, [visible]);
+  useEffect(() => () => clearTimeout(bright.current), []);
+  const act = async (name, data = {}, quiet = false) => {
+    if (busy.current) return;                     // one change at a time; controls stay enabled for focus
+    busy.current = true;
+    const r = await call("action", name, data);
+    busy.current = false;
+    if (r && r.message && !quiet) toast(r.message);
+    else if (r && r.error) toast("Ally Hub's agent didn't answer.");
+    load();
+  };
+
+  if (!s) return h(PanelSection, null, h(PanelSectionRow, null, h(Field, { label: "Loading…", focusable: true })));
+  if (s.error) {
+    return h(PanelSection, { title: "Ally Hub" },
+      h(PanelSectionRow, null, h(Field, { focusable: true, label: "Ally Hub's background agent isn't running",
+        description: "Open Ally Hub and turn on the agent under Customize → Automation." })));
+  }
+
+  const sections = [];
+  sections.push(h(PanelSection, { title: "Status", key: "status" },
+    h(PanelSectionRow, null, h(Field, { focusable: true, label: "Battery",
+      description: `${s.battery}${s.time_left && s.time_left !== "n/a" ? " · " + s.time_left + " left" : ""}${s.watts ? " · " + s.watts + " W" : ""}` })),
+    h(PanelSectionRow, null, h(Field, { focusable: true, label: "Temperatures",
+      description: `CPU ${temp(s.cpu)} · GPU ${temp(s.gpu)}${s.fan ? " · fan " + s.fan + " rpm" : ""}` }))));
+
+  if (s.game) {
+    const flags = s.game_flags;
+    const rows = [h(PanelSectionRow, { key: "name" }, h(Field, { focusable: true, label: s.game_name || "This game",
+      description: flags ? "Switches apply the next time you start it." : "Reading this game's settings…" }))];
+    if (flags) {
+      for (const [key, title, desc] of GAME_SWITCHES) {
+        if (key === "lsfg" && !s.lsfg && !flags.includes(key)) continue;
+        rows.push(h(PanelSectionRow, { key }, h(ToggleField, { label: title, description: desc,
+          checked: flags.includes(key), disabled: !s.game_live,
+          onChange: (on) => act("game_flag", { key, on }) })));
+      }
+    }
+    sections.push(h(PanelSection, { title: "This game", key: "game" }, ...rows));
+  }
+
+  sections.push(h(PanelSection, { title: "Performance", key: "perf" },
+    h(PanelSectionRow, null, h(ToggleField, { label: "Game Boost", checked: !!s.boost,
+      description: s.boost && s.boost_note ? `CPU: ${s.boost_note}` : "Performance CPU setting while you play.",
+      onChange: (on) => act("boost", { on }) }))));
+
+  if (s.lighting === "allyhub") {
+    const opts = (s.effects || []).map((n) => ({ data: n, label: n }));
+    sections.push(h(PanelSection, { title: "Lighting", key: "light" },
+      h(PanelSectionRow, null, h(DropdownItem, { label: "Effect", rgOptions: opts,
+        selectedOption: s.effect, strDefaultLabel: s.effect || "Pick one",
+        onChange: (o) => act("preset", { name: o.data }) })),
+      h(PanelSectionRow, null, h(SliderField, { label: "Brightness",
+        value: level !== null ? level : Math.round((s.brightness || 0) / 2.55),
+        min: 0, max: 100, step: 5, showValue: true, valueSuffix: "%",
+        onChange: (v) => { setLevel(v); clearTimeout(bright.current);
+          bright.current = setTimeout(async () => { await act("brightness", { value: Math.round(v * 2.55) }, true);
+            setLevel(null); }, 400); } })),
+      h(PanelSectionRow, null, h(ButtonItem, { layout: "below", onClick: () => act("lights") }, "Lights off"))));
+  }
+
+  if (s.backup) {
+    sections.push(h(PanelSection, { title: "Saves", key: "saves" },
+      h(PanelSectionRow, null, h(ButtonItem, { layout: "below", disabled: s.backup_running,
+        onClick: () => act("backup") }, s.backup_running ? "Backing up…" : "Back up saves now"))));
+  }
+  return h("div", null, ...sections);
+}
+
+export default function () {
+  return {
+    name: "Ally Hub",
+    titleView: h("div", { className: staticClasses.Title }, "Ally Hub"),
+    content: h(Content),
+    icon: h(Icon),
+    onDismount() {},
+  };
+}
+'''
+
+
+def qam_files() -> dict:
+    return {"plugin.json": QAM_PLUGIN_JSON, "main.py": QAM_MAIN_PY, "dist/index.js": QAM_INDEX_JS,
+            "package.json": json.dumps({"name": "allyhub-panel", "version": QAM_VERSION, "type": "module",
+                                        "license": "GPL-3.0"}, indent=2) + "\n"}
+
+
+def qam_installed() -> Optional[str]:
+    """The installed panel's version, or None."""
+    try:
+        return json.loads((QAM_DIR / "package.json").read_text()).get("version") or "0"
+    except (OSError, ValueError):
+        return "0" if (QAM_DIR / "plugin.json").exists() else None
+
+
+def qam_stage() -> Path:
+    shutil.rmtree(QAM_STAGE, ignore_errors=True)
+    for name, text in qam_files().items():
+        p = QAM_STAGE / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+    return QAM_STAGE
+
+
+def qam_install_cmd() -> str:
+    """Copy the panel into Decky's plugin folder (root's) and restart Decky so it shows up."""
+    stage, dest = shlex.quote(str(qam_stage())), shlex.quote(str(QAM_DIR))
+    return (f'sudo mkdir -p {shlex.quote(str(QAM_DIR.parent))} && sudo rm -rf {dest} && '
+            f'sudo cp -r {stage} {dest} && '
+            'sudo systemctl restart plugin_loader && echo "Quick Access panel ready."')
+
+
+def qam_uninstall_cmd() -> str:
+    return (f"sudo rm -rf {shlex.quote(str(QAM_DIR))} && sudo systemctl restart plugin_loader && "
+            "echo 'Quick Access panel removed.'")
+
+
+def emudeck_uninstall_cmd() -> str:
+    """EmuDeck's own guided uninstaller exists only after its first-run setup. Before that, all there is to
+    remove is the app file the installer downloaded (and its shortcuts)."""
+    u = shlex.quote(str(HOME / ".config/EmuDeck/backend/uninstall.sh"))
+    files = " ".join(shlex.quote(str(p)) for p in (EMUDECK_PATH, HOME / "Desktop/EmuDeck.desktop",
+                                                     HOME / ".local/share/applications/EmuDeck.desktop"))
+    return (f'if [ -f {u} ]; then bash {u}; '
+            f'else rm -f -- {files} && echo "EmuDeck was never set up, so only its app was removed."; fi')
+
+
 def decky_version(item, state: dict) -> str:
     """Installed version of a catalog Decky plugin, shown on its card ("" when unknown)."""
     if not getattr(item, "decky_names", None):
@@ -2928,7 +3713,9 @@ CATALOG = [
         install="curl -L https://raw.githubusercontent.com/dragoonDorise/EmuDeck/main/install.sh | bash",
         open_cmd=shlex.quote(str(EMUDECK_PATH)),
         check=lambda s: EMUDECK_PATH.exists(),
-        warn="Pick EmuDeck or RetroDECK, not both. Uninstall from inside EmuDeck.",
+        uninstall=emudeck_uninstall_cmd(),
+        warn="Pick EmuDeck or RetroDECK, not both. Remove runs EmuDeck's own uninstaller, which asks about "
+             "backing up your saves and BIOS (best done in Desktop Mode).",
     ),
     flatpak_item("net.retrodeck.retrodeck", "RetroDECK", "Emulation",
                  "All-in-one retro platform in a single Flatpak. Cleaner and more "
@@ -3016,7 +3803,44 @@ FEATURED_PLUGINS = [
 
 
 def gather_state() -> dict:
-    return {"flatpaks": installed_flatpaks(), "decky": installed_decky_plugins()}
+    return {"flatpaks": installed_flatpaks(), "decky": installed_decky_plugins(), "decky_off": sorted(decky_disabled())}
+
+
+# ---------- Turning Decky plugins off and on (without uninstalling) ----------
+# Decky keeps the list in its own settings ("disabled_plugins" in ~/homebrew/settings/loader.json, plugin.json
+# names) and only reads it at start, so the job stops Decky, edits the list as root, and starts it again.
+DECKY_SETTINGS = HOME / "homebrew/settings/loader.json"
+DECKY_SAFE_MODE = DATA_DIR / "decky_safe_mode.json"     # which plugins "Turn all off" turned off
+_DECKY_TOGGLE_PY = (
+    "import json,os,sys\n"
+    "p,mode,names=sys.argv[1],sys.argv[2],json.loads(sys.argv[3])\n"
+    "try:\n s=json.load(open(p))\nexcept Exception:\n s={}\n"
+    "d=[n for n in s.get('disabled_plugins',[]) if n not in names]\n"
+    "s['disabled_plugins']=d+(names if mode=='off' else [])\n"
+    "os.makedirs(os.path.dirname(p),exist_ok=True)\n"
+    "t=p+'.allyhub';json.dump(s,open(t,'w'),indent=4);os.replace(t,p)\n"
+)
+
+
+def decky_disabled() -> set:
+    return set((read_json(DECKY_SETTINGS, {}) or {}).get("disabled_plugins") or [])
+
+
+def decky_toggle_cmd(names: list, off: bool) -> Optional[str]:
+    names = sorted({str(n) for n in names if n})
+    if not names:
+        return None
+    return ("sudo systemctl stop plugin_loader; "
+            f"sudo python3 -c {shlex.quote(_DECKY_TOGGLE_PY)} {shlex.quote(str(DECKY_SETTINGS))} "
+            f"{'off' if off else 'on'} {shlex.quote(json.dumps(names))}; rc=$?; "
+            "sudo systemctl start plugin_loader; "
+            f"[ $rc = 0 ] && echo {shlex.quote(('Turned off: ' if off else 'Turned on: ') + ', '.join(names))}; exit $rc")
+
+
+def decky_item_names(item, state: dict) -> list:
+    """The plugin.json names behind a catalog item (what Decky's off list uses)."""
+    dirs = set(decky_match(getattr(item, "decky_names", ()) or (), state))
+    return [i["name"] for i in state.get("decky", {}).values() if i["dir"] in dirs]
 
 
 def decky_remove_cmd(dirs: list) -> str:
