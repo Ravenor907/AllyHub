@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.2
+
+- **First launch walks you through setup** (Home → Setup): sudo password, Game Mode library and background helper,
+  essentials you pick (Decky Loader, Ally Hub in Quick Access, Ludusavi), lighting and a few favorites. Skip any
+  step; Home shows a **Finish setting up** card with whatever is left, and Setup can be run again any time.
+- **The installer does more on a brand new install:** it adds Ally Hub to your Game Mode library and turns the
+  background helper on, so the Quick Access panel, Game Boost, save snapshots and sleep tracking work from the start.
+  Updates and reinstalls leave your settings alone.
+
 ## 1.3.1
 
 - **Desktop Mode is no longer blown up.** The automatic interface size now takes the desktop's own display scaling

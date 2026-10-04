@@ -148,6 +148,14 @@ the Plugin store page lists every installed plugin (`StorePage.show_mine`) with 
 only; Add restores tiles directly when the launcher is still installed (`LaunchersPage.restorable`). Every new
 catalog item needs a working Remove (EmuDeck uses its own uninstall.sh).
 
+**First run (the owner's call: a straightforward, uniform setup for everyone):** install.sh calls
+`allyhub.py --first-install` (`core.first_install`), which only acts when no config exists yet: agent on
+(`start_agent`), Ally Hub added to Game Mode (`core.add_to_steam`, steamos-add-to-steam), `setup.done = False`.
+The GUI then opens Home → Setup (`SetupPage`, steps redraw inside one page: welcome, password, Game Mode +
+helper, essentials the user picks, lighting (only with ring LEDs), favorites, reports (only when a report key is
+saved, i.e. the owner's device), done). Home shows "Finish setting up" (`core.setup_checklist`) until done or
+hidden. Existing installs default to `setup.done = True`. Keep every new first-time requirement in this flow.
+
 **Save time machine (Tools → Saves, `SavesPage`):** the agent's `tm_snapshot` runs Ludusavi when a game
 starts (`config["saves"]`: time_machine, keep) into `TM_DIR` with `--full-limit keep --differential-limit 0`,
 at most once per game per 10 minutes, niced. Titles: `ludusavi_title` (Steam id, then exact/normalized name,

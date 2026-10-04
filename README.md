@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.3.1-e11d48?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.3.2-e11d48?style=flat-square">
   <img alt="SteamOS" src="https://img.shields.io/badge/SteamOS-3.8%2B-1a9fff?style=flat-square&logo=steam&logoColor=white">
   <img alt="Device" src="https://img.shields.io/badge/ROG%20Xbox%20Ally%20X-tested-8b5cf6?style=flat-square">
   <img alt="License" src="https://img.shields.io/github/license/Ravenor907/AllyHub?color=22c55e&style=flat-square">
@@ -63,10 +63,9 @@ No keyboard? Press **Steam + X** for the on-screen one.
 
 It's finished when it says **Done!**
 
-**4. Open Ally Hub** from the desktop icon or the app launcher.
-
-**5. Add it to Steam (recommended).** Settings → Tweaks → **Add Ally Hub to Steam**. Now it opens from your
-Game Mode library and works with the controller.
+**4. Open Ally Hub** from the desktop icon, the app launcher, or your Game Mode library (the installer adds it
+there for you). The first time, a short setup walks you through the rest: a sudo password, Decky Loader and a few
+favorites. Skip anything you like; Home keeps a reminder.
 
 That's it. Ally Hub keeps itself up to date from here on.
 

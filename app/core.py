@@ -88,6 +88,8 @@ DEFAULT_CONFIG = {
     },
     # Save time machine (Tools > Saves): a snapshot of a game's saves each time it starts
     "saves": {"time_machine": False, "keep": 5},
+    # First-run setup (Home > Setup). Existing installs count as set up; a fresh install sets done False.
+    "setup": {"done": True, "checklist_hidden": False},
     # Sleep guardian: USB devices the owner stopped from waking the handheld (sysfs DEVPATHs)
     "sleep": {"no_wake": []},
     "game_colors": {},
@@ -3970,6 +3972,73 @@ def nowake_cmd(devpaths: list, allow: list = ()) -> Optional[str]:
                     for d in devpaths)
     return (f"printf %s {shlex.quote(lines)} | sudo tee {rule} >/dev/null && sudo udevadm control --reload && "
             f"{apply}echo 'Saved.'")
+
+
+
+# ==========================================================================
+# First run: what a fresh install does on its own, and what's left for the user
+# ==========================================================================
+
+GAMEMODE_DESKTOP = HOME / ".local/share/applications/allyhub-gamemode.desktop"
+LAUNCHER = HOME / ".local/bin/allyhub"
+
+
+def gamemode_desktop_text() -> str:
+    return ("[Desktop Entry]\nType=Application\nName=Ally Hub\n"
+            f"Exec={LAUNCHER} --gamemode\nIcon={APP_DIR / 'allyhub.svg'}\nNoDisplay=true\nTerminal=false\n")
+
+
+def in_steam_library() -> bool:
+    return any(n.strip().lower() == "ally hub" for n in steam_shortcut_names())
+
+
+def add_to_steam() -> str:
+    """Put Ally Hub in the Game Mode library through SteamOS's own helper. Returns what happened."""
+    if in_steam_library():
+        return "already"
+    tool = shutil.which("steamos-add-to-steam")
+    if not tool or not LAUNCHER.exists():
+        return "unavailable"
+    GAMEMODE_DESKTOP.parent.mkdir(parents=True, exist_ok=True)
+    GAMEMODE_DESKTOP.write_text(gamemode_desktop_text())
+    try:
+        subprocess.Popen([tool, str(GAMEMODE_DESKTOP)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    except OSError:
+        return "unavailable"
+    return "added"
+
+
+def start_agent(python: str) -> bool:
+    AGENT_UNIT.parent.mkdir(parents=True, exist_ok=True)
+    AGENT_UNIT.write_text(agent_unit_text(python))
+    ok = run_quiet(["systemctl", "--user", "daemon-reload"], timeout=20)[0] == 0
+    return ok and run_quiet(["systemctl", "--user", "enable", "--now", "allyhub-agent.service"], timeout=30)[0] == 0
+
+
+def first_install(python: str) -> list:
+    """Run by install.sh. Only on a brand new install (no settings yet): turn the agent on, put Ally Hub in the
+    Game Mode library, and have the app open its setup on first launch. Updates and reinstalls change nothing."""
+    if CONFIG_FILE.exists():
+        return []
+    update_config(lambda c: (c["agent"].__setitem__("enabled", True),
+                             c.setdefault("setup", {}).__setitem__("done", False)))
+    out = ["Background helper " + ("started" if start_agent(python) else "will start from the app")]
+    res = add_to_steam()
+    out.append({"added": "Added to your Game Mode library (Steam may take a moment to show it)",
+                "already": "Already in your Game Mode library",
+                "unavailable": "Add it to Game Mode later from the app's setup"}[res])
+    return out
+
+
+def setup_checklist(state: dict) -> list:
+    """[(key, title, done)] for the Home 'Finish setting up' card and the setup page."""
+    cfg = load_config()
+    decky = CATALOG_BY_ID["decky"].check(state) if "decky" in CATALOG_BY_ID else False
+    return [("password", "Set a sudo password", state.get("password") is not False),
+            ("decky", "Install Decky Loader", bool(decky)),
+            ("steam", "Put Ally Hub in your Game Mode library", in_steam_library()),
+            ("agent", "Turn on the background helper", bool(cfg["agent"].get("enabled")) and agent_running())]
 
 
 def decky_version(item, state: dict) -> str:

@@ -73,6 +73,7 @@ check(top == [".claude", ".github", ".gitignore", "LICENSE", "README.md", "VERSI
               "scripts", "tests"], "tidy repo top level: " + ", ".join(top))
 # install.sh run from scripts/ finds and copies every app file (only its copy step, no network)
 inst = open(os.path.join({root!r}, "scripts", "install.sh")).read()
+check("--first-install" in inst and 'FRESH' in inst, "a fresh install sets itself up (helper on, Game Mode entry, setup)")
 copy_part = inst.split('rm -rf "$APP_DIR/__pycache__"')[0]
 tmp_sh = os.path.join({root!r}, "scripts", ".copy_test.sh")
 open(tmp_sh, "w").write(copy_part)
@@ -977,6 +978,22 @@ check("rm -f" in na and "echo enabled" in na and "1-3/power/wakeup" in na, "allo
 check(core._never_offer({"devpath": "/devices/pci0000:00/usb1", "wake_file": "/x"}), "a USB bus itself is never offered")
 check(core.duration_text(7260) == "2 h 1 min" and core.duration_text(90) == "1 min", "sleep lengths read naturally")
 core.record_sleep(e); check(core.sleep_log()[-1]["slept"] == 7200, "sleeps are logged")
+# ---- first run: a fresh install sets itself up, updates change nothing ----
+_cfgf = core.CONFIG_FILE
+_bak = _cfgf.read_bytes() if _cfgf.exists() else None
+if _cfgf.exists():
+    _cfgf.unlink()
+_fi = core.first_install(sys.executable)
+_c = core.load_config()
+check(_c["agent"]["enabled"] and _c["setup"]["done"] is False and len(_fi) == 2,
+      "a brand new install turns the helper on and opens setup on first launch: " + str(_fi))
+check(core.first_install(sys.executable) == [], "running the installer again (an update) changes nothing")
+if _bak is not None:
+    _cfgf.write_bytes(_bak)
+check(core.load_config()["setup"]["done"] is True or _bak is None, "existing installs count as set up")
+check("--gamemode" in core.gamemode_desktop_text(), "the Game Mode entry opens the controller layout")
+_cl = core.setup_checklist({"password": False, "decky": {}})
+check([k for k, _t, _d in _cl] == ["password", "decky", "steam", "agent"] and not _cl[0][2], "the setup checklist knows what's left")
 # ---- reports: attachments, snapshot, instant upload, per-version repeats, manual reports ----
 posts = []
 def _fake_gh(method, path, data=None, **kw):
@@ -2011,6 +2028,33 @@ hub.needs_password, hub.runner.submit = _np5, _sub5
 core.wakeup_sources = _ws
 tryit("sleep send details", hub.sleep.send_details)
 tryit("sleep job done", lambda: hub.on_job_finished("sleep-nowake", 0, ""))
+hub.go("Setup")
+check(hub.current_page() is hub.setup, "Setup lives under Home")
+tryit("setup refresh", hub.setup.refresh)
+_steps = hub.setup.steps()
+check(_steps[0] == "welcome" and _steps[-1] == "done" and "reports" not in _steps, "the walkthrough skips reports without a key")
+for _ in range(len(_steps) - 1):
+    tryit("setup step " + hub.setup.steps()[hub.setup.step], hub.setup.next)
+check(hub.setup.steps()[hub.setup.step] == "done", "every step can be walked through")
+tryit("setup back", hub.setup.back)
+_np6, _sub6, _ia = hub.needs_password, hub.runner.submit, hub.on_item_action
+_acts = []
+hub.needs_password = lambda: False
+hub.on_item_action = lambda iid, action: _acts.append((iid, action))
+hub.setup.step = hub.setup.steps().index("essentials"); hub.setup.refresh()
+for _k, (_cb, _have) in hub.setup.essentials.items():
+    _cb.isChecked = lambda: True
+hub.setup.essentials = {k: (cb, False) for k, (cb, _h) in hub.setup.essentials.items()}
+tryit("setup install essentials", hub.setup.install_essentials)
+check(("decky", "install") in _acts and (core.LUDUSAVI_ID, "install") in _acts and hub.qam_after_decky,
+      "picked essentials install, the Quick Access panel right after Decky")
+hub.needs_password, hub.on_item_action = _np6, _ia
+tryit("setup finish", hub.setup.finish)
+check(core.load_config()["setup"]["done"] is True, "finishing marks setup done")
+tryit("home checklist", lambda: hub.health.refresh_notices({"password": False, "decky": {}}))
+tryit("home checklist hide", hub.health.hide_setup)
+check(core.load_config()["setup"]["checklist_hidden"], "the Home reminder can be hidden")
+hub.qam_after_decky = False
 tryit("NSL card opens the page", lambda: hub.on_item_action("nonsteamlaunchers", "install"))
 check(hub.current_page() is hub.launchers, "the catalog card opens the themed page, not the script's windows")
 # header/footer on the sides
