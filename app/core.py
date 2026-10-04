@@ -88,6 +88,8 @@ DEFAULT_CONFIG = {
     },
     # Save time machine (Tools > Saves): a snapshot of a game's saves each time it starts
     "saves": {"time_machine": False, "keep": 5},
+    # Sleep guardian: USB devices the owner stopped from waking the handheld (sysfs DEVPATHs)
+    "sleep": {"no_wake": []},
     "game_colors": {},
     "dock": {"lights": "off", "audio_hdmi": True},
     "wol": {"name": "Gaming PC", "mac": "", "broadcast": "255.255.255.255"},
@@ -3706,6 +3708,162 @@ def when_text(iso: str) -> str:
     days = (now.date() - t.date()).days
     hm = t.strftime("%H:%M")
     return f"Today {hm}" if days == 0 else f"Yesterday {hm}" if days == 1 else t.strftime("%b %-d, ") + hm
+
+
+
+# ==========================================================================
+# Sleep guardian: how much battery each sleep costs, what woke the handheld, and sleeps that failed
+# The agent notices a sleep from the gap between CLOCK_BOOTTIME (keeps counting while suspended) and
+# CLOCK_MONOTONIC (doesn't), then compares the kernel's wakeup counters and suspend statistics from just before
+# and just after. Everything read here is world-readable sysfs; the only fix (stop a USB device waking the
+# handheld) is a udev rule in /etc, undone from the same page and by the uninstaller.
+# ==========================================================================
+
+POWER_ROOT = Path("/sys/power")
+WAKEUP_ROOT = Path("/sys/class/wakeup")
+SLEEP_LOG = DATA_DIR / "sleep_log.json"
+SLEEP_KEEP = 60
+NOWAKE_RULE = "/etc/udev/rules.d/71-allyhub-nowake.rules"
+SLEEP_DRAIN_HIGH = 3.0          # % per hour while asleep that counts as a problem
+SLEEP_STATS = ("success", "fail", "last_failed_dev", "last_failed_errno", "last_failed_step", "last_hw_sleep",
+               "total_hw_sleep")
+
+
+def suspend_stats() -> dict:
+    out = {}
+    for name in SLEEP_STATS:
+        v = read_text(POWER_ROOT / "suspend_stats" / name).strip()
+        out[name] = int(v) if v.lstrip("-").isdigit() else v
+    return out
+
+
+def wakeup_sources() -> dict:
+    """{source dir name: {"name", "count", "devpath", "wake_file"}} for every wakeup source the kernel lists."""
+    out = {}
+    try:
+        entries = list(WAKEUP_ROOT.iterdir())
+    except OSError:
+        return out
+    for d in entries:
+        count = read_text(d / "event_count").strip()
+        dev = ""
+        try:
+            if (d / "device").exists():
+                dev = str((d / "device").resolve())
+        except OSError:
+            dev = ""
+        wake = Path(dev) / "power/wakeup" if dev else None
+        out[d.name] = {"name": read_text(d / "name").strip() or d.name, "count": int(count) if count.isdigit() else 0,
+                       "devpath": dev[4:] if dev.startswith("/sys/") else dev,
+                       "wake_file": str(wake) if wake and wake.exists() else ""}
+    return out
+
+
+def battery_level() -> Optional[float]:
+    now, full = battery_energy_wh()
+    if now and full:
+        return round(100 * now / full, 2)
+    b = battery_info()
+    try:
+        return float(b.get("capacity"))
+    except (TypeError, ValueError):
+        return None
+
+
+def sleep_snapshot() -> dict:
+    return {"t": time.time(), "stats": suspend_stats(), "wake": wakeup_sources()}
+
+
+def sleep_entry(pre: dict, post: dict, slept_s: float, pct_before, pct_after, charging: bool) -> dict:
+    hours = slept_s / 3600
+    drop = round(pct_before - pct_after, 2) if pct_before is not None and pct_after is not None else None
+    woke = [post["wake"][k]["name"] for k in post.get("wake", {})
+            if k in pre.get("wake", {}) and post["wake"][k]["count"] > pre["wake"][k]["count"]]
+    s0, s1 = pre.get("stats", {}), post.get("stats", {})
+    failed = isinstance(s1.get("fail"), int) and isinstance(s0.get("fail"), int) and s1["fail"] > s0["fail"]
+    hw = s1.get("last_hw_sleep")
+    hw_pct = round(min(100.0, hw / 1e6 / slept_s * 100), 1) if isinstance(hw, int) and hw > 0 and slept_s > 0 else None
+    return {"end": round(post.get("t", time.time())), "slept": round(slept_s), "pct_before": pct_before,
+            "pct_after": pct_after, "drop": drop, "charging": bool(charging),
+            "per_hour": round(drop / hours, 2) if drop is not None and not charging and hours >= 0.25 else None,
+            "woke_by": woke[:6], "failed": failed,
+            "failed_dev": s1.get("last_failed_dev") if failed else "",
+            "failed_step": s1.get("last_failed_step") if failed else "", "hw_sleep_pct": hw_pct}
+
+
+def record_sleep(entry: dict) -> None:
+    log = read_json(SLEEP_LOG, []) or []
+    log.append(entry)
+    write_json(SLEEP_LOG, log[-SLEEP_KEEP:])
+
+
+def sleep_log() -> list:
+    log = read_json(SLEEP_LOG, []) or []
+    return [e for e in log if isinstance(e, dict)]
+
+
+def duration_text(seconds: float) -> str:
+    m = int(seconds // 60)
+    return f"{m // 60} h {m % 60} min" if m >= 60 else f"{m} min" if m else f"{int(seconds)} s"
+
+
+def _never_offer(source: dict) -> bool:
+    """Devices Ally Hub never offers to stop: anything that isn't USB (power button, lid, the chipset)."""
+    return "/usb" not in source.get("devpath", "") or not source.get("wake_file")
+
+
+def sleep_findings(log: list = None, sources: dict = None) -> list:
+    """Plain-language problems with recent sleeps: [{"id", "title", "detail", "fix": {...} or None}]."""
+    log = sleep_log() if log is None else log
+    sources = wakeup_sources() if sources is None else sources
+    recent = log[-12:]
+    out = []
+    long_ = [e for e in recent if e.get("per_hour") is not None and e.get("slept", 0) >= 3600]
+    if long_:
+        rates = sorted(e["per_hour"] for e in long_)
+        med = rates[len(rates) // 2]
+        if med > SLEEP_DRAIN_HIGH:
+            last = long_[-1]
+            detail = (f"About {med:.1f}% per hour while asleep. Last time it lost {last['drop']:.0f}% over "
+                      f"{duration_text(last['slept'])}.")
+            hw = [e["hw_sleep_pct"] for e in long_ if e.get("hw_sleep_pct") is not None]
+            if hw and min(hw) < 80:
+                detail += f" It only spent {min(hw):.0f}% of that time in its deepest sleep, so something keeps it busy."
+            out.append({"id": "drain", "title": "Sleep uses a lot of battery", "detail": detail, "fix": None})
+    shorts = [e for e in recent if e.get("slept", 0) < 180 and e.get("woke_by")]
+    if len(shorts) >= 3:
+        names = {}
+        for e in shorts:
+            for n in e["woke_by"]:
+                names[n] = names.get(n, 0) + 1
+        culprit = max(names, key=names.get)
+        src = next((s for s in sources.values() if s["name"] == culprit), None)
+        fix = None if not src or _never_offer(src) else {"kind": "nowake", "devpath": src["devpath"], "name": culprit}
+        out.append({"id": "wakes", "title": f"{culprit} keeps waking the handheld",
+                    "detail": f"{len(shorts)} recent sleeps ended within 3 minutes, woken by {culprit}."
+                              + ("" if fix else " It's a system device, so it's best left alone; this was noted in "
+                                                "the sleep details."), "fix": fix})
+    fails = [e for e in recent if e.get("failed")]
+    if fails:
+        e = fails[-1]
+        dev, step = e.get("failed_dev") or "", e.get("failed_step") or ""
+        detail = "The handheld couldn't go to sleep" + (f" because of {dev}" if dev else "") + \
+                 (f" (step: {step})" if step else "") + ". Send the sleep details so it can be looked at."
+        out.append({"id": "failed", "title": "A sleep attempt failed", "detail": detail, "fix": None})
+    return out
+
+
+def nowake_cmd(devpaths: list) -> Optional[str]:
+    """Rewrite the rule file for exactly these USB devices (an empty list removes it) and apply it right away."""
+    devpaths = sorted({d for d in devpaths if d.startswith("/devices/") and "/usb" in d and '"' not in d})
+    rule = shlex.quote(NOWAKE_RULE)
+    if not devpaths:
+        return f"sudo rm -f {rule} && sudo udevadm control --reload && echo 'Every device can wake the handheld again.'"
+    lines = "".join(f'ACTION=="add|change", DEVPATH=="{d}", ATTR{{power/wakeup}}="disabled"\n' for d in devpaths)
+    apply = " ; ".join(f"echo disabled | sudo tee {shlex.quote('/sys' + d + '/power/wakeup')} >/dev/null"
+                       for d in devpaths)
+    return (f"printf %s {shlex.quote(lines)} | sudo tee {rule} >/dev/null && sudo udevadm control --reload && "
+            f"{{ {apply} ; true; }} && echo 'Saved.'")
 
 
 def decky_version(item, state: dict) -> str:

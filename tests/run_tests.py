@@ -922,6 +922,45 @@ check(_r.returncode == 0 and "Restored Big Game" in _r.stdout and "backup" in ca
 check(core.tm_due("Big Game") and (core.tm_record("Big Game", 0, "Big Game") or True) and not core.tm_due("Big Game"),
       "one snapshot per game per 10 minutes")
 check(core.when_text("bad") == "bad" and core.when_text("2020-01-02T03:04:00Z").startswith("Jan"), "snapshot times read naturally")
+# ---- Sleep guardian: fake kernel power files ----
+_pw = Path(HOME) / "fake-power"; (_pw / "suspend_stats").mkdir(parents=True)
+for k, v in {"success": "10", "fail": "0", "last_failed_dev": "", "last_failed_errno": "0", "last_failed_step": "",
+             "last_hw_sleep": "0", "total_hw_sleep": "0"}.items():
+    (_pw / "suspend_stats" / k).write_text(v + "\n")
+_wk = Path(HOME) / "fake-wakeup"
+_usb = Path(HOME) / "fake-sys/devices/pci0000:00/usb1/1-3"; (_usb / "power").mkdir(parents=True); (_usb / "power/wakeup").write_text("enabled")
+_btn = Path(HOME) / "fake-sys/devices/LNXSYSTM:00/PNP0C0C:00"; (_btn / "power").mkdir(parents=True); (_btn / "power/wakeup").write_text("enabled")
+for n, name, dev in (("wakeup0", "1-3", _usb), ("wakeup1", "PNP0C0C:00", _btn)):
+    (_wk / n).mkdir(parents=True); (_wk / n / "name").write_text(name); (_wk / n / "event_count").write_text("5")
+    (_wk / n / "device").symlink_to(dev)
+core.POWER_ROOT, core.WAKEUP_ROOT = _pw, _wk
+pre = core.sleep_snapshot()
+check(pre["stats"]["success"] == 10 and pre["wake"]["wakeup0"]["name"] == "1-3" and pre["wake"]["wakeup0"]["wake_file"],
+      "reads suspend stats and wakeup sources")
+(_wk / "wakeup0/event_count").write_text("6"); (_pw / "suspend_stats/last_hw_sleep").write_text(str(int(3600 * 0.5 * 1e6)))
+post = core.sleep_snapshot()
+e = core.sleep_entry(pre, post, 7200, 80.0, 70.0, False)
+check(e["drop"] == 10.0 and e["per_hour"] == 5.0 and e["woke_by"] == ["1-3"] and not e["failed"] and e["hw_sleep_pct"] == 25.0,
+      "a sleep's cost, cause and deep-sleep share: " + str(e))
+check(core.sleep_entry(pre, post, 7200, 80.0, 90.0, True)["per_hour"] is None, "charging sleeps don't count as drain")
+(_pw / "suspend_stats/fail").write_text("1"); (_pw / "suspend_stats/last_failed_dev").write_text("amdgpu")
+fe = core.sleep_entry(post, core.sleep_snapshot(), 30, 70.0, 70.0, False)
+check(fe["failed"] and fe["failed_dev"] == "amdgpu", "a failed sleep and the device behind it")
+srcs = core.wakeup_sources()
+f = {x["id"]: x for x in core.sleep_findings([e, e], srcs)}
+check("drain" in f and "5.0%" in f["drain"]["detail"] and "deepest sleep" in f["drain"]["detail"], "flags heavy sleep drain")
+short = dict(e, slept=40, per_hour=None)
+f = {x["id"]: x for x in core.sleep_findings([short] * 3 + [fe], srcs)}
+check(f["wakes"]["fix"] and f["wakes"]["fix"]["name"] == "1-3" and "failed" in f and "amdgpu" in f["failed"]["detail"],
+      "names the device that keeps waking it, with a fix, and the failed sleep")
+btn = dict(short, woke_by=["PNP0C0C:00"])
+check(core.sleep_findings([btn] * 3, srcs)[0]["fix"] is None, "never offers to stop the power button (or anything not USB)")
+check(core.sleep_findings([], srcs) == [], "nothing to say without sleeps")
+nc = core.nowake_cmd(["/devices/pci0000:00/usb1/1-3", "/devices/LNXSYSTM:00/PNP0C0C:00", '/devices/usb1/x"y'])
+check(nc.count("DEVPATH") == 1 and "PNP0C0C" not in nc and "udevadm" in nc, "the wake rule only ever covers USB devices")
+check("rm -f" in core.nowake_cmd([]), "allowing everything again removes the rule")
+check(core.duration_text(7260) == "2 h 1 min" and core.duration_text(90) == "1 min", "sleep lengths read naturally")
+core.record_sleep(e); check(core.sleep_log()[-1]["slept"] == 7200, "sleeps are logged")
 # ---- reports: attachments, snapshot, instant upload, per-version repeats, manual reports ----
 posts = []
 def _fake_gh(method, path, data=None, **kw):
@@ -1097,6 +1136,16 @@ check(not _ask({"op": "action", "name": "game_flag", "data": {"key": "deck", "on
       and not _ask({"op": "status"})["game_live"], "launch options the switches can't parse are never touched")
 core.game_settings, core.apply_game_settings = _gs, _ag
 check(_ask({"op": "action", "name": "backup"})["ok"], "panel can ask for a save backup")
+sg = agent.Agent()
+sg.update_sleep(core.battery_info())
+mono0, boot0, pct0, ch0 = sg.sleep_last
+sg.sleep_last = (mono0 - 1, boot0 - 4000, 80.0, False)       # as if the handheld slept for about an hour
+sg.update_sleep(core.battery_info())
+_sl = core.sleep_log()
+check(_sl and 3900 < _sl[-1]["slept"] < 4100 and _sl[-1]["drop"] is not None and _sl[-1]["drop"] > 10,
+      "the agent notices a sleep and what it cost: " + str(_sl[-1] if _sl else None))
+sg.update_sleep(core.battery_info())
+check(len(core.sleep_log()) == len(_sl), "normal ticks aren't sleeps")
 _fb = Path(HOME) / "fakebin"; _fb.mkdir(exist_ok=True)
 (_fb / "flatpak").write_text("#!/bin/sh\necho \"$@\" >> \"$HOME/flatpak.log\"\ncase \"$*\" in *find*) echo '{\"games\": {\"Halo Infinite\": {}}}';; esac\nexit 0\n")
 (_fb / "flatpak").chmod(0o755)
@@ -1107,7 +1156,8 @@ _tms = core.read_json(core.TM_STATE, {})
 check(_tms.get("Halo Infinite", {}).get("rc") == 0 and "--full-limit" in (Path(HOME) / "flatpak.log").read_text(),
       "a game starting gets its saves snapshotted: " + str(_tms))
 a.tm_snapshot(a.game)
-check((Path(HOME) / "flatpak.log").read_text().count(" backup ") == 1, "but not again right away")
+check(sum(1 for l in (Path(HOME) / "flatpak.log").read_text().splitlines() if "time-machine" in l and " backup " in l) == 1,
+      "but not again right away")
 
 _spec = _iu.spec_from_loader("qam_main", loader=None)
 qam = _iu.module_from_spec(_spec)
@@ -1898,6 +1948,28 @@ tryit("saves restore", lambda: hub.saves.pick("Big Game"))
 check(_tm and _tm[-1][0] == "tm-restore" and "b1" in _tm[-1][1], "picking a snapshot restores that one")
 gui.ask_item, hub.runner.submit = _ai3, _sub4
 tryit("saves restore done", lambda: hub.on_job_finished("tm-restore", 0, ""))
+hub.go("Sleep")
+check(hub.current_page() is hub.sleep, "Sleep lives under Tools")
+tryit("sleep refresh empty", hub.sleep.refresh)
+_sle = {"end": 1, "slept": 40, "pct_before": 80, "pct_after": 79, "drop": 1, "charging": False, "per_hour": None,
+        "woke_by": ["1-3"], "failed": False, "failed_dev": "", "failed_step": "", "hw_sleep_pct": None}
+core.write_json(core.SLEEP_LOG, [_sle] * 3)
+_ws = core.wakeup_sources
+core.wakeup_sources = lambda: {"w0": {"name": "1-3", "count": 1, "devpath": "/devices/pci0000:00/usb1/1-3", "wake_file": "/x"}}
+tryit("sleep refresh with findings", hub.sleep.refresh)
+_np5, _sub5 = hub.needs_password, hub.runner.submit
+_sj = []
+hub.needs_password = lambda: False
+hub.runner.submit = lambda label, cmd, key="": _sj.append((key, cmd))
+tryit("sleep stop wake", lambda: hub.sleep.stop_wake({"kind": "nowake", "devpath": "/devices/pci0000:00/usb1/1-3", "name": "1-3"}))
+check(_sj and _sj[-1][0] == "sleep-nowake" and core.load_config()["sleep"]["no_wake"] == ["/devices/pci0000:00/usb1/1-3"],
+      "a device can be stopped from waking the handheld")
+tryit("sleep allow wake", lambda: hub.sleep.allow_wake("/devices/pci0000:00/usb1/1-3"))
+check(core.load_config()["sleep"]["no_wake"] == [] and "rm -f" in _sj[-1][1], "and allowed again")
+hub.needs_password, hub.runner.submit = _np5, _sub5
+core.wakeup_sources = _ws
+tryit("sleep send details", hub.sleep.send_details)
+tryit("sleep job done", lambda: hub.on_job_finished("sleep-nowake", 0, ""))
 tryit("NSL card opens the page", lambda: hub.on_item_action("nonsteamlaunchers", "install"))
 check(hub.current_page() is hub.launchers, "the catalog card opens the themed page, not the script's windows")
 # header/footer on the sides
