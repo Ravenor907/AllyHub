@@ -994,6 +994,15 @@ check(core.load_config()["setup"]["done"] is True or _bak is None, "existing ins
 check("--gamemode" in core.gamemode_desktop_text(), "the Game Mode entry opens the controller layout")
 _cl = core.setup_checklist({"password": False, "decky": {}})
 check([k for k, _t, _d in _cl] == ["password", "decky", "steam", "agent"] and not _cl[0][2], "the setup checklist knows what's left")
+_rq = core.run_quiet
+_pw = {}
+for _out, _want in ((core.USER + " P 01/01/2026 0 99999 7 -1", True), (core.USER + " NP 01/01/2026 0 99999 7 -1", False),
+                    (core.USER + " L 01/01/2026 0 99999 7 -1", False), ("someone P", None), ("", None), ("garbage", None)):
+    core.run_quiet = lambda cmd, timeout=8, o=_out: (0 if o else 1, o)
+    _pw[_out] = core.sudo_password_set() is _want
+core.run_quiet = _rq
+check(all(_pw.values()), "password check says no only when passwd clearly says no: " + str(_pw))
+check(core.DEFAULT_CONFIG["setup"]["password_known"] is False, "'I already have one' is remembered in setup")
 # ---- reports: attachments, snapshot, instant upload, per-version repeats, manual reports ----
 posts = []
 def _fake_gh(method, path, data=None, **kw):
@@ -2037,6 +2046,47 @@ for _ in range(len(_steps) - 1):
     tryit("setup step " + hub.setup.steps()[hub.setup.step], hub.setup.next)
 check(hub.setup.steps()[hub.setup.step] == "done", "every step can be walked through")
 tryit("setup back", hub.setup.back)
+# the owner (1.3.2): setup kept opening passwd after the password was set (a stale "no password")
+_sps, _sp, _ai2 = core.sudo_password_set, hub.set_password, gui.ask_item
+_opened = []
+hub.set_password = lambda *a: _opened.append(1)
+hub._pw_term = None
+hub.state["password"] = False
+core.sudo_password_set = lambda: True
+check(hub.needs_password() is False and hub.state["password"] is True and not _opened,
+      "a password set since the last look is found, no terminal")
+hub.state["password"] = False
+tryit("job finished re-checks the password", lambda: hub.on_job_finished("sleep-nowake", 0, ""))
+check(hub.state["password"] is True, "a finished job doesn't carry an old 'no password'")
+core.sudo_password_set = lambda: False
+gui.ask_item = lambda *a, **k: ("Create a password", True)
+hub.state["password"] = False
+check(hub.needs_password() is True and len(_opened) == 1, "really no password: offers to create one")
+gui.ask_item = lambda *a, **k: ("", False)
+check(hub.needs_password() is True and len(_opened) == 1, "cancel doesn't open a terminal")
+gui.ask_item = lambda *a, **k: ("I already have one", True)
+check(hub.needs_password() is False and core.load_config()["setup"]["password_known"], "'I already have one' continues")
+check(hub.refresh_password() is None and hub.needs_password() is False and len(_opened) == 1,
+      "and it sticks, so passwd never opens in a loop")
+core.update_config(lambda c: c["setup"].__setitem__("password_known", False))
+hub.state["password"] = False
+hub.setup.step = hub.setup.steps().index("password"); hub.setup.refresh()
+tryit("setup: I already have one", hub.setup.already_have_password)
+check(hub.setup.steps()[hub.setup.step] == "gamemode" and hub.state["password"] is None,
+      "the password step moves on with 'I already have one'")
+core.update_config(lambda c: c["setup"].__setitem__("password_known", False))
+core.sudo_password_set = lambda: True
+hub.state["password"] = False
+tryit("password window closed", hub.password_window_closed)
+check(hub.state["password"] is True and hub._pw_term is None, "closing the password window looks again")
+hub._pw_term = os.getpid()
+check(hub.password_window_open(), "a running password window is noticed")
+hub._pw_term = 2 ** 22 + 12345
+tryit("password window gone", hub._watch_password_window)
+check(hub._pw_term is None, "the watcher notices the password window closed")
+tryit("set password window", _sp)
+hub._pw_term = None
+core.sudo_password_set, hub.set_password, gui.ask_item = _sps, _sp, _ai2
 _np6, _sub6, _ia = hub.needs_password, hub.runner.submit, hub.on_item_action
 _acts = []
 hub.needs_password = lambda: False

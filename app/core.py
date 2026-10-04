@@ -89,7 +89,7 @@ DEFAULT_CONFIG = {
     # Save time machine (Tools > Saves): a snapshot of a game's saves each time it starts
     "saves": {"time_machine": False, "keep": 5},
     # First-run setup (Home > Setup). Existing installs count as set up; a fresh install sets done False.
-    "setup": {"done": True, "checklist_hidden": False},
+    "setup": {"done": True, "checklist_hidden": False, "password_known": False},
     # Sleep guardian: USB devices the owner stopped from waking the handheld (sysfs DEVPATHs)
     "sleep": {"no_wake": []},
     "game_colors": {},
@@ -256,11 +256,19 @@ def battery_percent() -> str:
 
 
 def sudo_password_set() -> Optional[bool]:
+    """True when the user has a password, False only when passwd clearly says there is none (NP or locked),
+    None when it can't tell. Callers block only on False, and the owner can override that ("I already have
+    one", config setup.password_known), so a wrong answer here can never trap anyone in a loop."""
     rc, out = run_quiet(["passwd", "-S", USER])
-    if rc != 0 or not out:
+    parts = out.split() if rc == 0 and out else []
+    if len(parts) < 2 or parts[0] != USER:
         return None
-    parts = out.split()
-    return parts[1] == "P" if len(parts) >= 2 else None
+    if parts[1] == "P":
+        return True
+    if parts[1] in ("NP", "L", "LK"):
+        app_log("password", f"passwd -S says {parts[1]}")
+        return False
+    return None
 
 
 def installed_flatpaks() -> set:

@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.3
+
+- **Setup no longer sends you to change your password over and over.** Ally Hub now checks again after the
+  password window closes and before every install, so once a password is set it stops asking.
+- **New "I already have one" button** on the password step and in the password prompt, for when Ally Hub can't
+  tell that a password is already set. It's remembered.
+- Closing Ally Hub no longer closes the password window halfway through.
+
 ## 1.3.2
 
 - **First launch walks you through setup** (Home → Setup): sudo password, Game Mode library and background helper,

@@ -4098,14 +4098,24 @@ class SetupPage(QWidget):
         cv = self.card("lock-keyhole", "#f59e0b", "Sudo password",
                        "SteamOS ships without one. Ally Hub needs it to install Decky, plugins and system tweaks, "
                        "and asks for it only when a task needs it.")
+        if self.hub.state.get("password") is False:
+            self.hub.refresh_password()          # may have been set since the last look
         pw = self.hub.state.get("password") is not False
         self.status_row(cv, pw, "A password is set.", "No password yet.", "Set password", self.hub.set_password)
         if not pw:
-            cv.addWidget(label("A terminal opens to set it. Come back here and tap Check again.", "cardMeta", wrap=True))
+            cv.addWidget(label("A terminal opens to set it. This page updates when you close it. If it asks for "
+                               "your current password, you already have one: close it and tap I already have one.",
+                               "cardMeta", wrap=True))
             r = QHBoxLayout()
-            r.addWidget(button("Check again", lambda: (self.hub.refresh(), self.refresh())))
+            r.addWidget(button("Check again", lambda: (self.hub.refresh_password(), self.refresh())))
+            r.addWidget(button("I already have one", self.already_have_password))
             r.addStretch()
             cv.addLayout(r)
+
+    def already_have_password(self, *_args):
+        self.hub.assume_password()
+        self.hub.health.refresh_notices(self.hub.state)
+        self.next()
 
     def step_gamemode(self):
         cv = self.card("monitor-play", "#0ea5e9", "Game Mode",
@@ -5834,6 +5844,10 @@ class Hub(QMainWindow):
         avail = app.primaryScreen().availableGeometry()
         self.resize(min(1280, avail.width()), min(800, avail.height()))
         self.state = {"flatpaks": set(), "decky": {}, "password": None}
+        self._pw_term = None            # pid of the terminal running passwd, while it's open
+        self._pw_timer = QTimer(self)   # watches that pid: the terminal is detached so closing Ally Hub never kills it
+        self._pw_timer.setInterval(1000)
+        self._pw_timer.timeout.connect(self._watch_password_window)
         self.installing = set()
         self.runner = JobRunner(write_helpers())
         global _HUB
@@ -6161,7 +6175,7 @@ class Hub(QMainWindow):
     # ---- state ----
     def refresh(self):
         self.state = core.gather_state()
-        self.state["password"] = core.sudo_password_set()
+        self.refresh_password()
         if CATALOG_BY_ID["decky"].check(self.state):
             update_config(lambda c: c["guardian"].__setitem__("decky_expected", True))
         self.health.refresh_notices(self.state)
@@ -6211,7 +6225,8 @@ class Hub(QMainWindow):
         if code == 0 and "Traceback (most recent call last)" in full:      # crashed inside, exited 0 anyway
             core.queue_report("job-error", f"{key}: a script crashed but reported success", full[-20000:],
                               core._fingerprint("job-error", key), attachments=[("Full job output", full)])
-        self.state = core.gather_state() | {"password": self.state.get("password")}
+        self.state = core.gather_state()
+        self.refresh_password()            # always fresh: a stale "no password" reopened passwd in a loop
         item = CATALOG_BY_ID.get(key)
         name = item.name if item else ("Decky plugins" if key == "decky-safe" else key.split(":", 1)[-1])
         failed_msg = None
@@ -6270,13 +6285,57 @@ class Hub(QMainWindow):
         self.update_cards()
 
     # ---- actions ----
+    # ---- sudo password ----
+    def refresh_password(self):
+        """Look again (passwd -S is instant). "I already have one" wins over a "no" from passwd, so nobody is
+        sent to passwd over and over (the owner, 1.3.2: setup kept asking after the password was set)."""
+        found = core.sudo_password_set()
+        if found is False and (load_config().get("setup") or {}).get("password_known"):
+            found = None
+        self.state["password"] = found
+        return found
+
+    def assume_password(self):
+        update_config(lambda c: c.setdefault("setup", {}).__setitem__("password_known", True))
+        self.state["password"] = None
+        core.app_log("gui", "password: the owner says one is set")
+
+    def password_window_open(self) -> bool:
+        return bool(self._pw_term) and os.path.exists(f"/proc/{self._pw_term}")
+
+    def _watch_password_window(self):
+        if not self.password_window_open():
+            self.password_window_closed()
+
+    def password_window_closed(self, *_args):
+        self._pw_term = None
+        self._pw_timer.stop()
+        found = self.refresh_password()
+        core.app_log("gui", f"password window closed: {found}")
+        self.health.refresh_notices(self.state)
+        if self.current_page() is self.setup:
+            self.setup.refresh()
+        if found:
+            self.toast("Password is set ✔")
+
     def needs_password(self) -> bool:
+        """True (and helps) only when there's really no sudo password. Checked live every time, since it may
+        have been set in the terminal since the last look."""
         if self.state.get("password") is False:
-            msg_info(self, APP_NAME, "This needs a sudo password, and none is set yet.\n\n"
-                                                    "Ally Hub will open a terminal so you can create one.")
-            self.set_password()
+            self.refresh_password()
+        if self.state.get("password") is not False:
+            return False
+        if self.password_window_open():
+            self.toast("Finish in the password window first, then try again")
             return True
-        return False
+        choice, ok = ask_item(self, APP_NAME, "This needs a sudo password, and Ally Hub can't find one yet.",
+                              ["Create a password", "I already have one"])
+        if ok and choice == "I already have one":
+            self.assume_password()
+            return False
+        if ok:
+            self.set_password()
+        return True
 
     def on_item_action(self, iid: str, action: str):
         item = CATALOG_BY_ID[iid]
@@ -6435,12 +6494,27 @@ class Hub(QMainWindow):
 
     def set_password(self):
         term = shutil.which("konsole")
-        script = "passwd; echo; read -p 'Press Enter to close this window…' _"
-        if term:
-            QProcess.startDetached(term, ["-e", "bash", "-c", script])
-            self.toast("Set your password in the terminal, then press Refresh")
-        else:
+        if not term:
             msg_info(self, APP_NAME, "Open a terminal and run:  passwd")
+            return
+        if self.password_window_open():
+            self.toast("The password window is already open")
+            return
+        script = ('if [ "$(passwd -S 2>/dev/null | cut -d" " -f2)" = P ]; then '
+                  'echo "You already have a sudo password. Close this window to keep it,"; '
+                  'echo "or type it below to change it."; echo; fi; '
+                  "passwd; echo; read -p 'Press Enter to close this window…' _")
+        # Detached (closing Ally Hub must not kill it mid-passwd); --separate keeps Konsole from handing the
+        # window to a running instance and exiting at once. Ally Hub looks again once that pid is gone.
+        res = QProcess.startDetached(term, ["--separate", "-e", "bash", "-c", script])
+        ok, pid = res if isinstance(res, tuple) else (bool(res), 0)
+        if not ok:
+            msg_info(self, APP_NAME, "Couldn't open a terminal. Open Konsole and run:  passwd")
+            return
+        self._pw_term = int(pid or 0) or None
+        if self._pw_term:
+            self._pw_timer.start()
+        self.toast("Set your password in the terminal window")
 
     def return_to_game_mode(self):
         if self.runner.busy():

@@ -155,6 +155,11 @@ The GUI then opens Home → Setup (`SetupPage`, steps redraw inside one page: we
 helper, essentials the user picks, lighting (only with ring LEDs), favorites, reports (only when a report key is
 saved, i.e. the owner's device), done). Home shows "Finish setting up" (`core.setup_checklist`) until done or
 hidden. Existing installs default to `setup.done = True`. Keep every new first-time requirement in this flow.
+**Sudo password (1.3.3, the owner hit a loop: setup reopened passwd after the password was set):** never trust a
+cached `state["password"]`. `Hub.refresh_password` re-checks (`passwd -S`; only NP/L/LK count as "none", anything
+unclear is None and never blocks), `needs_password` re-checks before asking and offers "Create a password" or
+"I already have one" (`setup.password_known`, which overrides a "no"), `on_job_finished` re-checks. Konsole is
+started detached with `--separate` and its pid watched (`_pw_timer`), so closing Ally Hub never kills it.
 
 **Save time machine (Tools → Saves, `SavesPage`):** the agent's `tm_snapshot` runs Ludusavi when a game
 starts (`config["saves"]`: time_machine, keep) into `TM_DIR` with `--full-limit keep --differential-limit 0`,
