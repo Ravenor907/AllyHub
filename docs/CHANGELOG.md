@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.1
+
+- **Desktop Mode is no longer blown up.** The automatic interface size now takes the desktop's own display scaling
+  into account instead of adding to it, so Ally Hub looks the same size in Desktop Mode and Game Mode.
+
 ## 1.3.0
 
 - **Save time machine (Tools → Saves):** turn it on and Ally Hub snapshots a game's saves every time it starts,
