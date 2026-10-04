@@ -710,6 +710,56 @@ check(not (sa / "shadercache/200").exists() and not (sa / "downloading/300").exi
       and (sa / "shadercache/100").exists() and (core.TRASH_DIR / "files").exists() and not any((core.TRASH_DIR / "files").iterdir())
       and (_tools / "GE-Proton8-1").exists() and not (_tools / "GE-Proton9-27").exists(), "deletes what was picked and nothing else")
 check(core.storage_clean_cmd([Path("/")]) is None, "nothing safe picked -> no command")
+# ---- Game settings: launch options as switches, Proton picker, rescue ----
+check(core.launch_flags("PROTON_LOG=1 mangohud %command% -dx11") == {"log"}, "reads which switches are on")
+check(core.set_launch_flags("PROTON_LOG=1 mangohud %command% -dx11", {"fsr4", "lsfg"})
+      == "PROTON_FSR4_UPGRADE=1 mangohud ~/lsfg %command% -dx11", "switches go in, the owner's own options stay")
+check(core.set_launch_flags("-dx11", {"fsr4"}) == "PROTON_FSR4_UPGRADE=1 %command% -dx11", "plain game arguments get %command%")
+check(core.set_launch_flags("PROTON_FSR4_UPGRADE=1 %command%", set()) == "", "turning the last switch off leaves nothing behind")
+check(core.set_launch_flags("PROTON_FSR4_UPGRADE=1 %command% -skip", set()) == "%command% -skip", "game arguments survive")
+q = 'WINEDLLOVERRIDES="dxgi=n,b" %command%'
+check(core.set_launch_flags(q, {"deck"}) == 'SteamDeck=1 WINEDLLOVERRIDES="dxgi=n,b" %command%', "quoted values are kept whole")
+check(core.launch_flags(core.set_launch_flags("", set(core.GAME_TOGGLES))) == set(core.GAME_TOGGLES), "every switch round-trips")
+check(core.launch_flags(f"{HOME}/lsfg %command%") == {"lsfg"}, "frame generation is found by its full path too")
+t = core.parse_vdf_text('"a"\n{\n\t"b"\t\t"x \\"y\\""\n\t"c"\n\t{\n\t\t"d"\t\t"1"\n\t}\n}\n')
+check(t == {"a": {"b": 'x "y"', "c": {"d": "1"}}}, "reads Steam's text files: " + str(t))
+lc = Path(HOME) / ".steam/root/userdata" / core.steam_user_id3() / "config/localconfig.vdf"
+lc.write_text('"UserLocalConfigStore"\n{\n\t"Software"\n\t{\n\t\t"Valve"\n\t\t{\n\t\t\t"Steam"\n\t\t\t{\n\t\t\t\t"apps"\n\t\t\t\t{\n'
+              '\t\t\t\t\t"100"\n\t\t\t\t\t{\n\t\t\t\t\t\t"LastPlayed"\t\t"1700000000"\n\t\t\t\t\t\t"LaunchOptions"\t\t"PROTON_LOG=1 %command%"\n\t\t\t\t\t}\n'
+              '\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n}\n')
+(sa / "appmanifest_1493710.acf").write_text('"AppState"\n{\n\t"appid"\t\t"1493710"\n\t"name"\t\t"Proton Experimental"\n\t"installdir"\t\t"Proton - Experimental"\n}\n')
+gc = core.game_choices()
+check([g["name"] for g in gc][:1] == ["Big Game"] and "Proton Experimental" not in [g["name"] for g in gc]
+      and "Ally Hub" not in [g["name"] for g in gc] and any(g["kind"] == "shortcut" for g in gc),
+      "lists games (recently played first) and non-Steam tiles, not Proton or Ally Hub: " + str([g["name"] for g in gc]))
+_cef = core.cef_eval
+core.cef_eval = lambda js, timeout=20, port=None: None
+st = core.game_settings(100)
+check(st == {"options": "PROTON_LOG=1 %command%", "tool": "", "tools": [], "live": False}, "Steam's debugger off: reads the files, can't save: " + str(st))
+core.cef_eval = lambda js, timeout=20, port=None: json.dumps({"found": True, "options": "SteamDeck=1 %command%", "tool": "GE-Proton9-27",
+                                                              "tools": [["GE-Proton9-27", "GE-Proton9-27"], ["proton_experimental", "Proton Experimental"]]})
+st = core.game_settings(100)
+check(st["live"] and st["tool"] == "GE-Proton9-27" and ("proton_experimental", "Proton Experimental") in st["tools"], "reads live settings from Steam")
+sent = []
+core.cef_eval = lambda js, timeout=20, port=None: (sent.append(js), '["options", "tool"]')[1]
+done = core.apply_game_settings(100, 'A="b c" %command%', "proton_experimental")
+check(done == ["options", "tool"] and 'SetAppLaunchOptions(id, opts)' in sent[0] and '"A=\\"b c\\" %command%"' in sent[0]
+      and "SpecifyCompatTool" in sent[0], "hands launch options and Proton to Steam, safely quoted")
+core.apply_game_settings(100, "", None)
+check("const id = 100, opts = \"\", tool = null" in sent[-1], "Proton left alone when it didn't change")
+core.cef_eval = _cef
+cmd = core.reset_prefix_cmd(100)
+subprocess.run(["bash", "-c", cmd])
+bk = [d for d in (sa / "compatdata").iterdir() if d.name.startswith("100_allyhub_backup_")]
+check(not (sa / "compatdata/100").exists() and len(bk) == 1 and (bk[0] / "f.bin").exists(), "reset moves the Windows files aside, never deletes")
+core.cef_eval = lambda js, timeout=20, port=None: None
+items = core.storage_scan()["items"]
+core.cef_eval = _cef
+check(any(i["label"].startswith("Old Windows files of Big Game") and i["group"] == "check" for i in items),
+      "Storage offers the set-aside folder later, unticked")
+check(core.storage_clean_cmd([bk[0]]) and core.reset_prefix_cmd(424242) is None, "the backup can be cleared; no prefix, no reset")
+(Path(HOME) / "steam-100.log").write_text("err: missing d3dx9_43.dll\n")
+check("d3dx9_43" in core.proton_log(100) and core.proton_log(5) == "", "reads Proton's log for the report")
 # ---- reports: attachments, snapshot, instant upload, per-version repeats, manual reports ----
 posts = []
 def _fake_gh(method, path, data=None, **kw):
@@ -1446,6 +1496,33 @@ gui.ask_item = lambda *a, **k: ("Uninstall it in Steam", True)
 tryit("storage uninstall", lambda: hub.storage.game_menu(_sr["games"][0]))
 gui.ask_item = _ai
 tryit("storage job done", lambda: hub.on_job_finished("storage-clean", 0, ""))
+hub.go("Games")
+check(hub.current_page() is hub.games, "Game settings live under Tools")
+tryit("games refresh", hub.games.refresh)
+_gm = {"appid": 100, "name": "Big Game", "kind": "steam", "last": 1}
+tryit("games listed", lambda: hub.games._listed({"games": [_gm, {"appid": 7, "name": "Tile", "kind": "shortcut", "last": 0}] * 15, "live": False}))
+tryit("games show all", hub.games.expand)
+tryit("games open", lambda: hub.games.open_game(_gm))
+_gs = {"options": "PROTON_LOG=1 mangohud %command%", "tool": "", "tools": [("GE-Proton9-27", "GE-Proton9-27")], "live": True}
+tryit("games loaded", lambda: hub.games._loaded(_gm, _gs))
+check(hub.games.other == "mangohud %command%" and set(hub.games.checks) == set(core.GAME_TOGGLES), "one game's switches and its other options")
+_at = gui.ask_text
+gui.ask_text = lambda *a, **k: ("-dx11", True)
+tryit("games edit other", hub.games.edit_other)
+gui.ask_text = _at
+check(hub.games.other == "-dx11", "other options can be edited")
+tryit("games save", hub.games.save)
+tryit("games saved", lambda: hub.games._saved(_gm, "x", "", ["options"]))
+tryit("games save failed", lambda: hub.games._saved(_gm, "x", "", []))
+_ai = gui.ask_item
+for _c in ("Try a different Proton", "Turn on the troubleshooting log", "Send the log from the last launch",
+           "Reset its Windows files (the old ones are kept)", "Check the game's files in Steam"):
+    gui.ask_item = lambda *a, _c=_c, **k: (_c if "Game won't" in a[1] else "GE-Proton9-27", True)
+    tryit("games rescue " + _c, hub.games.rescue)
+gui.ask_item = _ai
+tryit("games back", hub.games.back)
+tryit("games load failed", lambda: (hub.games.open_game(_gm), hub.games._loaded(_gm, {"error": "x"})))
+tryit("game reset done", lambda: hub.on_job_finished("game-reset", 0, ""))
 hub.runner.submit = _sub2
 tryit("NSL card opens the page", lambda: hub.on_item_action("nonsteamlaunchers", "install"))
 check(hub.current_page() is hub.launchers, "the catalog card opens the themed page, not the script's windows")

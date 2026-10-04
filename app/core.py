@@ -2217,9 +2217,12 @@ def _vdf_shortcuts(data: bytes) -> list:
         if len(seg) < 11:
             continue
         ent = {"appid": int.from_bytes(seg[7:11], "little")}
-        for key, field_name in ((rb"appname", "name"), (rb"exe", "exe"), (rb"icon", "icon")):
+        for key, field_name in ((rb"appname", "name"), (rb"exe", "exe"), (rb"icon", "icon"),
+                                (rb"LaunchOptions", "options")):
             m = re.search(rb"\x01" + key + rb"\x00([^\x00]*)\x00", seg, re.I)
             ent[field_name] = m.group(1).decode("utf-8", "replace") if m else ""
+        m = re.search(rb"\x02LastPlayTime\x00(.{4})", seg, re.S | re.I)
+        ent["last"] = int.from_bytes(m.group(1), "little") if m else 0
         if ent["name"]:
             out.append(ent)
     return out
@@ -2931,6 +2934,10 @@ def storage_scan() -> dict:
             except OSError:
                 continue
             for d in entries:
+                bk = PREFIX_BACKUP.match(d.name) if kind == "compatdata" else None
+                if bk:
+                    leftovers.append(("backup", bk.group(1), d))
+                    continue
                 if not d.name.isdigit() or d.name == "0":
                     continue
                 if d.name in installed:
@@ -2966,13 +2973,18 @@ def storage_scan() -> dict:
         games.append(dict(a, shaders=sh, prefix=pf, total=a["size"] + sh + pf,
                           shader_paths=e["shaders"], lib=str(a["lib"]), dir=str(a["dir"])))
     games.sort(key=lambda g: g["total"], reverse=True)
-    names = app_names(sorted({aid for _k, aid, _p in leftovers}))
+    names = app_names(sorted({aid for _k, aid, _p in leftovers if aid not in installed}))
     items = []
     for kind, aid, p in leftovers:
         who = names.get(aid) or f"a removed game (app {aid})"
         size = sizes.get(str(p), 0)
         if kind == "shadercache":
             items.append({"label": f"Shader cache of {who}", "path": p, "size": size, "warn": "", "group": "safe"})
+        elif kind == "backup":
+            who = names.get(aid) or next((a["name"] for a in apps if a["appid"] == aid), f"app {aid}")
+            items.append({"label": f"Old Windows files of {who} (set aside by a reset)", "path": p, "size": size,
+                          "group": "check", "warn": "Holds that game's saves from before the reset, if it kept "
+                                                    "them there."})
         elif kind == "compatdata":
             items.append({"label": f"Windows files of {who}", "path": p, "size": size, "group": "check",
                           "warn": "Can hold save files for games without Steam Cloud. Keep it if you might "
@@ -3016,6 +3028,8 @@ def _storage_safe(p: str) -> bool:
         return True
     if path.parent in _tool_dirs() or path.parent in COMPAT_TOOL_DIRS:
         return path.name not in ("", ".", "..") and "/" not in path.name
+    if path.parent.name == "compatdata" and PREFIX_BACKUP.match(path.name):
+        return path.parent.parent in steam_library_dirs()
     if path.parent.name in ("shadercache", "compatdata", "downloading") and path.name.isdigit():
         return path.parent.parent in steam_library_dirs()
     return False
@@ -3034,6 +3048,226 @@ def storage_clean_cmd(paths: list) -> Optional[str]:
             parts.append(f"rm -rf -- {shlex.quote(p)}")
     parts.append("echo 'Space freed.'")
     return "; ".join(parts)
+
+
+
+# ==========================================================================
+# Game settings: per-game launch options as switches, the Proton picker, and "Game won't start?" help
+# Everything is applied through Steam itself (SetAppLaunchOptions / SpecifyCompatTool over its local
+# debugger), because Steam rewrites its own files and would undo direct edits.
+# ==========================================================================
+
+LSFG_WRAPPER = HOME / "lsfg"          # the launcher script decky-lsfg-vk puts in the home folder
+# key -> (title, what it does, kind, token). "env" tokens go before %command%, "wrap" tokens right before it.
+GAME_TOGGLES = {
+    "fsr4": ("FSR 4 upgrade", "Games with FSR 3.1 use AMD's sharper FSR 4 instead. Looks much better, costs a "
+             "few frames. Needs GE-Proton or Proton-CachyOS.", "env", "PROTON_FSR4_UPGRADE=1"),
+    "lsfg": ("Frame generation", "Lossless Scaling frame generation for this game. Set the multiplier in its "
+             "Decky plugin.", "wrap", "~/lsfg"),
+    "deck": ("Steam Deck mode", "Tells the game it runs on a handheld, so many use their handheld presets and "
+             "on-screen keyboard.", "env", "SteamDeck=1"),
+    "wined3d": ("Older game fix", "Draws with WineD3D instead of DXVK. Try it if an old DirectX 9 or 10 game "
+                "crashes or shows black screens.", "env", "PROTON_USE_WINED3D=1"),
+    "log": ("Troubleshooting log", "Proton writes a log of the next launch, which Ally Hub can attach to a "
+            "report.", "env", "PROTON_LOG=1"),
+}
+STEAM_TOOL_NAMES = re.compile(r"^(Proton|Steam Linux Runtime|Steamworks Common|SteamVR)", re.I)
+PREFIX_BACKUP = re.compile(r"^(\d+)_allyhub_backup_(\d+)$")
+
+_TOKEN = re.compile(r'''(?:[^\s"']+|"[^"]*"|'[^']*')+''')
+
+
+def _env_key(tok: str) -> str:
+    m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)=", tok)
+    return m.group(1) if m else ""
+
+
+def split_launch(opts: str) -> tuple:
+    """(tokens before %command%, text after it, had %command%). Without %command% Steam treats the whole
+    string as arguments for the game."""
+    opts = opts or ""
+    if "%command%" in opts:
+        pre, post = opts.split("%command%", 1)
+        return _TOKEN.findall(pre), post, True
+    return [], (" " + opts.strip()) if opts.strip() else "", False
+
+
+def launch_flags(opts: str) -> set:
+    pre, _post, _had = split_launch(opts)
+    on = set()
+    for key, (_t, _d, kind, tok) in GAME_TOGGLES.items():
+        if kind == "env" and tok in pre:
+            on.add(key)
+        elif kind == "wrap" and any(t in (tok, str(HOME / tok[2:])) for t in pre):
+            on.add(key)
+    return on
+
+
+def set_launch_flags(opts: str, keys: set) -> str:
+    """The same launch options with exactly these switches on. Everything else the owner typed is kept."""
+    pre, post, had = split_launch(opts)
+    ours_env = {_env_key(tok) for _t, _d, kind, tok in GAME_TOGGLES.values() if kind == "env"}
+    ours_wrap = {tok for _t, _d, kind, tok in GAME_TOGGLES.values() if kind == "wrap"}
+    ours_wrap |= {str(HOME / t[2:]) for t in ours_wrap}
+    keep = [t for t in pre if _env_key(t) not in ours_env and t not in ours_wrap]
+    env = [GAME_TOGGLES[k][3] for k in GAME_TOGGLES if k in keys and GAME_TOGGLES[k][2] == "env"]
+    wrap = [GAME_TOGGLES[k][3] for k in GAME_TOGGLES if k in keys and GAME_TOGGLES[k][2] == "wrap"]
+    lead = env + [t for t in keep if _env_key(t)] + [t for t in keep if not _env_key(t)] + wrap
+    if not lead:
+        if not post.strip():
+            return ""
+        return ("%command%" + post).strip() if had else post.strip()
+    return (" ".join(lead) + " %command%" + post).rstrip()
+
+
+def parse_vdf_text(text: str) -> dict:
+    """Steam's text VDF (localconfig.vdf, config.vdf) as nested dicts."""
+    root, stack, key = {}, [], None
+    cur = root
+    for m in re.finditer(r'"((?:[^"\\]|\\.)*)"|([{}])', text):
+        if m.group(2) == "{":
+            new = {}
+            cur[key if key is not None else ""] = new
+            stack.append(cur)
+            cur, key = new, None
+        elif m.group(2) == "}":
+            cur = stack.pop() if stack else root
+            key = None
+        else:
+            s = m.group(1).replace('\\"', '"').replace("\\\\", "\\")
+            if key is None:
+                key = s
+            else:
+                cur[key] = s
+                key = None
+    return root
+
+
+def _ci(d: dict, *path):
+    for p in path:
+        if not isinstance(d, dict):
+            return {}
+        d = next((v for k, v in d.items() if k.lower() == p.lower()), {})
+    return d
+
+
+def _local_apps() -> dict:
+    id3 = steam_user_id3()
+    if not id3:
+        return {}
+    text = read_text(HOME / ".steam/root/userdata" / id3 / "config/localconfig.vdf")
+    return _ci(parse_vdf_text(text), "UserLocalConfigStore", "Software", "Valve", "Steam", "apps") if text else {}
+
+
+def game_choices() -> list:
+    """Games to pick from, most recently played first: installed Steam games and non-Steam tiles."""
+    local = _local_apps()
+    out = []
+    for a in steam_apps():
+        if STEAM_TOOL_NAMES.match(a["name"]):
+            continue
+        try:
+            last = int((local.get(a["appid"]) or {}).get("LastPlayed") or 0)
+        except (ValueError, AttributeError):
+            last = 0
+        out.append({"appid": int(a["appid"]), "name": a["name"], "kind": "steam", "last": last})
+    f = shortcuts_vdf()
+    try:
+        tiles = _vdf_shortcuts(f.read_bytes()) if f and f.exists() else []
+    except OSError:
+        tiles = []
+    for s in tiles:
+        if not is_self_shortcut(s):
+            out.append({"appid": s["appid"], "name": s["name"], "kind": "shortcut", "last": s.get("last", 0)})
+    out.sort(key=lambda g: (-g["last"], g["name"].lower()))
+    return out
+
+
+CEF_GAME_JS = """(async () => {
+  const id = %d;
+  const details = await new Promise(res => {
+    let done = false, h = null;
+    const finish = d => { if (done) return; done = true; try { h && h.unregister(); } catch (e) {} res(d); };
+    try { h = SteamClient.Apps.RegisterForAppDetails(id, d => finish(d)); } catch (e) { finish(null); }
+    setTimeout(() => finish(null), 4000);
+  });
+  let tools = [];
+  try { tools = (await SteamClient.Apps.GetAvailableCompatTools(id)) || []; } catch (e) {}
+  return JSON.stringify({
+    found: !!details,
+    options: details ? (details.strLaunchOptions || "") : "",
+    tool: details ? (details.strCompatToolName || "") : "",
+    tools: tools.map(t => [t.strToolName, t.strDisplayName || t.strToolName])
+  });
+})()"""
+
+CEF_SET_GAME_JS = """(async () => {
+  const id = %d, opts = %s, tool = %s, done = [];
+  try { await SteamClient.Apps.SetAppLaunchOptions(id, opts); done.push('options'); } catch (e) {}
+  if (tool !== null) { try { await SteamClient.Apps.SpecifyCompatTool(id, tool); done.push('tool'); } catch (e) {} }
+  return JSON.stringify(done);
+})()"""
+
+
+def game_settings(appid: int, kind: str = "steam") -> dict:
+    """{"options", "tool", "tools": [(name, label)], "live"}. live False: Steam's debugger is off, so the
+    values come from Steam's files and can't be saved."""
+    v = cef_eval(CEF_GAME_JS % int(appid), timeout=15)
+    try:
+        d = json.loads(v) if v else None
+    except ValueError:
+        d = None
+    if isinstance(d, dict) and d.get("found"):
+        return {"options": d.get("options", ""), "tool": d.get("tool", ""),
+                "tools": [tuple(t) for t in d.get("tools") or [] if isinstance(t, list) and len(t) == 2],
+                "live": True}
+    if kind == "shortcut":
+        f = shortcuts_vdf()
+        try:
+            tiles = _vdf_shortcuts(f.read_bytes()) if f and f.exists() else []
+        except OSError:
+            tiles = []
+        opts = next((s.get("options", "") for s in tiles if s["appid"] == int(appid)), "")
+    else:
+        opts = (_local_apps().get(str(appid)) or {}).get("LaunchOptions", "")
+    cfg = parse_vdf_text(read_text(STEAM_ROOT / "config/config.vdf"))
+    entry = _ci(cfg, "InstallConfigStore", "Software", "Valve", "Steam", "CompatToolMapping", str(appid))
+    tool = entry.get("name", "") if isinstance(entry, dict) else ""
+    return {"options": opts if isinstance(opts, str) else "", "tool": tool, "tools": [], "live": False}
+
+
+def apply_game_settings(appid: int, options: str, tool: Optional[str] = None) -> list:
+    """Hand the new launch options (and Proton choice, "" = Steam's default) to Steam. Returns what took."""
+    v = cef_eval(CEF_SET_GAME_JS % (int(appid), json.dumps(options), json.dumps(tool)), timeout=20)
+    try:
+        return json.loads(v) if v else []
+    except ValueError:
+        return []
+
+
+def game_prefixes(appid) -> list:
+    return [lib / "compatdata" / str(appid) for lib in steam_library_dirs() if (lib / "compatdata" / str(appid)).is_dir()]
+
+
+def reset_prefix_cmd(appid) -> Optional[str]:
+    """Move the game's Windows files aside (never deleted): Steam builds fresh ones on the next launch, and
+    the old folder stays as a backup Storage can clear later."""
+    dirs = game_prefixes(appid)
+    if not dirs:
+        return None
+    stamp = time.strftime("%Y%m%d%H%M%S")
+    return "; ".join(f"mv -- {shlex.quote(str(d))} {shlex.quote(str(d.parent / f'{d.name}_allyhub_backup_{stamp}'))}"
+                     for d in dirs) + "; echo 'Done. Steam makes fresh Windows files on the next launch.'"
+
+
+def proton_log(appid) -> str:
+    """The tail of Proton's log for this game (PROTON_LOG=1 writes ~/steam-<appid>.log)."""
+    p = HOME / f"steam-{int(appid)}.log"
+    try:
+        data = p.read_bytes()
+    except OSError:
+        return ""
+    return data[-200000:].decode("utf-8", "replace")
 
 
 def decky_version(item, state: dict) -> str:

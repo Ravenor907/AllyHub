@@ -3496,6 +3496,269 @@ class LaunchersPage(QWidget):
 
 
 # ==========================================================================
+# Game settings: launch options as switches, the Proton picker, "Game won't start?"
+# The list and one game's settings are two views of this page (no extra windows), so every pick and
+# question below opens as the page's only pop-up.
+# ==========================================================================
+
+FSR4_TOOLS = re.compile(r"(?i)ge-proton|cachyos|proton-em")
+
+
+class GamesPage(QWidget):
+    LIST_SIZE = 20
+
+    def __init__(self, hub):
+        super().__init__()
+        self.hub = hub
+        self.games, self.live, self.show_all = [], True, False
+        self.game, self.settings = None, None
+        self.checks, self.other = {}, ""
+        self.v = page_shell(self, "Game settings",
+                            "Switches instead of typing launch options, the right Proton per game, and help when a "
+                            "game won't start. Changes apply the next time the game starts.")
+        self.body = QVBoxLayout()
+        self.body.setSpacing(12)
+        self.v.addLayout(self.body)
+        self.v.addStretch()
+
+    # ---- list view ----
+    def refresh(self):
+        if self.game is None:
+            self.body_message("Reading your library…")
+            BackgroundTask(self, lambda: {"games": core.game_choices(), "live": core.cef_eval("1") == 1},
+                           self._listed)
+
+    def body_message(self, text: str):
+        clear_layout(self.body)
+        self.body.addWidget(label(text, "cardDesc", wrap=True))
+
+    def _listed(self, r):
+        if self.game is not None:
+            return
+        if not isinstance(r, dict) or "error" in r:
+            self.body_message("Couldn't read your library. Try again in a moment.")
+            return
+        self.games, self.live = r.get("games") or [], bool(r.get("live"))
+        self.show_list()
+
+    def show_list(self):
+        self.game = None
+        clear_layout(self.body)
+        if not self.live:
+            self.body.addWidget(label("⚠ Steam's connection for plugins is off, so settings can be viewed but not "
+                                      "saved. It comes with Decky Loader (Install → Mods).", "cardWarn", wrap=True))
+        if not self.games:
+            self.body.addWidget(label("No games found yet.", "cardDesc"))
+            return
+        playing = str(core.agent_state().get("game") or "")
+        games = sorted(self.games, key=lambda g: str(g["appid"]) != playing)
+        shown = games if self.show_all else games[:self.LIST_SIZE]
+        card = card_frame()
+        cv = QVBoxLayout(card)
+        cv.setContentsMargins(20, 16, 20, 16)
+        cv.setSpacing(6)
+        for g in shown:
+            text = g["name"] + ("   ▶ playing now" if str(g["appid"]) == playing else "")
+            cv.addWidget(button(text, lambda _=False, g=g: self.open_game(g)))
+        self.body.addWidget(card)
+        if not self.show_all and len(games) > self.LIST_SIZE:
+            self.body.addWidget(button(f"Show all {len(games)} games", self.expand))
+        QTimer.singleShot(0, lambda: _focus_first(card))
+
+    def expand(self, *_args):
+        self.show_all = True
+        self.show_list()
+
+    # ---- one game ----
+    def open_game(self, g: dict):
+        self.game = g
+        self.body_message(f"Loading {g['name']}…")
+        BackgroundTask(self, lambda: core.game_settings(g["appid"], g["kind"]), lambda s: self._loaded(g, s))
+
+    def _loaded(self, g: dict, s):
+        if self.game is not g:
+            return
+        if not isinstance(s, dict) or "error" in s:
+            self.game = None
+            msg_warn(self, APP_NAME, f"Couldn't read the settings for {g['name']}.")
+            self.show_list()
+            return
+        self.settings = s
+        self.other = core.set_launch_flags(s.get("options", ""), set())
+        self.show_game()
+
+    def show_game(self):
+        g, s = self.game, self.settings
+        clear_layout(self.body)
+        top = QHBoxLayout()
+        top.addWidget(button("‹ All games", self.back))
+        top.addStretch()
+        self.body.addLayout(top)
+        self.body.addWidget(label(g["name"], "pageTitle"))
+        if not s.get("live"):
+            self.body.addWidget(label("⚠ Steam's connection for plugins is off, so these can't be saved right now. "
+                                      "It comes with Decky Loader.", "cardWarn", wrap=True))
+        flags = core.launch_flags(s.get("options", ""))
+        card, cv = titled_card("sparkles", "#8b5cf6", "Switches")
+        self.checks = {}
+        for key, (title, desc, _kind, _tok) in core.GAME_TOGGLES.items():
+            cb = QCheckBox(title)
+            cb.setChecked(key in flags)
+            note = desc
+            if key == "lsfg" and not core.LSFG_WRAPPER.exists() and key not in flags:
+                cb.setEnabled(False)
+                note += " Install Lossless Scaling Frame Gen under Install → Mods first."
+            cv.addWidget(cb)
+            cv.addWidget(label(note, "cardDesc", wrap=True))
+            self.checks[key] = cb
+        self.fsr_note = label("", "cardWarn", wrap=True)
+        cv.addWidget(self.fsr_note)
+        self.body.addWidget(card)
+
+        pcard, pv = titled_card("wine", "#f59e0b", "Proton",
+                                "Which compatibility tool runs this game. Steam's default is right for most games.")
+        self.tool_combo = QComboBox()
+        tools = [("", "Steam's default")] + [t for t in s.get("tools") or [] if t[0]]
+        cur = s.get("tool", "")
+        if cur and cur not in [t[0] for t in tools]:
+            tools.append((cur, cur))
+        for name, shown in tools:
+            self.tool_combo.addItem(shown, name)
+        self.tool_combo.setCurrentIndex(max(0, [t[0] for t in tools].index(cur) if cur in [t[0] for t in tools] else 0))
+        self.tool_combo.setEnabled(bool(s.get("live")) and len(tools) > 1)
+        self.tool_combo.currentIndexChanged.connect(self.update_fsr_note)
+        self.checks["fsr4"].toggled.connect(self.update_fsr_note)
+        pv.addWidget(self.tool_combo)
+        self.body.addWidget(pcard)
+
+        ocard, ov = titled_card("terminal", "#64748b", "Other launch options")
+        self.other_label = label(self.other or "None", "cardDesc", wrap=True)
+        ov.addWidget(self.other_label)
+        orow = QHBoxLayout()
+        orow.addWidget(button("Edit", self.edit_other))
+        orow.addStretch()
+        ov.addLayout(orow)
+        self.body.addWidget(ocard)
+
+        row = QHBoxLayout()
+        self.btn_save = button("Save", self.save, "primary")
+        self.btn_save.setEnabled(bool(s.get("live")))
+        row.addWidget(self.btn_save)
+        row.addWidget(button("Game won't start?", self.rescue))
+        row.addStretch()
+        self.body.addLayout(row)
+        self.update_fsr_note()
+        QTimer.singleShot(0, lambda: _focus_first(card))
+
+    def back(self, *_args):
+        self.game = None
+        if self.games:
+            self.show_list()
+        else:
+            self.refresh()
+
+    def chosen_tool(self) -> str:
+        d = self.tool_combo.currentData()
+        return d if isinstance(d, str) else ""
+
+    def update_fsr_note(self, *_args):
+        if not self.checks.get("fsr4"):
+            return
+        tool = self.chosen_tool() or (self.settings or {}).get("tool", "")
+        need = self.checks["fsr4"].isChecked() and not FSR4_TOOLS.search(tool or "")
+        self.fsr_note.setText("FSR 4 only works with GE-Proton or Proton-CachyOS: pick one under Proton." if need
+                              else "")
+        self.fsr_note.setVisible(bool(need))
+
+    def edit_other(self, *_args):
+        text, ok = ask_text(self, "Other launch options", "Anything else for this game's launch options:", self.other)
+        if ok:
+            self.other = core.set_launch_flags(text.strip(), set())
+            self.other_label.setText(self.other or "None")
+
+    def new_options(self) -> str:
+        keys = {k for k, cb in self.checks.items() if cb.isChecked()}
+        return core.set_launch_flags(self.other, keys)
+
+    def save(self, *_args):
+        g, s = self.game, self.settings
+        opts = self.new_options()
+        tool = self.chosen_tool()
+        tool_arg = tool if tool != s.get("tool", "") else None
+        self.btn_save.setEnabled(False)
+        self.btn_save.setText("Saving…")
+        BackgroundTask(self, lambda: core.apply_game_settings(g["appid"], opts, tool_arg),
+                       lambda done: self._saved(g, opts, tool, done))
+
+    def _saved(self, g: dict, opts: str, tool: str, done):
+        if self.game is g:
+            self.btn_save.setEnabled(True)
+            self.btn_save.setText("Save")
+        if isinstance(done, list) and "options" in done:
+            self.settings = dict(self.settings or {}, options=opts, tool=tool if "tool" in done else
+                                 (self.settings or {}).get("tool", ""))
+            self.hub.toast(f"Saved. Applies next time you start {g['name']}.")
+            core.app_log("games", f"{g['name']} ({g['appid']}): launch options set ({len(opts)} chars)")
+        else:
+            msg_warn(self, APP_NAME, "Steam didn't take the change. Make sure Decky Loader is running, then try "
+                                     "again.")
+
+    # ---- "Game won't start?" ----
+    def rescue(self, *_args):
+        g, s = self.game, self.settings
+        options = []
+        if s.get("live") and s.get("tools"):
+            options.append("Try a different Proton")
+        if s.get("live"):
+            options.append("Turn on the troubleshooting log")
+        if core.proton_log(g["appid"]):
+            options.append("Send the log from the last launch")
+        if core.game_prefixes(g["appid"]):
+            options.append("Reset its Windows files (the old ones are kept)")
+        if g["kind"] == "steam":
+            options.append("Check the game's files in Steam")
+        if not options:
+            msg_info(self, APP_NAME, "There's nothing to try from here for this game.")
+            return
+        choice, ok = ask_item(self, "Game won't start?", f"What should Ally Hub try for {g['name']}?", options)
+        if not ok:
+            return
+        if choice.startswith("Try a different"):
+            names = [t[1] for t in s["tools"] if t[0]]
+            pick, ok = ask_item(self, "Pick a Proton", "Newer builds fix most games. GE-Proton helps with videos "
+                                                       "and some launchers.", names)
+            if ok:
+                idx = self.tool_combo.findText(pick)
+                if idx >= 0:
+                    self.tool_combo.setCurrentIndex(idx)
+                self.save()
+        elif choice.startswith("Turn on"):
+            self.checks["log"].setChecked(True)
+            self.save()
+            msg_info(self, APP_NAME, f"Start {g['name']} once, then come back here and choose “Send the log from "
+                                     "the last launch”.")
+        elif choice.startswith("Send"):
+            core.queue_report("user", f"{g['name']} won't start"[:110],
+                              f"Reported from Game settings for {g['name']} (app {g['appid']}).\n"
+                              f"Launch options: {s.get('options', '')}\nProton: {s.get('tool') or 'default'}",
+                              core._fingerprint("game-log", str(g["appid"]), str(time.time())),
+                              attachments=[("Proton log", core.proton_log(g["appid"]))], force=True)
+            self.hub.send_reports_now()
+            self.hub.toast("Log sent. It'll be looked at in the next daily run.")
+        elif choice.startswith("Reset"):
+            if str(core.agent_state().get("game") or "") == str(g["appid"]):
+                msg_warn(self, APP_NAME, f"Quit {g['name']} first.")
+                return
+            if ask(self, f"Reset {g['name']}'s Windows files?\n\nSteam makes fresh ones on the next launch. The old "
+                         "folder is kept as a backup (saves inside it too), and Storage can clear it later."):
+                cmd = core.reset_prefix_cmd(g["appid"])
+                if cmd:
+                    self.hub.runner.submit(f"Resetting {g['name']}'s Windows files", cmd, "game-reset")
+        elif choice.startswith("Check"):
+            QDesktopServices.openUrl(QUrl(f"steam://validate/{g['appid']}"))
+
+
+# ==========================================================================
 # Storage saver: where the space went, and what Steam left behind
 # ==========================================================================
 
@@ -4781,7 +5044,7 @@ class Hub(QMainWindow):
         ("Install", [("Mods", "mods"), ("Plugin store", "store_page"), ("Apps", "apps"),
                      ("Launchers", "launchers")]),
         ("Customize", [("Lighting", "lighting_section"), ("Themes", "appearance"), ("Automation", "automation")]),
-        ("Tools", [("Performance", "performance"), ("Storage", "storage"), ("Doctor", "doctor"), ("Connect", "connect_page"),
+        ("Tools", [("Performance", "performance"), ("Games", "games"), ("Storage", "storage"), ("Doctor", "doctor"), ("Connect", "connect_page"),
                    ("System", "system")]),
         ("Settings", [("Updates", "updates"), ("Tweaks", "tweaks"), ("Activity", "activity")]),
     ]
@@ -4843,6 +5106,7 @@ class Hub(QMainWindow):
         self.performance = PerformancePage(self)
         self.launchers = LaunchersPage(self)
         self.storage = StoragePage(self)
+        self.games = GamesPage(self)
         self.doctor = DoctorPage(self)
         self.appearance = AppearancePage(self)
         self.updates = UpdatesPage(self)
@@ -5201,6 +5465,8 @@ class Hub(QMainWindow):
             self.launchers.refresh()
         elif key == "storage-clean":
             self.storage.job_done(code == 0)
+        elif key == "game-reset" and code == 0:
+            self.toast("Reset done. Start the game to make fresh Windows files.")
         if key == "decky" and CATALOG_BY_ID["decky"].check(self.state):
             alerts = core.read_json(core.DATA_DIR / "alerts.json", []) or []
             core.write_json(core.DATA_DIR / "alerts.json",
