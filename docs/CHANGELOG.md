@@ -2,22 +2,6 @@
 
 ## 1.2.2
 
-- **EmuDeck Remove** works even if EmuDeck was never set up (it removes the downloaded app instead of looking for
-  an uninstaller that isn't there yet).
-- **Interface and text size are remembered separately for Game Mode and Desktop Mode**, so switching between them
-  no longer means changing the size every time. Set each once under Customize → Themes.
-
-## 1.2.1
-
-- **Never stuck with a bad plugin:** every Decky plugin can be turned off and back on without uninstalling it, from
-  its card or from the new **Your plugins** list on the Plugin store page (it shows every plugin, however it was
-  installed). **Turn all plugins off** finds a troublemaker fast, and **Turn them back on** restores exactly those.
-- **Launchers:** **Hide from Steam** takes a launcher's tile out of your library but keeps it installed. Adding an
-  installed launcher back just restores its tile, no reinstall.
-- **EmuDeck** now has a Remove button. It runs EmuDeck's own uninstaller, which offers to back up your saves.
-
-## 1.2.0
-
 - **Quick Access panel:** Ally Hub in the ••• menu while you play. Battery and temperatures, switches for the game
   you're playing, Game Boost, lighting and a save backup button. Add it under Tools → Games (needs Decky Loader).
 - **Game settings (Tools → Games):** switches instead of typing launch options: FSR 4, frame generation, Steam Deck
@@ -25,6 +9,14 @@
   (try another Proton, reset its Windows files with a backup, send the log, check its files).
 - **Storage saver (Tools → Storage):** each game's real size including its shader cache and Windows files, and a
   one-tap cleanup of what Steam leaves behind. Anything that can hold saves starts unticked.
+- **Never stuck with a bad plugin:** every Decky plugin can be turned off and back on without uninstalling it, from
+  its card or the new **Your plugins** list on the Plugin store page. **Turn all plugins off** finds a troublemaker
+  fast, and **Turn them back on** restores exactly those.
+- **Launchers:** **Hide from Steam** keeps a launcher installed but takes its tile out of your library. Adding it
+  back just restores the tile.
+- **EmuDeck** now has a Remove button (EmuDeck's own uninstaller, or just its app if it was never set up).
+- **Interface and text size are remembered separately for Game Mode and Desktop Mode**, so switching no longer
+  means changing the size every time.
 
 ## 1.1.1
 
