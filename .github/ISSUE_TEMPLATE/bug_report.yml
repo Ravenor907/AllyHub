@@ -5,12 +5,12 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for taking the time! Tip: **Ally Doctor** (in the app) can fix many common problems on its own.
+        Thanks for taking the time! Tip: the **Checkup** on Ally Hub's Home tab can fix many common problems on its own.
   - type: input
     id: version
     attributes:
       label: Ally Hub version
-      description: Shown on Settings → Updates.
+      description: Shown on Settings → General.
       placeholder: "1.0.0"
     validations:
       required: true
@@ -35,5 +35,5 @@ body:
     id: log
     attributes:
       label: Activity log (optional)
-      description: Copy the relevant part of the Activity page. Remove anything personal first.
+      description: Copy the relevant part of the activity log (Settings → General → Activity log). Remove anything personal first.
       render: text

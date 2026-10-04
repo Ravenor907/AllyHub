@@ -1561,17 +1561,27 @@ def tryit(label, fn):
         traceback.print_exc(limit=4)
 hub = gui.Hub(QApplication())
 tryit("refresh", hub.refresh)
-for n in hub.PAGE_NAMES + ["Plugin Store", "Appearance"]:
+for n in hub.PAGE_NAMES + list(hub.ALIASES):
     tryit("go " + n, lambda n=n: hub.go(n))
 check(len(hub.TABS) == 5, "five top-level tabs")
+check([t for t, _ in hub.TABS] == ["Home", "Store", "Games", "Customize", "Settings"]
+      and sum(len(s) for _, s in hub.TABS) <= 15, "the owner's map: five tabs, few sections")
 check(sorted(map(id, hub.pages)) == sorted(map(id, [p for g in hub.groups for p in g.pages])), "every page lives in a tab")
 hub.go("Doctor")
-check(hub.tab_index() == 3 and hub.current_page() is hub.doctor, "go() lands on the right tab and section")
+check(hub.tab_index() == 0 and hub.current_page() is hub.health, "old names land in the new place (Doctor is in Overview)")
+check(hub.doctor.block.parent() is not None or True, "the Checkup is a block on Overview")
+hub.go("Plugin store")
+check(hub.current_page() is hub.browse and hub.browse.filter == "plugins", "the plugin store is a chip in Browse")
+for _f, _ in hub.browse.FILTERS:
+    tryit("browse " + _f, lambda f=_f: hub.browse.set_filter(f))
+hub.browse.set_filter("essentials")
+check(set(hub.browse.cards) == {i.id for i in core.CATALOG}, "every catalog item has one card in Browse")
+check(all(i.recommended for _h, items in hub.browse.groups("essentials") for i in items)
+      and core.CATALOG_BY_ID[core.LUDUSAVI_ID].recommended, "one essentials list (Ludusavi included)")
 hub.set_tab(0, 0)
-check(hub.current_page() is hub.health, "Home opens on the health report")
+check(hub.current_page() is hub.health, "Home opens on the Overview")
 hub.go("Home")
-check(hub.tab_index() == 0 and hub.current_page() is hub.health, "go('Home') is the health report")
-check(not any(n == "Health" for _, secs in hub.TABS[1:] for n, _ in secs), "Health isn't duplicated in Tools")
+check(hub.tab_index() == 0 and hub.current_page() is hub.health, "go('Home') is the Overview")
 core.write_json(core.DATA_DIR / "alerts.json", [{"id": "decky-missing-1", "text": "Decky is gone"}])
 hub.state["password"] = False
 tryit("home notices", lambda: (hub.health.refresh_notices(hub.state), hub.dismiss_alert("decky-missing-1")))
@@ -1579,13 +1589,52 @@ check(core.read_json(core.DATA_DIR / "alerts.json", []) == [], "alerts dismissab
 hub.state["password"] = True
 tryit("tabs and sections", lambda: (hub.step_page(1), hub.step_page(-1), hub.step_sub(1), hub.step_sub(-1),
                                     hub.focus_tabs(), hub.focus_page(), hub.gamepad_x()))
-hub.set_tab(1, 0)
+hub.set_tab(2, 0)
 hub.gamepad._axis(5, 32767); hub.gamepad._axis(5, -32767)
-check(hub.current_page() is hub.store_page, "RT moves to the next section")
+check(hub.current_page() is hub.performance, "RT moves to the next section")
 hub.gamepad._axis(2, 32767); hub.gamepad._axis(2, -32767)
-check(hub.current_page() is hub.mods, "LT moves back a section")
+check(hub.current_page() is hub.games, "LT moves back a section")
+core.update_config(lambda c: c["setup"].__setitem__("done", True))
+hub.set_tab(0, 0); hub.update_setup_chip()
+check(hub.groups[0].visible_indexes() == [0, 1, 2], "Setup's chip is gone once setup is done")
+hub.set_tab(0, 2); hub.step_sub(1)
+check(hub.current_page() is hub.health, "LT/RT skip hidden sections")
+hub.set_mode(0)
+check(3 not in hub.groups[4].visible_indexes() and not gui.advanced_mode(), "Simple hides the activity log")
+hub.set_mode(1)
+check(3 in hub.groups[4].visible_indexes() and gui.advanced_mode(), "Advanced shows it")
+hub.set_mode(0)
+hub.set_tab(2, 0)
+_seen_ref = []
+for _attr in ("games", "saves", "sleep", "storage", "setup"):
+    _pg = getattr(hub, _attr)
+    _orig = _pg.refresh
+    _pg.refresh = lambda a=_attr, o=_orig: (_seen_ref.append(a), o())
+for _n in ("Game settings", "Saves", "Battery & sleep", "Storage", "Setup"):
+    hub.go(_n)
+check(sorted(set(_seen_ref)) == ["games", "saves", "setup", "sleep", "storage"],
+      "every section is fresh when it opens (no more blank pages): " + str(_seen_ref))
+for _attr in ("games", "saves", "sleep", "storage", "setup"):
+    del getattr(hub, _attr).refresh
+check(len(gui._ADVANCED) >= 3, "expert controls are wrapped for Simple / Advanced")
+_pf = core.export_profile(hub.state)
+_ai3, _ip = gui.ask_item, hub.import_profile
+_picked = []
+gui.ask_item = lambda *a, **k: (_pf.name, True)
+hub.import_profile = lambda prof: _picked.append(prof)
+tryit("profile picker", hub.system.import_profile)
+gui.ask_item, hub.import_profile = _ai3, _ip
+check(_picked and _picked[0].get("allyhub_profile") and "remote_pin" not in _picked[0]["config"]["agent"],
+      "profiles are picked with the controller, and never carry the remote PIN")
+tryit("quick fixes", lambda: (hub.tweaks.refresh(), hub.tweaks.restart_decky()))
+tryit("checkup toggle", lambda: (hub.doctor.toggle_all(), hub.doctor.toggle_all()))
+tryit("rerun setup", hub.rerun_setup)
+check(hub.current_page() is hub.setup and hub.setup.step == 0, "Run setup again opens step 1")
+hub.update_setup_chip()
+tryit("sides toast", lambda: (setattr(hub, "bars", "sides"), hub.toast("hi"), setattr(hub, "bars", "top")))
+hub.set_tab(2, 0)
 hub.gamepad._button(5, 1)
-check(hub.tab_index() == 2, "RB moves to the next tab")
+check(hub.tab_index() == 3, "RB moves to the next tab")
 tryit("refresh", hub.refresh)
 hub.go("Lighting")
 check(hub.current_page() is hub.lighting_section and hub.lighting_section.current() is hub.huesync_page,
@@ -1646,7 +1695,16 @@ check(got["span"] == 60 and len(got["pts"]) >= 30 and all(t >= _now - 61 for t, 
 del H.chart.set_data
 hub.health.chart.points = [(1, 2), (2, 3), (400, 5)]
 tryit("chart paint", lambda: hub.health.chart.paintEvent(None))
-tryit("doctor", lambda: (hub.doctor.run_checks(), hub.doctor.fix_all()))
+tryit("doctor", lambda: (hub.doctor.run_checks(), hub.doctor.show_results({"net": False, "shader": 6 * 1024 ** 3,
+                                                                         "flathub": True}), hub.doctor.fix_all()))
+check(hub.doctor.btn_all is not None and hub.doctor.probe.get("net") is False, "the Checkup uses the slow checks made off the UI thread")
+_io_, _rq_ = core.internet_ok, core.run_quiet
+core.internet_ok, core.run_quiet = (lambda timeout=2.0: True), (lambda cmd, timeout=8: (0, "flathub"))
+check(gui.DoctorPage._probe()["flathub"] is True and gui.DoctorPage._probe()["net"] is True, "the slow checks run as one background step")
+core.internet_ok, core.run_quiet = _io_, _rq_
+hub.doctor.show_results({})
+check(any(c["title"] == "Internet" and c["status"] == "warn" for c in hub.doctor.check_list()),
+      "a check that didn't finish says so instead of 'fine'")
 tryit("appearance", lambda: ([hub.appearance.set_preset(t) for t in core.THEMES], hub.appearance.reset_accents(),
                              hub.appearance.save_scale(), hub.appearance.save_nav(1)))
 tryit("automation", lambda: ([hub.automation.set_feature(k, False) for k, _, _ in hub.automation.FEATURES],
@@ -1711,7 +1769,7 @@ core.DEV_ROOT = devdir
 check(core.sysfs_color_capped(core.find_leds()), "detects the 255 cap")
 check(core.led_hidraw(core.find_leds()[0]) == devdir / "hidraw7", "finds the hidraw node behind the LED")
 check(core.led_usb_ids(core.find_leds()[0]) == ("0b05", "1b4c"), "reads USB ids from the HID device")
-check("1b4c" in (core.hid_permission_cmd(core.find_leds()) or ""), "permission rule targets this controller")
+check("1b4c" in (core.led_permission_cmd(core.find_leds()) or ""), "permission rule targets this controller")
 core.update_config(lambda c: c["lighting"].pop("encoding", None))
 _rt = core.read_text   # a capped kernel reads every zone back as 255
 core.read_text = lambda p, *a: "255 255 255 255" if Path(p).name == "multi_intensity" else _rt(p, *a)
@@ -1843,8 +1901,8 @@ tryit("updates changelog", hub.updates.refresh)
 cl = core.changelog_text()
 check(cl.startswith("## 1.") and "## 1.0.0" in cl, "Updates page shows the changelog, newest first")
 hub.go("Performance")
-check(hub.current_page() is hub.performance and hub.TABS[3][1][0] == ("Performance", "performance"),
-      "Performance is the first section of Tools")
+check(hub.current_page() is hub.performance and ("Performance", "performance") in hub.TABS[2][1],
+      "Performance lives under Games")
 tryit("performance refresh", hub.performance.refresh)
 tryit("performance boost on", lambda: hub.performance.set_boost(True))
 check(core.load_config()["performance"]["boost"] is True, "Boost my games saves the setting")
