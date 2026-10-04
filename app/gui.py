@@ -3496,6 +3496,179 @@ class LaunchersPage(QWidget):
 
 
 # ==========================================================================
+# Storage saver: where the space went, and what Steam left behind
+# ==========================================================================
+
+class StoragePage(QWidget):
+    def __init__(self, hub):
+        super().__init__()
+        self.hub = hub
+        self.result = None
+        self.boxes = []
+        v = page_shell(self, "Storage",
+                       "See where your space went and clear what Steam leaves behind after you uninstall games. "
+                       "Nothing is deleted until you pick it.")
+        card, cv = titled_card("hard-drive", "#0ea5e9", "Your drives")
+        self.drive_box = QVBoxLayout()
+        self.drive_box.setSpacing(10)
+        cv.addLayout(self.drive_box)
+        row = QHBoxLayout()
+        self.btn_scan = button("Scan my storage", self.scan, "primary")
+        row.addWidget(self.btn_scan)
+        row.addStretch()
+        cv.addLayout(row)
+        self.status = label("", "cardMeta", wrap=True)
+        cv.addWidget(self.status)
+        v.addWidget(card)
+
+        v.addWidget(label("CAN GO", "section"))
+        ccard = card_frame()
+        self.clean_v = QVBoxLayout(ccard)
+        self.clean_v.setContentsMargins(20, 16, 20, 16)
+        self.clean_v.setSpacing(8)
+        self.clean_box = QVBoxLayout()
+        self.clean_box.setSpacing(6)
+        self.clean_v.addLayout(self.clean_box)
+        crow = QHBoxLayout()
+        self.btn_clean = button("Free up space", self.clean, "primary")
+        self.btn_clean.setEnabled(False)
+        crow.addWidget(self.btn_clean)
+        crow.addStretch()
+        self.clean_v.addLayout(crow)
+        v.addWidget(ccard)
+
+        v.addWidget(label("BIGGEST GAMES", "section"))
+        gcard = card_frame()
+        self.games_box = QVBoxLayout(gcard)
+        self.games_box.setContentsMargins(20, 16, 20, 16)
+        self.games_box.setSpacing(6)
+        v.addWidget(gcard)
+        v.addStretch()
+        self.show_result(None)
+
+    def refresh(self):
+        self.show_drives([])
+
+    def show_drives(self, drives: list):
+        clear_layout(self.drive_box)
+        if not drives:
+            drives = []
+            for p in [core.HOME] + core.sd_cards():
+                try:
+                    u = shutil.disk_usage(p)
+                    drives.append({"label": "SD card" if str(p).startswith("/run/media/") else "Internal storage",
+                                   "free": u.free, "total": u.total})
+                except OSError:
+                    pass
+        for d in drives:
+            self.drive_box.addWidget(label(f"{d['label']}: {core.human_size(d['free'])} free of "
+                                           f"{core.human_size(d['total'])}", "cardDesc"))
+            bar = QProgressBar()
+            bar.setRange(0, 1000)
+            bar.setValue(int(1000 * (1 - d["free"] / d["total"])) if d["total"] else 0)
+            bar.setTextVisible(False)
+            bar.setFixedHeight(10)
+            self.drive_box.addWidget(bar)
+
+    def scan(self, *_args):
+        self.btn_scan.setEnabled(False)
+        self.btn_scan.setText("Scanning… (up to a minute)")
+        BackgroundTask(self, core.storage_scan, self._scanned)
+
+    def _scanned(self, res):
+        self.btn_scan.setEnabled(True)
+        self.btn_scan.setText("Scan again")
+        if not isinstance(res, dict) or "error" in res:
+            self.status.setText("The scan didn't finish. Try again in a moment.")
+            if isinstance(res, dict) and res.get("error"):
+                core.app_log("storage", f"scan failed: {res.get('error')}")
+            return
+        self.show_result(res)
+
+    def show_result(self, res):
+        self.result = res
+        clear_layout(self.clean_box)
+        clear_layout(self.games_box)
+        self.boxes = []
+        if res is None:
+            self.status.setText("Tap Scan to see what's using your space.")
+            self.clean_box.addWidget(label("Scan first to find leftovers.", "cardDesc"))
+            self.games_box.addWidget(label("Scan first to see your biggest games.", "cardDesc"))
+            self.update_clean_button()
+            return
+        self.show_drives(res.get("drives") or [])
+        items = res.get("items") or []
+        total = sum(i["size"] for i in items)
+        self.status.setText(f"Found {core.human_size(total)} of leftovers." if items else "No leftovers found. All clean ✔")
+        if not items:
+            self.clean_box.addWidget(label("Nothing left behind by removed games.", "cardDesc"))
+        for it in items:
+            cb = QCheckBox(f"{it['label']}  ({core.human_size(it['size'])})")
+            cb.setChecked(it.get("group") == "safe")
+            cb.toggled.connect(self.update_clean_button)
+            self.clean_box.addWidget(cb)
+            if it.get("warn"):
+                self.clean_box.addWidget(label("⚠ " + it["warn"], "cardWarn", wrap=True))
+            self.boxes.append((cb, it))
+        games = res.get("games") or []
+        if not games:
+            self.games_box.addWidget(label("No installed Steam games found.", "cardDesc"))
+        for g in games[:25]:
+            b = button(f"{g['name']}   {core.human_size(g['total'])}", lambda _=False, g=g: self.game_menu(g))
+            self.games_box.addWidget(b)
+            parts = [f"Game {core.human_size(g['size'])}"]
+            if g.get("prefix"):
+                parts.append(f"Windows files {core.human_size(g['prefix'])}")
+            if g.get("shaders"):
+                parts.append(f"Shader cache {core.human_size(g['shaders'])}")
+            if str(g.get("lib", "")).startswith("/run/media/"):
+                parts.append("on the SD card")
+            self.games_box.addWidget(label(" · ".join(parts), "cardMeta"))
+        self.update_clean_button()
+
+    def picked(self) -> list:
+        return [it for cb, it in self.boxes if cb.isChecked()]
+
+    def update_clean_button(self, *_):
+        chosen = self.picked()
+        size = sum(i["size"] for i in chosen)
+        self.btn_clean.setText(f"Free up {core.human_size(size)}" if chosen else "Free up space")
+        self.btn_clean.setEnabled(bool(chosen))
+
+    def clean(self, *_args):
+        chosen = self.picked()
+        cmd = core.storage_clean_cmd([i["path"] for i in chosen])
+        if not cmd:
+            return
+        size = core.human_size(sum(i["size"] for i in chosen))
+        risky = [i for i in chosen if i.get("group") != "safe"]
+        msg = f"Delete {len(chosen)} item(s) and free {size}?"
+        if risky:
+            msg += "\n\nThis includes files that can hold saves:\n" + "\n".join(f"• {i['label']}" for i in risky)
+        if ask(self, msg):
+            self.hub.runner.submit(f"Freeing up {size}", cmd, "storage-clean")
+
+    def game_menu(self, g: dict):
+        options = []
+        if g.get("shaders") and g.get("shader_paths"):
+            options.append(f"Clear its shader cache ({core.human_size(g['shaders'])}, rebuilds while you play)")
+        options.append("Uninstall it in Steam")
+        choice, ok = ask_item(self, g["name"], f"{g['name']} uses {core.human_size(g['total'])}.", options)
+        if not ok:
+            return
+        if choice.startswith("Clear"):
+            cmd = core.storage_clean_cmd(g["shader_paths"])
+            if cmd:
+                self.hub.runner.submit(f"Clearing {g['name']}'s shader cache", cmd, "storage-clean")
+        else:
+            QDesktopServices.openUrl(QUrl(f"steam://uninstall/{g['appid']}"))
+
+    def job_done(self, ok: bool):
+        self.hub.toast("Space freed ✔" if ok else "Some files couldn't be deleted. See Settings → Activity.")
+        self.scan()
+
+
+# ==========================================================================
 # Performance: Game Boost and the Tune-up, ideas from CachyOS and Bazzite
 # ==========================================================================
 
@@ -4608,7 +4781,7 @@ class Hub(QMainWindow):
         ("Install", [("Mods", "mods"), ("Plugin store", "store_page"), ("Apps", "apps"),
                      ("Launchers", "launchers")]),
         ("Customize", [("Lighting", "lighting_section"), ("Themes", "appearance"), ("Automation", "automation")]),
-        ("Tools", [("Performance", "performance"), ("Doctor", "doctor"), ("Connect", "connect_page"),
+        ("Tools", [("Performance", "performance"), ("Storage", "storage"), ("Doctor", "doctor"), ("Connect", "connect_page"),
                    ("System", "system")]),
         ("Settings", [("Updates", "updates"), ("Tweaks", "tweaks"), ("Activity", "activity")]),
     ]
@@ -4669,6 +4842,7 @@ class Hub(QMainWindow):
         self.system = SystemPage(self)
         self.performance = PerformancePage(self)
         self.launchers = LaunchersPage(self)
+        self.storage = StoragePage(self)
         self.doctor = DoctorPage(self)
         self.appearance = AppearancePage(self)
         self.updates = UpdatesPage(self)
@@ -5025,6 +5199,8 @@ class Hub(QMainWindow):
             self.launchers.uninstall_done(code == 0)
         elif key == "nsl-clean":
             self.launchers.refresh()
+        elif key == "storage-clean":
+            self.storage.job_done(code == 0)
         if key == "decky" and CATALOG_BY_ID["decky"].check(self.state):
             alerts = core.read_json(core.DATA_DIR / "alerts.json", []) or []
             core.write_json(core.DATA_DIR / "alerts.json",

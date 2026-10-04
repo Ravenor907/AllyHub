@@ -663,6 +663,53 @@ hdr = core._recv_exact(b, 2); n = int.from_bytes(core._recv_exact(b, 8), "big");
 body = core._recv_exact(b, n)
 check(bytes(c ^ m[i % 4] for i, c in enumerate(body)).decode() == _payload, "big messages to Steam are masked correctly")
 a.close(); b.close()
+# ---- Storage saver: leftovers of removed games, unused Proton builds, the trash ----
+sa = core.STEAM_ROOT / "steamapps"
+(sa / "appmanifest_100.acf").write_text('"AppState"\n{\n\t"appid"\t\t"100"\n\t"name"\t\t"Big Game"\n\t"installdir"\t\t"Big Game"\n\t"SizeOnDisk"\t\t"5000000"\n}\n')
+(sa / "common/Big Game").mkdir(parents=True, exist_ok=True)
+def _blob(p, n):
+    p.mkdir(parents=True, exist_ok=True); (p / "f.bin").write_bytes(b"x" * n)
+_blob(sa / "shadercache/100", 3000); _blob(sa / "compatdata/100", 4000)
+_blob(sa / "shadercache/200", 2000); _blob(sa / "compatdata/200/pfx", 6000)
+_blob(sa / "compatdata/3123456789", 1000)          # the Battle.net tile from the art tests: in use
+_blob(sa / "downloading/300", 7000); _blob(sa / "downloading/100", 500)
+_tools = core.STEAM_ROOT / "compatibilitytools.d"
+for n in ("GE-Proton8-1", "GE-Proton9-27", "GE-Proton99-1"):
+    _blob(_tools / n, 1500)
+(core.STEAM_ROOT / "config").mkdir(parents=True, exist_ok=True)
+(core.STEAM_ROOT / "config/config.vdf").write_text('"InstallConfigStore"\n{\n\t"Software"\n\t{\n\t\t"Valve"\n\t\t{\n\t\t\t"Steam"\n\t\t\t{\n'
+    '\t\t\t\t"CompatToolMapping"\n\t\t\t\t{\n\t\t\t\t\t"555"\n\t\t\t\t\t{\n\t\t\t\t\t\t"name"\t\t"GE-Proton8-1"\n\t\t\t\t\t}\n\t\t\t\t}\n'
+    '\t\t\t\t"Other"\t\t"1"\n\t\t\t}\n\t\t}\n\t}\n}\n')
+_blob(core.TRASH_DIR / "files", 2 * 1024 * 1024)
+check(core.compat_tools_in_use() == {"GE-Proton8-1"}, "knows which Proton builds Steam uses")
+check([a["name"] for a in core.steam_apps()] == ["Big Game"], "lists installed Steam games from their manifests")
+_cef = core.cef_eval
+core.cef_eval = lambda js, timeout=20, port=None: '[["200","Old Game"],["300",""]]' if "GetAppOverviewByAppID" in js else None
+res = core.storage_scan()
+core.cef_eval = _cef
+labels = {i["label"]: i for i in res["items"]}
+g = res["games"][0]
+check(g["name"] == "Big Game" and g["shaders"] == 3000 and g["prefix"] == 4000 and g["total"] == 5007000,
+      "each game's size includes its shader cache and Windows files: " + str({k: g[k] for k in ("shaders", "prefix", "total")}))
+check(labels.get("Shader cache of Old Game", {}).get("group") == "safe", "a removed game's shader cache can go (named from Steam's library)")
+check(labels.get("Windows files of Old Game", {}).get("group") == "check" and labels["Windows files of Old Game"]["warn"],
+      "a removed game's Windows files start unticked: they can hold saves")
+check(labels.get("Unfinished download of a removed game (app 300)", {}).get("group") == "safe", "abandoned downloads can go")
+check(labels.get("Unfinished update for Big Game", {}).get("group") == "check", "a pending update is offered but unticked")
+check(not any("3123456789" in str(i["path"]) for i in res["items"]), "non-Steam tiles' files are never leftovers")
+check(any(i["label"].startswith("GE-Proton9-27") for i in res["items"]) and
+      not any(i["label"].startswith(("GE-Proton8-1", "GE-Proton99-1")) for i in res["items"]),
+      "offers only Proton builds no game uses, and keeps the newest of each kind")
+check("Desktop Mode trash" in labels and res["drives"] and res["drives"][0]["label"] == "Internal storage", "trash and drives")
+paths = [i["path"] for i in res["items"]]
+cmd = core.storage_clean_cmd(paths + [sa / "common/Big Game", Path("/etc"), Path(HOME) / "Documents", sa / "compatdata/../.."])
+check(cmd and "Big Game" not in cmd and "/etc" not in cmd and "Documents" not in cmd and "/.." not in cmd,
+      "cleanup only ever deletes the kinds of folders the scan offers, never a game: " + str(cmd)[:200])
+subprocess.run(["bash", "-c", cmd])
+check(not (sa / "shadercache/200").exists() and not (sa / "downloading/300").exists() and (sa / "common/Big Game").exists()
+      and (sa / "shadercache/100").exists() and (core.TRASH_DIR / "files").exists() and not any((core.TRASH_DIR / "files").iterdir())
+      and (_tools / "GE-Proton8-1").exists() and not (_tools / "GE-Proton9-27").exists(), "deletes what was picked and nothing else")
+check(core.storage_clean_cmd([Path("/")]) is None, "nothing safe picked -> no command")
 # ---- reports: attachments, snapshot, instant upload, per-version repeats, manual reports ----
 posts = []
 def _fake_gh(method, path, data=None, **kw):
@@ -1379,6 +1426,26 @@ core.queue_report = _qr
 gui.rasterize_svg = _ras
 tryit("own picture", hub.launchers.own_picture)
 check(hub.launchers.btn_art.isEnabled is not None, "the art button exists")
+hub.go("Storage")
+check(hub.current_page() is hub.storage, "Storage lives under Tools")
+tryit("storage refresh", hub.storage.refresh)
+tryit("storage scan", hub.storage.scan)
+_sr = {"drives": [{"label": "Internal storage", "free": 10, "total": 100}],
+       "items": [{"label": "Shader cache of X", "path": Path(HOME) / "a", "size": 5, "warn": "", "group": "safe"},
+                 {"label": "Windows files of X", "path": Path(HOME) / "b", "size": 7, "warn": "saves", "group": "check"}],
+       "games": [{"appid": "100", "name": "Big Game", "size": 9, "shaders": 3, "prefix": 4, "total": 16,
+                  "shader_paths": [Path(HOME) / "c"], "lib": "/run/media/sd", "dir": ""}]}
+tryit("storage scanned", lambda: hub.storage._scanned(_sr))
+check(len(hub.storage.boxes) == 2, "lists every leftover with a checkbox")
+tryit("storage clean", hub.storage.clean)
+tryit("storage scan failed", lambda: hub.storage._scanned({"error": "boom"}))
+_ai = gui.ask_item
+gui.ask_item = lambda *a, **k: ("Clear its shader cache", True)
+tryit("storage game menu", lambda: hub.storage.game_menu(_sr["games"][0]))
+gui.ask_item = lambda *a, **k: ("Uninstall it in Steam", True)
+tryit("storage uninstall", lambda: hub.storage.game_menu(_sr["games"][0]))
+gui.ask_item = _ai
+tryit("storage job done", lambda: hub.on_job_finished("storage-clean", 0, ""))
 hub.runner.submit = _sub2
 tryit("NSL card opens the page", lambda: hub.on_item_action("nonsteamlaunchers", "install"))
 check(hub.current_page() is hub.launchers, "the catalog card opens the themed page, not the script's windows")

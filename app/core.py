@@ -2821,6 +2821,221 @@ def nsl_clean_cmd(paths: list) -> Optional[str]:
     parts.append("systemctl --user daemon-reload 2>/dev/null; echo 'Leftovers cleaned.'")
     return "; ".join(parts)
 
+
+# ==========================================================================
+# Storage saver: where the space went, and what can safely go
+# Steam never cleans up after uninstalled games: their shader caches, Proton prefixes and half-finished
+# downloads stay behind. Everything here is inside the home folder or a library on the SD card (both the
+# user's own), so no password. Prefixes can hold save files, so they start unticked.
+# ==========================================================================
+
+TRASH_DIR = HOME / ".local/share/Trash"
+
+
+def _acf_values(text: str) -> dict:
+    return {k.lower(): v for k, v in re.findall(r'^\s*"(\w+)"\s+"([^"]*)"', text, re.M)}
+
+
+def steam_apps() -> list:
+    """Installed Steam apps across every library: [{appid, name, lib, dir, size}] (size from Steam's manifest)."""
+    out, seen = [], set()
+    for lib in steam_library_dirs():
+        for f in sorted(lib.glob("appmanifest_*.acf")):
+            v = _acf_values(read_text(f))
+            aid = v.get("appid") or f.stem.split("_", 1)[-1]
+            if not aid.isdigit() or aid in seen:
+                continue
+            seen.add(aid)
+            try:
+                size = int(v.get("sizeondisk") or 0)
+            except ValueError:
+                size = 0
+            out.append({"appid": aid, "name": v.get("name") or f"App {aid}", "lib": lib,
+                        "dir": lib / "common" / v.get("installdir", ""), "size": size})
+    return out
+
+
+def shortcut_ids() -> set:
+    """Ids of every non-Steam tile (their prefixes and shader caches are in use, not leftovers)."""
+    ids = set()
+    for f in (HOME / ".steam/root/userdata").glob("*/config/shortcuts.vdf"):
+        try:
+            ids.update(str(s["appid"]) for s in _vdf_shortcuts(f.read_bytes()))
+        except OSError:
+            pass
+    return ids
+
+
+def compat_tools_in_use() -> set:
+    """Proton builds Steam is set to use (per game, or as the default "0" entry) in config.vdf."""
+    text = read_text(STEAM_ROOT / "config/config.vdf") or read_text(HOME / ".steam/root/config/config.vdf")
+    m = re.search(r'"CompatToolMapping"\s*\{(.*?)\n\s*\}\s*\n\s*"', text, re.S | re.I)
+    block = m.group(1) if m else ""
+    return {n for n in re.findall(r'"name"\s+"([^"]*)"', block, re.I) if n}
+
+
+def _du_many(paths: list) -> dict:
+    """Sizes of many folders with one du call: {path string: bytes}."""
+    paths = [str(p) for p in paths if Path(p).exists()]
+    out = {}
+    for i in range(0, len(paths), 200):
+        rc, text = run_quiet(["du", "-sb", "--", *paths[i:i + 200]], timeout=300)
+        for line in (text or "").splitlines():
+            size, _, path = line.partition("\t")
+            if size.isdigit():
+                out[path] = int(size)
+    return out
+
+
+def _proton_family(name: str) -> str:
+    """"GE-Proton10-25" -> "ge-proton", "proton-cachyos-10.0-..." -> "proton-cachyos"."""
+    return re.split(r"\d", name.lower(), maxsplit=1)[0].rstrip("-_. ") or name.lower()
+
+
+def _tool_dirs() -> list:
+    out = []
+    for d in COMPAT_TOOL_DIRS:
+        try:
+            r = d.resolve()
+        except OSError:
+            continue
+        if r not in out:
+            out.append(r)
+    return out
+
+
+def app_names(ids: list) -> dict:
+    """Names of games that are no longer installed, from Steam's own library (needs its debugger)."""
+    if not ids:
+        return {}
+    v = cef_eval("JSON.stringify(%s.map(i=>[i,(window.appStore?.GetAppOverviewByAppID(+i)||{}).display_name||'']))"
+                 % json.dumps([str(i) for i in ids]))
+    try:
+        return {str(k): n for k, n in json.loads(v) if n} if v else {}
+    except (ValueError, TypeError):
+        return {}
+
+
+def storage_scan() -> dict:
+    """{"games": [...biggest first], "items": [...cleanup candidates], "drives": [...]}."""
+    libs = steam_library_dirs()
+    apps = steam_apps()
+    installed = {a["appid"] for a in apps}
+    shorts = shortcut_ids()
+    extra = {}                                   # appid -> {"shaders": [paths], "prefix": [paths]}
+    leftovers = []                               # (kind, appid, path)
+    for lib in libs:
+        for kind in ("shadercache", "compatdata"):
+            try:
+                entries = [d for d in (lib / kind).iterdir() if d.is_dir()]
+            except OSError:
+                continue
+            for d in entries:
+                if not d.name.isdigit() or d.name == "0":
+                    continue
+                if d.name in installed:
+                    extra.setdefault(d.name, {"shaders": [], "prefix": []})[
+                        "shaders" if kind == "shadercache" else "prefix"].append(d)
+                elif d.name not in shorts:
+                    leftovers.append((kind, d.name, d))
+        try:
+            for d in (lib / "downloading").iterdir():
+                if d.is_dir() and d.name.isdigit():
+                    leftovers.append(("downloading", d.name, d))
+        except OSError:
+            pass
+    in_use = compat_tools_in_use()
+    protons = []
+    for root in _tool_dirs():
+        try:
+            protons += [p for p in root.iterdir() if p.is_dir() and not p.is_symlink()]
+        except OSError:
+            pass
+    newest = {}
+    for p in protons:
+        fam = _proton_family(p.name)
+        if fam not in newest or parse_version(p.name) > parse_version(newest[fam].name):
+            newest[fam] = p
+    sizes = _du_many([p for e in extra.values() for ps in e.values() for p in ps] +
+                     [p for _k, _a, p in leftovers] + protons + [TRASH_DIR])
+    games = []
+    for a in apps:
+        e = extra.get(a["appid"], {"shaders": [], "prefix": []})
+        sh = sum(sizes.get(str(p), 0) for p in e["shaders"])
+        pf = sum(sizes.get(str(p), 0) for p in e["prefix"])
+        games.append(dict(a, shaders=sh, prefix=pf, total=a["size"] + sh + pf,
+                          shader_paths=e["shaders"], lib=str(a["lib"]), dir=str(a["dir"])))
+    games.sort(key=lambda g: g["total"], reverse=True)
+    names = app_names(sorted({aid for _k, aid, _p in leftovers}))
+    items = []
+    for kind, aid, p in leftovers:
+        who = names.get(aid) or f"a removed game (app {aid})"
+        size = sizes.get(str(p), 0)
+        if kind == "shadercache":
+            items.append({"label": f"Shader cache of {who}", "path": p, "size": size, "warn": "", "group": "safe"})
+        elif kind == "compatdata":
+            items.append({"label": f"Windows files of {who}", "path": p, "size": size, "group": "check",
+                          "warn": "Can hold save files for games without Steam Cloud. Keep it if you might "
+                                  "reinstall."})
+        elif aid in installed:
+            items.append({"label": f"Unfinished update for {names.get(aid) or next((a['name'] for a in apps if a['appid'] == aid), aid)}",
+                          "path": p, "size": size, "group": "check",
+                          "warn": "Steam downloads it again next time it updates the game."})
+        else:
+            items.append({"label": f"Unfinished download of {who}", "path": p, "size": size, "warn": "",
+                          "group": "safe"})
+    for p in protons:
+        if p.name not in in_use and newest.get(_proton_family(p.name)) is not p:
+            items.append({"label": f"{p.name} (no game uses it, a newer one is installed)", "path": p,
+                          "size": sizes.get(str(p), 0), "warn": "", "group": "safe"})
+    trash = sizes.get(str(TRASH_DIR), 0)
+    if trash > 1024 * 1024:
+        items.append({"label": "Desktop Mode trash", "path": TRASH_DIR, "size": trash, "warn": "", "group": "safe"})
+    items = [i for i in items if i["size"] > 0]
+    items.sort(key=lambda i: (i["group"] != "safe", -i["size"]))
+    drives, devs = [], set()
+    for p in [HOME] + [lib for lib in libs if lib.exists()]:
+        try:
+            dev = os.stat(p).st_dev
+            if dev in devs:
+                continue
+            devs.add(dev)
+            u = shutil.disk_usage(p)
+            sd = str(p).startswith("/run/media/")
+            drives.append({"label": "SD card" if sd else "Internal storage", "path": str(p),
+                           "free": u.free, "total": u.total})
+        except OSError:
+            pass
+    return {"games": games, "items": items, "drives": drives}
+
+
+def _storage_safe(p: str) -> bool:
+    """Only the kinds of folders storage_scan offers: never a game, never anything outside these."""
+    path = Path(p)
+    if path == TRASH_DIR:
+        return True
+    if path.parent in _tool_dirs() or path.parent in COMPAT_TOOL_DIRS:
+        return path.name not in ("", ".", "..") and "/" not in path.name
+    if path.parent.name in ("shadercache", "compatdata", "downloading") and path.name.isdigit():
+        return path.parent.parent in steam_library_dirs()
+    return False
+
+
+def storage_clean_cmd(paths: list) -> Optional[str]:
+    safe = [str(p) for p in paths if _storage_safe(str(p))]
+    if not safe:
+        return None
+    parts = []
+    for p in safe:
+        if Path(p) == TRASH_DIR:
+            parts.append(f"rm -rf -- {shlex.quote(p + '/files')} {shlex.quote(p + '/info')} "
+                         f"{shlex.quote(p + '/expunged')}; mkdir -p {shlex.quote(p + '/files')} {shlex.quote(p + '/info')}")
+        else:
+            parts.append(f"rm -rf -- {shlex.quote(p)}")
+    parts.append("echo 'Space freed.'")
+    return "; ".join(parts)
+
+
 def decky_version(item, state: dict) -> str:
     """Installed version of a catalog Decky plugin, shown on its card ("" when unknown)."""
     if not getattr(item, "decky_names", None):
