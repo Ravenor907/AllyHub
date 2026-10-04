@@ -1972,7 +1972,8 @@ class LightingPage(QWidget):
                 self.colors_row.addWidget(button("− Remove", self.remove_color))
             self.colors_row.addStretch()
         spiral = e["type"] == "spiral"
-        self.colors_wrap.setVisible(bool(hi) and not (spiral and e.get("rainbow")))
+        # the chip's spiral is rainbow only, so color pickers would do nothing there
+        self.colors_wrap.setVisible(bool(hi) and not (spiral and (e.get("rainbow") or e.get("engine") == "chip")))
         self.spiral_wrap.setVisible(spiral)
         self.spiral_note.setVisible(spiral)
         if spiral:
@@ -6737,6 +6738,10 @@ def main():
         os.execv(sys.executable, [sys.executable, str(core.APP_DIR / "allyhub.py")] + sys.argv[1:])
     sys.excepthook = _excepthook
     core.app_log("gui", f"start {VERSION} ({'game mode' if GAMEMODE else 'desktop'})")
+    try:
+        core.migrate_chip_spiral()
+    except Exception:
+        pass
     global _SCALE_SET_BY_US
     if "QT_SCALE_FACTOR" not in os.environ:
         os.environ["QT_SCALE_FACTOR"] = str(core.ui_scale(load_config()["theme"], GAMEMODE))

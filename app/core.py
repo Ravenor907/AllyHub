@@ -98,7 +98,8 @@ DEFAULT_CONFIG = {
     "guardian": {"decky_expected": False, "last_build": ""},
     # controller "huesync": Ally Hub leaves the rings alone and points to the HueSync Decky plugin
     # (the owner's call). "allyhub" turns on the Lighting studio and agent lighting.
-    "lighting": {"effect": None, "fps": 20, "on_battery": "slow", "custom": {}, "controller": "huesync"},
+    "lighting": {"effect": None, "fps": 20, "on_battery": "slow", "custom": {}, "controller": "huesync",
+                 "chip_spiral": False},     # True once saved spirals were moved to the chip's spiral (1.3.4)
     # channel "stable" follows main; "testing" also follows the testing branch (the owner's test builds)
     "updates": {"repo": REPO_DEFAULT, "auto_update": True, "reporting": False, "channel": "stable"},
     # Tools > Performance. The tune-up itself lives in /etc, so only Game Boost's switch is here.
@@ -1279,6 +1280,30 @@ def hid_streams(method: str = None) -> bool:
     return hid_method(method).get("commit") == "first"
 
 
+def migrate_chip_spiral() -> bool:
+    """Once: saved spirals (current effect, saved effects, per-game colors) switch to the chip's own spiral, the
+    new default. Afterwards a spiral set to Ally Hub's style stays that way. True when something changed."""
+    if load_config()["lighting"].get("chip_spiral"):
+        return False
+    changed = []
+
+    def fix(e):
+        if isinstance(e, dict) and e.get("type") == "spiral" and e.get("engine") != "chip":
+            e["engine"] = "chip"
+            changed.append(1)
+
+    def run(c):
+        L = c["lighting"]
+        fix(L.get("effect"))
+        for e in (L.get("custom") or {}).values():
+            fix(e)
+        for e in (c.get("game_colors") or {}).values():
+            fix(e)
+        L["chip_spiral"] = True
+    update_config(run)
+    return bool(changed)
+
+
 def uses_chip_effect(effect: dict) -> bool:
     e = normalize_effect(effect)
     return e["type"] == "spiral" and e.get("engine") == "chip"
@@ -1432,9 +1457,10 @@ SPIRAL_OPTIONS = {
     "direction": (("cw", "Clockwise"), ("ccw", "Counter-clockwise")),
     "layout": (("linked", "Flows across both sticks"), ("mirror", "Sticks mirror each other"),
                ("same", "Both sticks match")),
-    "engine": (("smooth", "Smooth (Ally Hub)"), ("chip", "Built-in chip spiral")),
+    # chip first and default (the owner, 1.3.4: the streamed spiral looks choppy, the chip's own is smooth)
+    "engine": (("chip", "Built-in chip spiral (smoothest)"), ("smooth", "Ally Hub (your colors)")),
 }
-SPIRAL_DEFAULTS = {"direction": "cw", "layout": "linked", "engine": "smooth", "rainbow": True}
+SPIRAL_DEFAULTS = {"direction": "cw", "layout": "linked", "engine": "chip", "rainbow": True}
 # The rings have four lighting zones: the left and right half of each stick (ASUS zone order)
 ZONE_POS = ((0, 0), (0, 1), (1, 0), (1, 1))     # (stick, half) for left_left, left_right, right_left, right_right
 DEFAULT_COLORS = ["#e11d48", "#8b5cf6", "#06b6d4", "#22c55e"]
@@ -1451,9 +1477,9 @@ PRESETS = {
     "Heartbeat":  {"type": "pulse", "colors": ["#ff0022"], "speed": 1.0},
     "Starlight":  {"type": "twinkle", "colors": ["#2b1d8f", "#ffffff"], "speed": 1.0, "param": 0.5},
     "RGB Spiral": {"type": "spiral", "colors": [], "speed": 1.0, "param": 0.75, "rainbow": True,
-                   "direction": "cw", "layout": "linked", "engine": "smooth"},
+                   "direction": "cw", "layout": "linked", "engine": "chip"},
     "Neon Vortex": {"type": "spiral", "colors": ["#ff2a6d", "#05d9e8", "#a855f7"], "speed": 1.4,
-                    "param": 1.0, "rainbow": False, "direction": "ccw", "layout": "mirror", "engine": "smooth"},
+                    "param": 1.0, "rainbow": False, "direction": "ccw", "layout": "mirror", "engine": "chip"},
 }
 
 
@@ -1562,7 +1588,7 @@ def effect_frame(e: dict, t: float) -> tuple:
 
 
 def _spiral_color(e: dict, u: float) -> tuple:
-    if e.get("rainbow"):
+    if e.get("rainbow") or e.get("engine") == "chip":         # the chip's spiral is rainbow only: preview it so
         r, g, b = colorsys.hsv_to_rgb(u % 1.0, 1.0, 1.0)
         return (r * 255, g * 255, b * 255)
     cols = [hex_to_rgb(c) for c in e["colors"]]
@@ -1584,7 +1610,7 @@ def zone_frames(e: dict, t: float) -> list:
     out = []
     for stick, half in ZONE_POS:
         d, pos = turn, half / 2
-        if e["layout"] == "linked":
+        if e["layout"] == "linked" or e["engine"] == "chip":     # the chip ignores the stick layout
             pos = (stick * 2 + half) / 4
         elif e["layout"] == "mirror" and stick == 1:
             d, pos = -turn, (1 - half) / 2

@@ -967,6 +967,7 @@ class Agent:
             log("rolled back a bad update, restarting on the previous version")
             sys.exit(1)
         self.safely("boost", self.recover_boost)
+        self.safely("lighting", core.migrate_chip_spiral)
         while not self.stopping:
             self.reload_config()
             if not self.cfg["agent"].get("enabled", True):

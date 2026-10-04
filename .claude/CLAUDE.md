@@ -52,6 +52,9 @@ sanctioned per-frame HID path; chip-mode effects (non-streaming methods, or Spir
 `engine == "chip"`) go once per change. The GUI never writes the chip while the agent runs (two writers
 interleave packets and mix zones). Spiral keys: direction, layout (linked/mirror/same), engine
 (smooth/chip), rainbow; only spiral effects carry them.
+Since 1.3.4 `engine` defaults to "chip" (the owner: the streamed spiral looks choppy, not premium);
+`migrate_chip_spiral` moved saved spirals over once (`lighting.chip_spiral`). The chip's spiral is rainbow only, so
+previews show rainbow and the color pickers hide for it.
 
 Lighting: effects are plain dicts (`type`, `colors`, `speed`, `param`) rendered by `core.render_effect(effect, t)`,
 used by both the GUI previews and the agent's `Animator` thread (writes frames to the LEDs at the configured fps).
