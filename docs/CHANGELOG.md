@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.2.2
+
+- **Quick Access panel:** Ally Hub in the ••• menu while you play. Battery and temperatures, switches for the game
+  you're playing, Game Boost, lighting and a save backup button. Add it under Tools → Games (needs Decky Loader).
+- **Game settings (Tools → Games):** switches instead of typing launch options: FSR 4, frame generation, Steam Deck
+  mode, an older-game fix and a troubleshooting log. Pick the Proton per game, and get help when a game won't start
+  (try another Proton, reset its Windows files with a backup, send the log, check its files).
+- **Storage saver (Tools → Storage):** each game's real size including its shader cache and Windows files, and a
+  one-tap cleanup of what Steam leaves behind. Anything that can hold saves starts unticked.
+- **Never stuck with a bad plugin:** every Decky plugin can be turned off and back on without uninstalling it, from
+  its card or the new **Your plugins** list on the Plugin store page. **Turn all plugins off** finds a troublemaker
+  fast, and **Turn them back on** restores exactly those.
+- **Launchers:** **Hide from Steam** keeps a launcher installed but takes its tile out of your library. Adding it
+  back just restores the tile.
+- **EmuDeck** now has a Remove button (EmuDeck's own uninstaller, or just its app if it was never set up).
+- **Interface and text size are remembered separately for Game Mode and Desktop Mode**, so switching no longer
+  means changing the size every time.
+
 ## 1.1.1
 
 - **Update channel:** Settings → Updates can now follow **Testing** builds to get new features before everyone
