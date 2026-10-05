@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.4.1
+
+- **Automatic rollback now covers the app window, not just the background helper.** Each part has to prove itself
+  after an update. If Ally Hub's window fails to start 3 times (or crashes in its first two minutes), the update rolls
+  back on its own and the helper restarts on the old version. Before, a working helper ended the check early, which
+  is why 1.4.0 didn't roll back for you.
+- Opening Ally Hub again while it's already open, or closing it quickly, no longer counts as a failed start.
+
 ## 1.4.0
 
 A new, simpler layout: everything is where you'd look for it, and the expert controls stay out of the way until you
