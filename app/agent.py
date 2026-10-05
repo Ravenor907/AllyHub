@@ -1012,7 +1012,7 @@ class Agent:
                     log(f"error reports: {sent} sent, {failed} failed")
             up = self.cfg.get("updates", {})
             st = core.update_state()
-            if (up.get("auto_update") and not self.game and not core.on_probation()
+            if (up.get("auto_update") and not self.game and not core.on_probation("agent")
                     and now - st.get("last_check", 0) > core.UPDATE_INTERVAL_S and self.updated_to is None):
                 res = core.check_for_update()
                 if res["available"]:
@@ -1046,6 +1046,7 @@ class Agent:
             sys.exit(1)
         self.safely("boost", self.recover_boost)
         self.safely("privacy", core.secure_data_dir)
+        self.safely("menu", core.tidy_menu_entry)
         while not self.stopping:
             self.reload_config()
             if not self.cfg["agent"].get("enabled", True):
@@ -1099,8 +1100,8 @@ def main():
         pass
     except Exception:
         core.report_exception("agent")
-        if core.on_probation():
-            core.rollback("agent crashed right after updating")
+        if core.on_probation("agent"):
+            core.rollback("the background helper crashed right after updating")
         raise
     finally:
         if agent:

@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.6
+
+- **Automatic rollback now covers the app window, not just the background helper.** After an update, each part has
+  to prove itself. If Ally Hub's window fails to start 3 times (or crashes in its first two minutes), the update rolls
+  back on its own and the helper restarts on the old version.
+- Opening Ally Hub again while it's already open, or closing it quickly, no longer counts as a failed start.
+- **Ally Hub shows up once in the app menu**, under Utilities, instead of under Games, Utilities and System. Existing
+  installs are fixed automatically.
+
 ## 1.3.5
 
 Safety and privacy fixes from a security review:
