@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.7.7
+
+- **Controller glyphs card (Customize > Theme):** installs CSS Loader from the plugin store (and Decky first if
+  needed), then shows the two steps for the Handheld Controller Glyphs theme and a check once it's installed.
+  Remove CSS Loader is one tap.
+
 ## 1.3.7.6
 
 - Removed the Xbox Ally X controller layout card that 1.3.7.5 added. It's not coming back.
