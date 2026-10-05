@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.4.2
+
+- **Ally Hub Testing Rescue:** on the Testing channel there's now an entry in the app menu (and on the desktop,
+  next to Ally Hub) that can roll back the test build, go back to Stable or uninstall, even when Ally Hub won't open.
+  It goes away when you switch back to Stable.
+- **Clear warning before switching to Testing**, and a reminder on Settings → General while you're on it: test
+  builds can break, here's the way out, and if all else fails, uninstall and reinstall.
+- From now on only the developer decides when something goes to Stable.
+
 ## 1.4.1
 
 - **Automatic rollback now covers the app window, not just the background helper.** Each part has to prove itself

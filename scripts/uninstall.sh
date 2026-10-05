@@ -13,7 +13,8 @@ if [ -f "$APP_DIR/core.py" ] && command -v python3 >/dev/null; then
     python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import core; sys.exit(0 if core.cef_remove_shortcuts(["Ally Hub"]) else 1)' \
         "$APP_DIR" 2>/dev/null && TILE=1
 fi
-rm -rf "$APP_DIR" "$HOME/.config/allyhub"
+rm -rf "$APP_DIR" "$HOME/.config/allyhub" "$HOME/.local/share/allyhub-rescue"
+rm -f "$HOME/.local/share/applications/allyhub-testing-rescue.desktop" "$HOME/Desktop/allyhub-testing-rescue.desktop"
 rm -f "$HOME/.config/environment.d/90-allyhub-games.conf"
 rm -f "$HOME/.local/bin/allyhub" \
       "$HOME/.local/share/applications/allyhub.desktop" \

@@ -312,13 +312,22 @@ Make sure these exist (create them if missing): `auto-report`, `bug`, `suggestio
 - `main` is **Stable**: what every device gets. `testing` is the owner's **test builds**: devices whose
   Settings → General → Update channel is Testing (`config["updates"]["channel"]`) install whichever of main and
   testing has the higher build (`check_for_update`, `UPDATE_CHANNELS`). Stable devices never look at testing.
-- New features go to `testing` first. They reach `main` only when the owner says to ship them.
+- **Only the owner ships (2026-10-05, after 1.4.0 broke the window on test devices).** Nothing is pushed to
+  `main` unless the owner says to ship it, in his own words, for that build: in the conversation or in a comment
+  he wrote. No scheduled ships, no "Stable tomorrow" timers, no daily-run releases to main, not even for a bug that
+  is on Stable. Every change, fixes included, goes to `testing`; then say it's ready and wait for his call.
+  Stable has to be rock solid: it only ever gets builds the owner has run on his own device.
 - The testing branch's VERSION must always be **higher** than main's (e.g. main 6.1.4, testing 6.2.x), or test
   devices fall back to main. Never delete the `testing` branch: test devices follow it.
-- Reports from test builds carry the `testing` label and "(testing)" in the version line. Fix those on `testing`
-  (bump its patch number) unless the bug is also on main.
-- Any fix released on `main` is merged into `testing` the same run (keep testing's higher VERSION, merge the
-  changelog entries).
+- Reports from test builds carry the `testing` label and "(testing)" in the version line. Fix every report on
+  `testing` (bump its patch number). A bug that's also on Stable: fix it on testing and tell the owner it's ready
+  to ship; never patch `main` yourself.
+- When the owner does ship, any fix that went straight to `main` is merged into `testing` the same run (keep
+  testing's higher VERSION, merge the changelog entries).
+- **Testing Rescue** (`sync_testing_rescue`): on the Testing channel Ally Hub keeps an "Ally Hub Testing Rescue"
+  entry in the app menu (and on the desktop next to Ally Hub's icon). It's a standalone bash script outside the app
+  folder (`RESCUE_DIR`), so it works when a test build won't open: roll back to the previous version (marked bad),
+  go back to Stable (reinstall from main, settings kept) or uninstall. Keep it working without importing app code.
 - Shipping ("ship it"): merge testing into main (main takes testing's VERSION and changelog), push main, then
   reset testing to main so the next test cycle starts from the release.
 - Leaving Testing: the Updates page offers the stable build (`install_update(..., allow_older=True)`, only ever
@@ -339,7 +348,8 @@ Make sure these exist (create them if missing): `auto-report`, `bug`, `suggestio
 3. Run `python3 tests/run_tests.py`. **Never push if any section fails.** Fix or revert first.
 4. Release: bump the patch number in `VERSION` (6.0.0 → 6.0.1; minor bump only for real features),
    add a `## x.y.z` section at the top of `CHANGELOG.md` written for the owner (plain language, one line per fix),
-   update the version in the README badge (`badge/version-X.Y.Z-`), commit, push to `main`.
+   update the version in the README badge (`badge/version-X.Y.Z-`), commit, push to **`testing`** (never
+   `main`: only the owner ships, see "Branches and update channels").
    **Commit titles stay short** (`Release 1.0.3`, `Fix lighting after sleep`): GitHub shows the latest
    title next to every file and folder on the repo page, and the owner wants that page minimal. Details go in
    the commit body.

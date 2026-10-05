@@ -5709,6 +5709,14 @@ class UpdatesPage(QWidget):
         v = page_shell(self, "Updates & Reports",
                        "Ally Hub keeps itself up to date and can report its own errors so they get "
                        "fixed automatically.")
+        self.testing_banner = QFrame()            # the owner's call: test builds come with a clear way out
+        self.testing_banner.setObjectName("banner")
+        tbl = QHBoxLayout(self.testing_banner)
+        tbl.setContentsMargins(20, 12, 20, 12)
+        tbl.addWidget(label("You're on test builds. If one ever won't open, use \"Ally Hub Testing Rescue\" in "
+                            "your app menu (Desktop Mode) to roll back or go back to Stable. If that fails too, "
+                            "uninstall Ally Hub and install it again.", "bannerText", wrap=True), 1)
+        v.addWidget(self.testing_banner)
         self.rollback_banner = QFrame()
         self.rollback_banner.setObjectName("banner")
         rbl = QHBoxLayout(self.rollback_banner)
@@ -5812,6 +5820,7 @@ class UpdatesPage(QWidget):
         cfg = load_config()
         st = core.update_state()
         self.key_guide.setVisible(not core.github_token())
+        self.testing_banner.setVisible(core.update_channel(cfg) == "testing")
         disk_ver = core.read_text(core.APP_DIR / "VERSION") or VERSION
         self.ver_label.setText(f"Version {core.version_label()}")
         self.channel.blockSignals(True)
@@ -5896,13 +5905,20 @@ class UpdatesPage(QWidget):
             return
         if want == "testing" and not ask(
                 self, "Switch to test builds?\n\nYou get new features before everyone else, straight from the "
-                      "developer's testing branch. They can have bugs: problems are reported (if reports are on) "
-                      "and fixed there, and Ally Hub still rolls back a version that won't start.\n\nYou can "
-                      "switch back to Stable any time."):
+                      "developer's testing branch. Test builds can break, even badly enough that Ally Hub won't "
+                      "open.\n\nIf that happens: open \"Ally Hub Testing Rescue\" from your app menu (Desktop "
+                      "Mode) to roll back, go back to Stable, or uninstall. If even that doesn't work, uninstall "
+                      "Ally Hub and install it again with the command from the README.\n\nYou can switch back to "
+                      "Stable any time."):
             self.refresh()
             return
         update_config(lambda c: c["updates"].__setitem__("channel", want))
         core.app_log("update", f"channel: {want}")
+        try:
+            core.sync_testing_rescue()            # the rescue entry exists only on Testing
+        except Exception:
+            core.report_exception("gui-rescue")
+        self.refresh()
         self.btn_check.setEnabled(False)
         BackgroundTask(self, core.check_for_update, lambda r: self._channel_checked(want, r))
 
@@ -7100,6 +7116,10 @@ def single_instance(app) -> bool:
 def main():
     sys.excepthook = _excepthook
     core.app_log("gui", f"start {VERSION} ({'game mode' if GAMEMODE else 'desktop'})")
+    try:
+        core.sync_testing_rescue()
+    except Exception:
+        pass
     for fix in (core.migrate_chip_spiral, core.secure_data_dir):
         try:
             fix()
