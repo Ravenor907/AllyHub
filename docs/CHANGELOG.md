@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.7
+
+- Ally Hub now understands test build numbers like 1.3.7.1, so the Testing channel can deliver test builds again.
+  Nothing else changes on Stable.
+
 ## 1.3.6
 
 - **Automatic rollback now covers the app window, not just the background helper.** After an update, each part has
