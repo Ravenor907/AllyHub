@@ -288,7 +288,16 @@ Make sure these exist (create them if missing): `auto-report`, `bug`, `suggestio
 - `main` is **Stable**: what every device gets. `testing` is the owner's **test builds**: devices whose
   Settings → Updates → Update channel is Testing (`config["updates"]["channel"]`) install whichever of main and
   testing has the higher build (`check_for_update`, `UPDATE_CHANNELS`). Stable devices never look at testing.
-- New features go to `testing` first. They reach `main` only when the owner says to ship them.
+- **Numbering (the owner's memo, from 1.3.6):** a test build is the current Stable version plus a revision:
+  Stable 1.3.6 → testing 1.3.6.1, 1.3.6.2, … (builds 6.3.6.1, …; `VERSION_RE`, `parse_version` takes 4 parts).
+  Every testing release bumps only the revision. **At most 10 revisions** (`MAX_TEST_REVISIONS`, a test enforces it):
+  needing more means a cycle carries too much, so keep each one laser focused. When the owner ships, Stable gets the
+  next x.y.z (patch, or minor for real features) and testing restarts at that version's .1.
+- **Only the owner ships (2026-10-05, after 1.4.0 broke the window on test devices).** Nothing is pushed to
+  `main` unless the owner says to ship it, in his own words, for that build: in the conversation or in a comment
+  he wrote. No scheduled ships, no "Stable tomorrow" timers, no daily-run releases to main, not even for a bug that
+  is on Stable. Every change, fixes included, goes to `testing`; then say it's ready and wait for his call.
+  Stable has to be rock solid: it only ever gets builds the owner has run on his own device.
 - The testing branch's VERSION must always be **higher** than main's (e.g. main 6.1.4, testing 6.2.x), or test
   devices fall back to main. Never delete the `testing` branch: test devices follow it.
 - Reports from test builds carry the `testing` label and "(testing)" in the version line. Fix those on `testing`

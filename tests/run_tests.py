@@ -64,10 +64,12 @@ for sh in ("install.sh", "uninstall.sh"):
     check(subprocess.run(["bash", "-n", os.path.join({root!r}, "scripts", sh)]).returncode == 0, "bash -n " + sh)
 v = open(os.path.join({root!r}, "VERSION")).read().strip()
 import re
-check(re.fullmatch(r"\\d+\\.\\d+\\.\\d+", v), "VERSION is x.y.z: " + v)
+check(re.fullmatch(r"\\d+\\.\\d+\\.\\d+(\\.\\d+)?", v), "VERSION is x.y.z or x.y.z.r: " + v)
 cl = open(os.path.join({root!r}, "docs", "CHANGELOG.md")).read()
-maj, mi, pa = (int(x) for x in v.split("."))
-pub = f"{{maj - 5}}.{{mi}}.{{pa}}" if maj > 5 else v      # public number (see core.display_version)
+parts = [int(x) for x in v.split(".")]
+check(len(parts) in (3, 4), "VERSION is x.y.z (Stable) or x.y.z.r (test build revision r)")
+check(len(parts) == 3 or 1 <= parts[3] <= 10, "no more than 10 test revisions before Stable (the owner's rule)")
+pub = ".".join(str(x) for x in [parts[0] - 5] + parts[1:]) if parts[0] > 5 else v   # see core.display_version
 check(f"## {{pub}}" in cl, "CHANGELOG has a section for " + pub)
 # the repo top level stays tidy: everything else lives in folders
 top = sorted(x for x in os.listdir({root!r}) if x not in (".git", "__pycache__"))
@@ -150,6 +152,9 @@ _me.write_text("[Desktop Entry]\nName=Ally Hub\nCategories=Utility;Settings;Game
 check(core.tidy_menu_entry() and "Categories=Utility;\n" in _me.read_text() and not core.tidy_menu_entry(),
       "Ally Hub shows once in the app menu (Utilities), not under Games, Utilities and System")
 _me.unlink()
+check(core.display_version("6.3.6.4") == "1.3.6.4" and core.parse_version("6.3.6.4") > core.parse_version("6.3.6")
+      and core.parse_version("6.3.6.10") < core.parse_version("6.3.7") and __import__("re").fullmatch(core.VERSION_RE, "6.3.6.4"),
+      "test builds are the Stable version plus a revision (1.3.6.4), between that Stable and the next")
 import socket as _sock
 _h = _sock.gethostname()
 _s2 = core.scrub(f"steam 76561198012345678 on {_h} ok")
@@ -344,7 +349,7 @@ check(core.parse_version("6.0.0") > core.parse_version("5.0.0"), "installed lowe
 check(core.changelog_section("6.0.0").startswith("## 1.0.0"), "release notes found by public version")
 check("Ally Hub: " + core.display_version() + " (build " + core.VERSION + ")" in core.environment_summary(),
       "reports show the public version and the build")
-check(core.display_version().count(".") == 2 and not core.display_version().startswith("6."),
+check(core.display_version().count(".") in (2, 3) and not core.display_version().startswith("6."),
       "this release shows a public version, not the build number")
 try:
     raise KeyboardInterrupt()

@@ -5391,7 +5391,12 @@ def _upload_locked(files: list) -> tuple:
 # ---------- updates ----------
 
 def parse_version(v: str) -> tuple:
-    return tuple(int(x) for x in re.findall(r"\d+", v or "0")[:3]) or (0,)
+    """Up to 4 parts: Stable is x.y.z, a test build is the Stable version plus a revision (x.y.z.r)."""
+    return tuple(int(x) for x in re.findall(r"\d+", v or "0")[:4]) or (0,)
+
+
+VERSION_RE = r"\d+\.\d+\.\d+(?:\.\d+)?"      # 6.3.6 (Stable) or 6.3.6.4 (test build, revision 4)
+MAX_TEST_REVISIONS = 10                         # the owner: more than that before Stable means it's not focused
 
 
 def plugin_newer(latest: str, installed: str) -> bool:
@@ -5409,8 +5414,8 @@ PUBLIC_VERSION_OFFSET = 5
 def display_version(v: str = None) -> str:
     v = v or VERSION
     t = parse_version(v)
-    if len(t) == 3 and t[0] > PUBLIC_VERSION_OFFSET:
-        return f"{t[0] - PUBLIC_VERSION_OFFSET}.{t[1]}.{t[2]}"
+    if len(t) in (3, 4) and t[0] > PUBLIC_VERSION_OFFSET:
+        return ".".join(str(x) for x in (t[0] - PUBLIC_VERSION_OFFSET,) + t[1:])
     return v
 
 
@@ -5443,7 +5448,7 @@ def remote_version(branch: str = "main") -> Optional[str]:
                               accept="application/vnd.github.raw+json")
     if status == 200:
         v = body.decode(errors="replace").strip()
-        return v if re.fullmatch(r"\d+\.\d+\.\d+", v) else None
+        return v if re.fullmatch(VERSION_RE, v) else None
     return None
 
 
@@ -5499,7 +5504,7 @@ def install_update(expected: str, branch: str = "main", allow_older: bool = Fals
         if allow_older:
             if new_ver != expected or new_ver == VERSION:
                 return False, f"Version mismatch ({new_ver} vs {expected})"
-        elif not re.fullmatch(r"\d+\.\d+\.\d+", new_ver or "") or \
+        elif not re.fullmatch(VERSION_RE, new_ver or "") or \
                 parse_version(new_ver) < parse_version(expected) or \
                 parse_version(new_ver) <= parse_version(VERSION) or new_ver in update_state().get("bad", []):
             return False, f"Version mismatch ({new_ver} vs {expected})"
