@@ -3668,6 +3668,23 @@ def qam_files() -> dict:
                                         "license": "GPL-3.0"}, indent=2) + "\n"}
 
 
+# ---------- Controller glyphs (1.3.7.7): CSS Loader's Handheld Controller Glyphs theme, set up by hand in CSS Loader ----------
+THEMES_DIR = HOME / "homebrew/themes"
+
+
+def glyphs_installed() -> bool:
+    """True when a Handheld Controller Glyphs theme folder exists in CSS Loader's themes folder."""
+    try:
+        for d in THEMES_DIR.iterdir():
+            meta = read_json(d / "theme.json", {}) if (d / "theme.json").exists() else {}
+            hay = f"{d.name} {meta.get('name', '') if isinstance(meta, dict) else ''}".lower().replace("-", " ")
+            if "handheld controller glyphs" in hay:
+                return True
+    except OSError:
+        pass
+    return False
+
+
 def qam_installed() -> Optional[str]:
     """The installed panel's version, or None."""
     try:

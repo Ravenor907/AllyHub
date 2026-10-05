@@ -6128,6 +6128,7 @@ class Hub(QMainWindow):
         self._sheet = None
         self._decky_after = {}             # job key -> callback(ok) for Decky on/off jobs
         self.qam_after_decky = False       # setup: add the Quick Access panel once Decky is installed
+        self.glyphs_after_decky = False    # Customize > Theme: CSS Loader goes in once Decky is installed
 
         root = QWidget()
         root.setObjectName("root")
@@ -6238,6 +6239,7 @@ class Hub(QMainWindow):
         retitle(self.store_page, "Decky plugins", "The official Decky plugin store, and every plugin you have.")
         retitle(self.appearance, "Theme", "Colors, sizes, where the bars sit, and Steam's boot video.")
         add_block(self.appearance, self.system.card_boot, heading="Boot video")
+        add_block(self.appearance, self.build_glyphs_card(), heading="Controller icons")
         retitle(self.updates, "General", "How much Ally Hub shows, the background helper, and updates.")
         mcard, mv = titled_card("layout-grid", "#0ea5e9", "How much to show",
                                 "Simple keeps things calm. Advanced adds the expert controls: system tune-up, "
@@ -6259,6 +6261,66 @@ class Hub(QMainWindow):
         add_block(self.connect_page, adv(self.system.card_ssh))
         for card in (self.system.card_profile, self.system.card_backup):
             add_block(self.backups, card)
+
+    # ---- controller glyphs: CSS Loader + the Handheld Controller Glyphs theme (1.3.7.7) ----
+    def build_glyphs_card(self) -> QWidget:
+        card, cv = titled_card("gamepad-2", "#8b5cf6", "Controller glyphs",
+                               "Xbox-style button icons across Steam's screens. Ally Hub installs CSS Loader; the "
+                               "Handheld Controller Glyphs theme is two taps inside it.")
+        self.glyph_status = label("", "cardMeta", wrap=True)
+        cv.addWidget(self.glyph_status)
+        row = QHBoxLayout()
+        self.glyph_btn = button("", self.glyphs_action, "primary")
+        self.glyph_remove = button("Remove CSS Loader", self.glyphs_remove)
+        row.addWidget(self.glyph_btn)
+        row.addWidget(self.glyph_remove)
+        row.addStretch()
+        cv.addLayout(row)
+        self.update_glyphs()
+        return card
+
+    def update_glyphs(self):
+        if getattr(self, "glyph_status", None) is None:
+            return
+        decky = CATALOG_BY_ID["decky"].check(self.state)
+        plugin = "css loader" in (self.state.get("decky") or {})
+        theme = core.glyphs_installed()
+        busy = "store:CSS Loader" in self.runner.pending_keys()
+        if theme and plugin:
+            text, btn = ("✔ Handheld Controller Glyphs is installed. If the icons look wrong, open CSS Loader from "
+                         "the ••• menu, open the theme and pick ASUS ROG Xbox Ally in its device list."), ""
+        elif plugin:
+            text, btn = ("CSS Loader is ready. Open it from the ••• menu, go to its store, search Handheld "
+                         "Controller Glyphs, install it and pick ASUS ROG Xbox Ally in the device list."), ""
+        elif not decky:
+            text, btn = "Needs Decky Loader first.", "Install Decky, then CSS Loader"
+        else:
+            text, btn = "CSS Loader isn't installed yet.", "Install CSS Loader"
+        self.glyph_status.setText("Working on it…" if busy else text)
+        self.glyph_btn.setText(btn)
+        self.glyph_btn.setVisible(bool(btn) and not busy)
+        self.glyph_remove.setVisible(plugin and not busy)
+
+    def _css_loader(self, action: str):
+        def go(plugins):
+            p = next((p for p in plugins if (p.get("name") or "").lower() == "css loader"), None)
+            if p:
+                self.on_store_action(p, action)
+            else:
+                self.toast("Couldn't find CSS Loader in the plugin store right now. Try again later.", 7000)
+        self.store_page.with_plugins(go)
+
+    def glyphs_action(self, *_args):
+        if not CATALOG_BY_ID["decky"].check(self.state):
+            self.glyphs_after_decky = True
+            self.on_item_action("decky", "install")
+            self.toast("Installing Decky first. CSS Loader follows when it's done.", 7000)
+            return
+        self._css_loader("install")
+        self.toast("Getting CSS Loader from the plugin store…")
+
+    def glyphs_remove(self, *_args):
+        self._css_loader("uninstall")
 
     def set_mode(self, i: int):
         update_config(lambda c: c["theme"].__setitem__("advanced", i == 1))
@@ -6580,6 +6642,7 @@ class Hub(QMainWindow):
                     set(core.decky_item_names(item, self.state)) & set(self.state.get("decky_off") or []))
                 card.update_state(inst, missing, iid in pending, core.decky_version(item, self.state), off=off)
         self.store_page.refresh_state()
+        self.update_glyphs()
 
     def toast(self, text: str, ms: int = 3500):
         self.status.setText(text)
@@ -6681,6 +6744,10 @@ class Hub(QMainWindow):
             self.qam_after_decky = False
             if code == 0 and CATALOG_BY_ID["decky"].check(self.state):
                 QTimer.singleShot(1500, self.games.qam_install)
+        if key == "decky" and self.glyphs_after_decky:
+            self.glyphs_after_decky = False
+            if code == 0 and CATALOG_BY_ID["decky"].check(self.state):
+                QTimer.singleShot(1500, self.glyphs_action)
         if key == "decky" and CATALOG_BY_ID["decky"].check(self.state):
             alerts = core.read_json(core.DATA_DIR / "alerts.json", []) or []
             core.write_json(core.DATA_DIR / "alerts.json",
