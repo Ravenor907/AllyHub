@@ -3884,6 +3884,7 @@ class GamesPage(QWidget):
         self.game = None
         clear_layout(self.body)
         self.body.addWidget(self.qam_card())
+        self.body.addWidget(self.layout_card())
         self.body.addWidget(label("YOUR GAMES", "section"))
         if not self.live:
             self.body.addWidget(label("⚠ Steam's connection for plugins is off, so settings can be viewed but not "
@@ -3929,6 +3930,35 @@ class GamesPage(QWidget):
         row.addStretch()
         cv.addLayout(row)
         return card
+
+    def layout_card(self) -> QWidget:
+        have = core.ally_template_installed()
+        card, cv = titled_card("gamepad-2", "#f97316", "Xbox Ally X controller layout",
+                               "Adds a ready-made layout to Steam with every Ally X control mapped, including the "
+                               "back buttons, so each one is easy to change. In a game: Controller settings, then "
+                               "Templates. Restart Steam if it isn't listed yet.")
+        row = QHBoxLayout()
+        if have:
+            cv.addWidget(label("✔ Added to Steam's templates.", "cardMeta"))
+            row.addWidget(button("Remove", self.layout_remove))
+        else:
+            row.addWidget(button("Add the layout", self.layout_add, "primary"))
+        row.addStretch()
+        cv.addLayout(row)
+        return card
+
+    def layout_add(self, *_args):
+        if core.ally_template_install():
+            self.hub.toast("Layout added. Open a game's Controller settings and pick it under Templates.", 7000)
+        else:
+            self.hub.toast("Couldn't write the layout into Steam's folder.", 6000)
+        self.show_list()
+
+    def layout_remove(self, *_args):
+        if ask(self, "Remove the Xbox Ally X layout from Steam's templates?"):
+            core.ally_template_remove()
+            self.hub.toast("Layout removed.")
+            self.show_list()
 
     def qam_install(self, *_args):
         if not CATALOG_BY_ID["decky"].check(self.hub.state):

@@ -3668,6 +3668,71 @@ def qam_files() -> dict:
                                         "license": "GPL-3.0"}, indent=2) + "\n"}
 
 
+ALLY_TEMPLATE_NAME = "controller_allyhub_ally_x.vdf"
+
+
+def ally_template_path() -> Path:
+    return STEAM_ROOT / "controller_base/templates" / ALLY_TEMPLATE_NAME
+
+
+def ally_template_text() -> str:
+    """A Steam Input template with every Xbox Ally X control mapped (back buttons mirror the face buttons), so each
+    one shows up in Steam's layout editor ready to change."""
+    def binds(name: str, binding: str, mode_settings: str = "") -> str:
+        return (f'\t\t\t\t"{name}"\n\t\t\t\t{{\n\t\t\t\t\t"activators"\n\t\t\t\t\t{{\n\t\t\t\t\t\t"Full_Press"\n'
+                f'\t\t\t\t\t\t{{\n\t\t\t\t\t\t\t"bindings"\n\t\t\t\t\t\t\t{{\n\t\t\t\t\t\t\t\t"binding"\t\t"{binding}"\n'
+                f'\t\t\t\t\t\t\t}}\n\t\t\t\t\t\t}}\n\t\t\t\t\t}}\n\t\t\t\t}}\n')
+
+    groups = [
+        ("four_buttons", [("button_a", "A"), ("button_b", "B"), ("button_x", "X"), ("button_y", "Y")], ""),
+        ("dpad", [("dpad_north", "DPAD_UP"), ("dpad_south", "DPAD_DOWN"), ("dpad_west", "DPAD_LEFT"),
+                  ("dpad_east", "DPAD_RIGHT")], ""),
+        ("joystick_move", [("click", "JOYSTICK_LEFT")], '\t\t\t"settings"\n\t\t\t{\n\t\t\t\t"output_joystick"\t\t"1"\n\t\t\t}\n'),
+        ("joystick_move", [("click", "JOYSTICK_RIGHT")], '\t\t\t"settings"\n\t\t\t{\n\t\t\t\t"output_joystick"\t\t"2"\n\t\t\t}\n'),
+        ("trigger", [("click", "TRIGGER_LEFT")], '\t\t\t"settings"\n\t\t\t{\n\t\t\t\t"output_trigger"\t\t"1"\n\t\t\t}\n'),
+        ("trigger", [("click", "TRIGGER_RIGHT")], '\t\t\t"settings"\n\t\t\t{\n\t\t\t\t"output_trigger"\t\t"2"\n\t\t\t}\n'),
+        ("switches", [("left_bumper", "SHOULDER_LEFT"), ("right_bumper", "SHOULDER_RIGHT"),
+                      ("button_escape", "SELECT"), ("button_menu", "START"),
+                      ("button_back_left", "X"), ("button_back_left_upper", "A"),
+                      ("button_back_right", "Y"), ("button_back_right_upper", "B")], ""),
+    ]
+    sources = ["button_diamond", "dpad", "joystick", "right_joystick", "left_trigger", "right_trigger", "switch"]
+    out = ['"controller_mappings"\n{\n\t"version"\t\t"3"\n\t"revision"\t\t"1"\n'
+           '\t"title"\t\t"Ally Hub: ROG Xbox Ally X"\n'
+           '\t"description"\t\t"Every Xbox Ally X control mapped and ready to edit. Back buttons copy the face buttons."\n'
+           '\t"creator"\t\t"Ally Hub"\n\t"controller_type"\t\t"controller_xboxone"\n\t"Timestamp"\t\t"0"\n']
+    for i, (mode, inputs, settings) in enumerate(groups):
+        out.append(f'\t"group"\n\t{{\n\t\t"id"\t\t"{i}"\n\t\t"mode"\t\t"{mode}"\n\t\t"inputs"\n\t\t{{\n')
+        out.extend(binds(n, f"xinput_button {b}") for n, b in inputs)
+        out.append("\t\t}\n" + settings + "\t}\n")
+    out.append('\t"preset"\n\t{\n\t\t"id"\t\t"0"\n\t\t"name"\t\t"Default"\n\t\t"group_source_bindings"\n\t\t{\n')
+    out.extend(f'\t\t\t"{i}"\t\t"{src} active"\n' for i, src in enumerate(sources))
+    out.append('\t\t}\n\t}\n\t"settings"\n\t{\n\t}\n}\n')
+    return "".join(out)
+
+
+def ally_template_installed() -> bool:
+    return ally_template_path().exists()
+
+
+def ally_template_install() -> bool:
+    try:
+        p = ally_template_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(ally_template_text())
+        return True
+    except OSError:
+        return False
+
+
+def ally_template_remove() -> bool:
+    try:
+        ally_template_path().unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
+
+
 def qam_installed() -> Optional[str]:
     """The installed panel's version, or None."""
     try:

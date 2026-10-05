@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.7.5
+
+- **Xbox Ally X controller layout:** Games > Game settings has a new card that adds a ready-made Ally X layout to
+  Steam's templates, with every control mapped (back buttons copy the face buttons) so each one is easy to edit.
+  It has a Remove button, and the uninstaller removes it too.
+
 ## 1.3.7.4
 
 - **Failures now say what happened and what to do**, in plain words: a cancelled password, no internet, no space
