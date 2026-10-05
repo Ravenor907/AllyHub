@@ -1,13 +1,17 @@
 # Changelog
 
-## 1.3.6.1
+## 1.3.7.1
 
-First test build under the new numbering: Stable 1.3.6 plus test revision 1 (at most 10 before Stable). On top of
-1.3.6 it has, all still being tested:
+First test build under the new numbering: Stable 1.3.7 plus test revision 1 (at most 10 before Stable). On top of
+1.3.7 it has, all still being tested:
 - The new layout (1.4.0, still being fixed: it didn't open on a real Ally).
 - RGB Spiral and Neon Vortex on the chip's own spiral by default.
 - Ally Hub Testing Rescue and the test-build warnings.
-- Test builds can now be numbered x.y.z.r.
+
+## 1.3.7
+
+- Ally Hub now understands test build numbers like 1.3.7.1, so the Testing channel can deliver test builds again.
+  Nothing else changes on Stable.
 
 ## 1.4.3
 
