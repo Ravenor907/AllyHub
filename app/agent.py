@@ -993,7 +993,7 @@ class Agent:
                     log(f"error reports: {sent} sent, {failed} failed")
             up = self.cfg.get("updates", {})
             st = core.update_state()
-            if (up.get("auto_update") and not self.game and not core.on_probation()
+            if (up.get("auto_update") and not self.game and not core.on_probation("agent")
                     and now - st.get("last_check", 0) > core.UPDATE_INTERVAL_S and self.updated_to is None):
                 res = core.check_for_update()
                 if res["available"]:
@@ -1081,8 +1081,8 @@ def main():
         pass
     except Exception:
         core.report_exception("agent")
-        if core.on_probation():
-            core.rollback("agent crashed right after updating")
+        if core.on_probation("agent"):
+            core.rollback("the background helper crashed right after updating")
         raise
     finally:
         if agent:

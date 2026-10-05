@@ -365,6 +365,12 @@ Make sure these exist (create them if missing): `auto-report`, `bug`, `suggestio
 
 ## Guardrails
 
+- **Probation is per part (1.4.1, the owner asked for it after 1.4.0 broke the window but not the helper):**
+  `startup_check(component)` counts "gui" and "agent" starts separately (`boots` dict, `healthy_by` list),
+  `mark_healthy` ends probation only when the window has worked (plus the helper if it's on), and
+  `MAX_UNHEALTHY_BOOTS` failed starts of either part roll back (`restart_agent_service` after a GUI rollback). The
+  GUI counts a start only after `single_instance` (a second tap isn't a failure) and marks itself healthy on a clean
+  close. Use `on_probation("gui")` / `on_probation("agent")` for per-part decisions.
 - Never weaken: privacy scrubbing (`core.scrub`), PIN auth on the phone remote, the update rollback
   (`startup_check` / `mark_healthy` / `rollback`), or the syntax check in `install_update`.
 - Never add telemetry, network calls to new hosts, or anything that sends data anywhere except the
