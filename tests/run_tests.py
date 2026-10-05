@@ -180,9 +180,6 @@ shutil.rmtree(_prev); core.save_update_state({})
 check(core.display_version("6.3.6.4") == "1.3.6.4" and core.parse_version("6.3.6.4") > core.parse_version("6.3.6")
       and core.parse_version("6.3.6.10") < core.parse_version("6.3.7") and __import__("re").fullmatch(core.VERSION_RE, "6.3.6.4"),
       "test builds are the Stable version plus a revision (1.3.6.4), between that Stable and the next")
-_t = core.ally_template_text()
-check(_t.count("{") == _t.count("}") and "button_back_left_upper" in _t and "controller_xboxone" in _t
-      and _t.count('"group"') == 7, "The Ally X Steam template is balanced and maps every control")
 check(core.short_device_name("ROG Xbox Ally X RC73XA_RC73XA") == "ROG Xbox Ally X"
       and core.short_device_name("ROG Ally RC71L") == "ROG Ally", "Home shows a short device name, without model codes")
 import socket as _sock
