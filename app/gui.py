@@ -5699,6 +5699,22 @@ class BackgroundTask(QObject):
             return {"error": str(e)}
 
 
+def explain_failure(name: str, tail: str) -> Optional[str]:
+    """A plain sentence with a next step for the usual reasons a task fails. None = unknown reason."""
+    t = (tail or "").lower()
+    if re.search(r"incorrect password|no password was provided|a password is required|askpass", t):
+        return (f"{name} needs your sudo password, and the prompt was cancelled or the password was wrong. "
+                "Try again and type it when asked.")
+    if re.search(r"could not resolve host|network is unreachable|temporary failure in name resolution|"
+                 r"connection timed out|failed to connect", t):
+        return f"{name} couldn't download what it needs. Check the internet connection and try again."
+    if "no space left" in t:
+        return f"{name} ran out of storage space. Free some up under Home → Storage and try again."
+    if re.search(r"read-only file system", t):
+        return f"{name} tried to write somewhere SteamOS keeps read-only. This needs a fix in Ally Hub; it was noted."
+    return None
+
+
 IGNORABLE_FAILURES = re.compile(
     r"incorrect password|no password was provided|a password is required|askpass|"
     r"could not resolve host|network is unreachable|temporary failure in name resolution|"
@@ -6595,8 +6611,10 @@ class Hub(QMainWindow):
     def on_job_started(self, text: str):
         core.app_log("gui", f"job started: {text}")
         self._toast_timer.stop()
-        self.status.setText(f"Working: {text}…")
+        left = len(self.runner.queue)
+        self.status.setText(f"Working: {text}…" + (f"  ({left} more waiting)" if left else ""))
         self.progress.show()
+        self._job_t0 = time.time()
         self.update_cards()
 
     def on_job_finished(self, key: str, code: int, tail: str):
@@ -6621,10 +6639,20 @@ class Hub(QMainWindow):
                 reported = core.queue_report("install-failure", f"{name}: {failed_msg}", tail or "(no output)",
                                              core._fingerprint("job", key, code),
                                              attachments=[("Full job output", full)])
-            msg_warn(self, APP_NAME, f"{failed_msg}\n\n{tail[-600:]}"
-                                + ("\n\nThis was reported automatically." if reported else ""))
+            plain = explain_failure(name, tail)
+            if plain:
+                msg_warn(self, APP_NAME, plain)
+            else:
+                msg_warn(self, APP_NAME, f"{name} didn't finish.\n\n"
+                         + ("It was reported automatically, so a fix can follow in an update. "
+                            if reported else "")
+                         + "The full output is in the activity log (Settings → General → Activity log).\n\n"
+                         + f"Last lines:\n{tail[-300:]}")
         elif not item and core.REFUSAL_PATTERNS.search(tail or ""):
             msg_warn(self, APP_NAME, f"“{name}” may not have worked:\n\n{tail[-600:]}")
+        if not failed_msg and code == 0 and key not in ("nonsteamlaunchers",):
+            took = time.time() - getattr(self, "_job_t0", time.time())
+            self.toast(f"{name} done ✔" + (f" ({int(took)} s)" if took >= 5 else ""))
         self.installing.discard(key)
         after = self._decky_after.pop(key, None)
         if after:
@@ -6661,7 +6689,6 @@ class Hub(QMainWindow):
 
     def on_idle(self):
         self.progress.hide()
-        self.toast("All tasks finished")
         self.update_cards()
         if self.doctor.ran and self.current_page() is self.health:
             self.doctor.run_checks()          # a fix just finished: the Checkup shouldn't show it as a problem
@@ -7078,8 +7105,11 @@ def _excepthook(etype, evalue, tb):
             msg_error(None, APP_NAME, "The new version of Ally Hub hit an error, so it went "
                                                  "back to the previous version. Restarting…")
             os.execv(sys.executable, [sys.executable, str(core.APP_DIR / "allyhub.py")] + sys.argv[1:])
-    msg_warn(None, APP_NAME, f"Something went wrong: {etype.__name__}: {evalue}"
-                        + ("\n\nThis was reported automatically." if reported else f"\n\n{hint}"))
+    msg_warn(None, APP_NAME, "Something went wrong, but Ally Hub is still running.\n\n"
+                        + ("It was reported automatically, so a fix can follow in an update."
+                           if reported else hint or "Turn on error reports in Settings → General to get problems "
+                                                    "like this fixed automatically.")
+                        + f"\n\nDetails: {etype.__name__}: {str(evalue)[:160]}")
 
 
 INSTANCE_NAME = f"allyhub-{os.getuid()}"
