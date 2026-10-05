@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.6.1
+
+First test build under the new numbering: Stable 1.3.6 plus test revision 1 (at most 10 before Stable). On top of
+1.3.6 it has, all still being tested:
+- The new layout (1.4.0, still being fixed: it didn't open on a real Ally).
+- RGB Spiral and Neon Vortex on the chip's own spiral by default.
+- Ally Hub Testing Rescue and the test-build warnings.
+- Test builds can now be numbered x.y.z.r.
+
 ## 1.4.3
 
 - **Ally Hub shows up once in the app menu**, under Utilities, instead of under Games, Utilities and System. Existing
