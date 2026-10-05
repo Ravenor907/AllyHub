@@ -3995,6 +3995,27 @@ def gamemode_desktop_text() -> str:
             f"Exec={LAUNCHER} --gamemode\nIcon={APP_DIR / 'allyhub.svg'}\nNoDisplay=true\nTerminal=false\n")
 
 
+MENU_ENTRIES = (HOME / ".local/share/applications/allyhub.desktop", HOME / "Desktop/allyhub.desktop")
+
+
+def tidy_menu_entry() -> bool:
+    """Ally Hub shows once in the app menu, under Utilities. Installers before 1.4.3 listed three categories, so KDE
+    showed it under Games, Utilities and System (the owner noticed). Fixes existing entries in place."""
+    changed = False
+    for p in MENU_ENTRIES:
+        try:
+            text = p.read_text()               # not read_text(): that strips, and the file keeps its layout
+        except OSError:
+            continue
+        if text and re.search(r"^Categories=(?!Utility;$).*$", text, re.M):
+            try:
+                p.write_text(re.sub(r"^Categories=.*$", "Categories=Utility;", text, flags=re.M))
+                changed = True
+            except OSError:
+                pass
+    return changed
+
+
 def in_steam_library() -> bool:
     return any(n.strip().lower() == "ally hub" for n in steam_shortcut_names())
 
@@ -5750,7 +5771,7 @@ def testing_rescue_files() -> dict:
               .replace("@ONDESK@", str(RESCUE_ON_DESKTOP)))
     entry = ("[Desktop Entry]\nType=Application\nName=Ally Hub Testing Rescue\n"
              "Comment=Roll back the Ally Hub test build, go back to Stable, or uninstall\n"
-             f"Exec=bash {RESCUE_SH}\nIcon={RESCUE_ICON}\nTerminal=false\nCategories=Utility;Settings;Game;\n")
+             f"Exec=bash {RESCUE_SH}\nIcon={RESCUE_ICON}\nTerminal=false\nCategories=Utility;\n")
     files = {RESCUE_SH: (script, 0o755), RESCUE_ICON: (RESCUE_SVG, 0o644), RESCUE_DESKTOP: (entry, 0o755)}
     if (HOME / "Desktop/allyhub.desktop").exists():
         files[RESCUE_ON_DESKTOP] = (entry, 0o755)
