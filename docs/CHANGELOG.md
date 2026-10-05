@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.7.3
+
+- **Calmer, smoother Ally Hub spiral:** it spins about half as fast, and the colors blend from frame to frame
+  instead of jumping between the rings' four zones.
+- **Quick Access panel:** a speed slider for animated effects, switches for battery rings, low battery flash and
+  the save time machine. Update the panel from Games → Game settings.
+
 ## 1.3.7.2
 
 - The info line at the bottom of Home is no longer cut off, and it shows a short device name ("ROG Xbox Ally X")

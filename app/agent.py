@@ -203,6 +203,12 @@ class Animator(threading.Thread):
             zones = core.zone_frames(effect, t if animated else 0.0)
             if not animated and effect["type"] not in ("static", "spiral") and effect["colors"]:
                 zones = [core.hex_to_rgb(effect["colors"][0])] * 4
+            elif animated:
+                # blend toward the new colors instead of jumping (the rings have only 4 zones, so a jump shows)
+                prev = getattr(self, "_zones", None)
+                if prev and len(prev) == len(zones):
+                    zones = [tuple(int(round(p + (c - p) * 0.55)) for p, c in zip(pz, z)) for pz, z in zip(prev, zones)]
+            self._zones = zones
             key = ("zones", tuple(zones), brightness)
             send = lambda: core.hid_zone_frame(zones, brightness, self.agent.leds, light.get("hid_method"))
         else:
@@ -736,6 +742,10 @@ class Agent:
             "lighting": "huesync" if core.lighting_shelved(self.cfg) else "allyhub",
             "effects": names, "effect": core.effect_label(eff) if eff else "",
             "brightness": int(rgb.get("brightness", 255)),
+            "speed": float(eff.get("speed", 1.0)) if eff else 1.0,
+            "animated": bool(eff) and core.is_animated(core.normalize_effect(eff)),
+            "toggles": {k: bool(self.cfg["agent"].get(k)) for k in self.QAM_TOGGLES},
+            "time_machine": bool((self.cfg.get("saves") or {}).get("time_machine")),
             "backup": self.ludusavi_ready(),
             "backup_running": self.save_proc is not None,
         }
@@ -748,7 +758,34 @@ class Agent:
             self._ludusavi = core.run_quiet(["flatpak", "info", core.LUDUSAVI_ID])[0] == 0
         return self._ludusavi
 
+    QAM_TOGGLES = ("battery_rings", "low_battery_flash")      # agent switches the panel may flip (no password)
+
     def qam_action(self, name: str, data: dict) -> dict:
+        if name == "speed":
+            try:
+                v = max(0.1, min(4.0, float(data.get("value", 1.0))))
+            except (TypeError, ValueError):
+                return {"ok": False, "message": "Bad speed"}
+
+            def fn(cfg):
+                eff = (cfg.get("lighting") or {}).get("effect")
+                if isinstance(eff, dict):
+                    eff["speed"] = round(v, 2)
+            self.cfg = core.update_config(fn)
+            self.last_led = None
+            self.wake.set()
+            return {"ok": True, "message": ""}
+        if name == "toggle":
+            key, on = str(data.get("key", "")), bool(data.get("on"))
+            if key == "time_machine":
+                self.cfg = core.update_config(lambda c: c.setdefault("saves", {}).__setitem__("time_machine", on))
+                return {"ok": True, "message": f"Save time machine {'on' if on else 'off'}"}
+            if key not in self.QAM_TOGGLES:
+                return {"ok": False, "message": "Unknown switch"}
+            self.cfg = core.update_config(lambda c: c["agent"].__setitem__(key, on))
+            self.last_led = None
+            self.wake.set()
+            return {"ok": True, "message": ""}
         if name == "boost":
             on = bool(data.get("on"))
             self.cfg = core.update_config(lambda c: c.setdefault("performance", {}).__setitem__("boost", on))

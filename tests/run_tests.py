@@ -1284,6 +1284,17 @@ check(not _ask({"op": "action", "name": "game_flag", "data": {"key": "deck", "on
       and not _ask({"op": "status"})["game_live"], "launch options the switches can't parse are never touched")
 core.game_settings, core.apply_game_settings = _gs, _ag
 check(_ask({"op": "action", "name": "backup"})["ok"], "panel can ask for a save backup")
+core.update_config(lambda c: c["lighting"].__setitem__("effect", dict(core.PRESETS["Aurora"])))
+check(_ask({"op": "action", "name": "speed", "data": {"value": 0.5}})["ok"]
+      and core.load_config()["lighting"]["effect"]["speed"] == 0.5, "panel speed slider changes the effect's speed")
+check(_ask({"op": "action", "name": "toggle", "data": {"key": "battery_rings", "on": False}})["ok"]
+      and not core.load_config()["agent"]["battery_rings"], "panel switches battery rings")
+check(_ask({"op": "action", "name": "toggle", "data": {"key": "time_machine", "on": True}})["ok"]
+      and core.load_config()["saves"]["time_machine"], "panel switches the save time machine")
+check(not _ask({"op": "action", "name": "toggle", "data": {"key": "remote", "on": True}})["ok"],
+      "the panel can't flip anything outside its short list")
+_st2 = _ask({"op": "status"})
+check("speed" in _st2 and "toggles" in _st2 and "time_machine" in _st2, "panel status carries the new switches")
 sg = agent.Agent()
 sg.update_sleep(core.battery_info())
 mono0, boot0, pct0, ch0 = sg.sleep_last

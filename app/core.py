@@ -1587,7 +1587,7 @@ def zone_frames(e: dict, t: float) -> list:
     if e["type"] != "spiral":
         return [effect_frame(e, t)] * 4
     turn = 1 if e["direction"] == "cw" else -1
-    phase = t * e["speed"] * 0.35
+    phase = t * e["speed"] * 0.18     # the owner: 0.35 spun too fast on the rings
     out = []
     for stick, half in ZONE_POS:
         d, pos = turn, half / 2
@@ -3423,7 +3423,7 @@ def proton_log(appid) -> str:
 # only talks to the agent's local socket (CONTROL_SOCK, this user only). Bump QAM_VERSION when they change.
 # ==========================================================================
 
-QAM_VERSION = "1.0.2"
+QAM_VERSION = "1.0.3"
 QAM_DIR = HOME / "homebrew/plugins/AllyHub"
 QAM_STAGE = DATA_DIR / "qam-plugin"
 QAM_PLUGIN_JSON = r'''{
@@ -3555,6 +3555,8 @@ function GameHeader(name, live) {
 function Content() {
   const [s, setS] = useState(null);
   const [level, setLevel] = useState(null);       // brightness while the slider moves
+  const [speed, setSpeed] = useState(null);       // effect speed while the slider moves
+  const spd = useRef(null);
   const busy = useRef(false);
   const bright = useRef(null);
   const seq = useRef(0);
@@ -3570,7 +3572,7 @@ function Content() {
     const t = setInterval(load, 3000);
     return () => clearInterval(t);
   }, [visible]);
-  useEffect(() => () => clearTimeout(bright.current), []);
+  useEffect(() => () => { clearTimeout(bright.current); clearTimeout(spd.current); }, []);
   const act = async (name, data = {}, quiet = false) => {
     if (busy.current) return;                     // one change at a time; controls stay enabled for focus
     busy.current = true;
@@ -3622,11 +3624,26 @@ function Content() {
         onChange: (v) => { setLevel(v); clearTimeout(bright.current);
           bright.current = setTimeout(async () => { await act("brightness", { value: Math.round(v * 2.55) }, true);
             setLevel(null); }, 400); } })),
+      s.animated ? h(PanelSectionRow, null, h(SliderField, { label: "Speed",
+        value: speed !== null ? speed : Math.round((s.speed || 1) * 100),
+        min: 10, max: 300, step: 10, showValue: true, valueSuffix: "%",
+        onChange: (v) => { setSpeed(v); clearTimeout(spd.current);
+          spd.current = setTimeout(async () => { await act("speed", { value: v / 100 }, true);
+            setSpeed(null); }, 400); } })) : null,
+      h(PanelSectionRow, null, h(ToggleField, { label: "Battery rings", checked: !!(s.toggles || {}).battery_rings,
+        description: "Rings show your battery level.",
+        onChange: (on) => act("toggle", { key: "battery_rings", on }) })),
+      h(PanelSectionRow, null, h(ToggleField, { label: "Low battery flash", checked: !!(s.toggles || {}).low_battery_flash,
+        description: "Rings flash red at 15% or lower.",
+        onChange: (on) => act("toggle", { key: "low_battery_flash", on }) })),
       h(PanelSectionRow, null, h(ButtonItem, { layout: "below", onClick: () => act("lights") }, "Lights off"))));
   }
 
   if (s.backup) {
     sections.push(h(PanelSection, { title: "Saves", key: "saves" },
+      h(PanelSectionRow, null, h(ToggleField, { label: "Save time machine", checked: !!s.time_machine,
+        description: "Snapshot a game's saves every time it starts.",
+        onChange: (on) => act("toggle", { key: "time_machine", on }) })),
       h(PanelSectionRow, null, h(ButtonItem, { layout: "below", disabled: s.backup_running,
         onClick: () => act("backup") }, s.backup_running ? "Backing up…" : "Back up saves now"))));
   }
