@@ -3235,7 +3235,10 @@ class HealthPage(QWidget):
         v.addWidget(self.games_card)
         v.addStretch()
         self.info = label("", "footInfo", wrap=True)
-        v.addWidget(self.info, 0, Qt.AlignRight)
+        # full width with the text aligned right: a wrapped label added with a layout alignment gets its one-line
+        # height, so a second line was cut off on the handheld (the owner's screenshot)
+        self.info.setAlignment(Qt.AlignRight | Qt.AlignTop)
+        v.addWidget(self.info)
         self.series, self.span = "pct", 3600
         self.recent = collections.deque(maxlen=150)    # about 5 minutes of 2-second readings
         self.sampler = QTimer(self)                    # runs while the app is open, even off this page
@@ -3246,7 +3249,7 @@ class HealthPage(QWidget):
 
     def refresh_notices(self, state: dict):
         osr = core.os_release()
-        self.info.setText(f"{core.device_name()} · SteamOS {osr.get('VERSION_ID', '?')} · "
+        self.info.setText(f"{core.short_device_name()} · SteamOS {osr.get('VERSION_ID', '?')} · "
                           f"Ally Hub {core.version_label()}")
         left = [t for _k, t, done in core.setup_checklist(state) if not done]
         hidden = (load_config().get("setup") or {}).get("checklist_hidden")

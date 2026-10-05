@@ -118,6 +118,8 @@ class Animator(threading.Thread):
         self.started_at = time.monotonic()
         self.clock_offset = None  # wall clock minus monotonic: jumps when the handheld wakes up
 
+    _fps, _fps_at = None, 0.0
+
     def set(self, effect, brightness, enums):
         key = json.dumps([effect, brightness, enums], sort_keys=True)
         with self.lock:
@@ -136,7 +138,7 @@ class Animator(threading.Thread):
             fps = 20
         bat = core.battery_info()
         if bat.get("status") == "Discharging" and light.get("on_battery", "slow") == "slow":
-            fps = min(fps, 10)
+            fps = min(fps, 15)          # was 10, which with send time made streamed effects look choppy
         return fps
 
     def run(self):
@@ -226,8 +228,13 @@ class Animator(threading.Thread):
                 self.changed.clear()
                 return
         if animated:
-            fps = min(self.fps(), core.STREAM_FPS_MAX) if streaming else self.fps()
-            if self.changed.wait(1.0 / fps):
+            now = time.monotonic()
+            if now - self._fps_at > 5 or self._fps is None:      # battery state is read every few seconds, not per frame
+                self._fps, self._fps_at = self.fps(), now
+            fps = min(self._fps, core.STREAM_FPS_MAX) if streaming else self._fps
+            # pace by deadline: the time spent sending this frame counts toward the frame, so 20 fps is 20 fps
+            self._next = max(getattr(self, "_next", now), now - 1.0 / fps) + 1.0 / fps
+            if self.changed.wait(max(0.0, self._next - time.monotonic())):
                 self.changed.clear()
         else:
             self.changed.wait(2.0)
