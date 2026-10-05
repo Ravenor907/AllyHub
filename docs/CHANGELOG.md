@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.7.8
+
+- **Calmer pages:** the 22 wordiest card and page descriptions are now one short line each, so every screen
+  reads at a glance. Nothing moved and no features changed.
+
 ## 1.3.7.7
 
 - **Controller glyphs card (Customize > Theme):** installs CSS Loader from the plugin store (and Decky first if

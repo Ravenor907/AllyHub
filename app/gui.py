@@ -2622,9 +2622,7 @@ class HueSyncPage(QWidget):
         v = page_shell(self, "Lighting", "Ring lights on the ROG Ally series are handled by HueSync, "
                                          "a Decky plugin built for this hardware.")
         card, cv = titled_card("lightbulb", "#a855f7", "HueSync",
-                               "Colors, brightness, per-zone lighting and animated effects for the "
-                               "ROG Ally, Ally X and Xbox Ally X, right from the Quick Access menu "
-                               "in Game Mode.")
+                               'Colors, brightness and effects for the rings, right in the Quick Access menu.')
         self.status = label("", "statValue", wrap=True)
         cv.addWidget(self.status)
         row = QHBoxLayout()
@@ -2639,8 +2637,7 @@ class HueSyncPage(QWidget):
                            "cardMeta", wrap=True))
         v.addWidget(card)
         own, ov = titled_card("sparkles", core.THEMES["ROG Crimson"]["accent"], "Or let Ally Hub drive the rings",
-                              "Ally Hub's Lighting studio talks to the lighting chip the same way HueSync "
-                              "does, and adds effects, battery rings, per-game colors and phone control.")
+                              "Ally Hub's lighting studio: effects, battery rings, per-game colors and phone control.")
         orow = QHBoxLayout()
         orow.addWidget(button("Use Ally Hub lighting", hub.use_allyhub_lighting, "primary"))
         orow.addStretch()
@@ -2709,8 +2706,7 @@ class AutomationPage(QWidget):
         self._anim = QTimer(self)          # animates the per-game previews while they're on screen
         self._anim.timeout.connect(self._tick_previews)     # started by Hub.on_page_shown on Lighting
         card, cv = titled_card("bot", core.THEMES["ROG Crimson"]["accent"], "Background helper",
-                               "Runs quietly in the background, in Game Mode too: lighting, Game Boost, save "
-                               "snapshots, the Quick Access panel and the phone remote need it.")
+                               'Runs quietly, in Game Mode too. Lighting, Game Boost, saves, the panel and the phone remote need it.')
         self.agent_status = label("", "cardDesc", wrap=True)
         cv.addWidget(self.agent_status)
         row = QHBoxLayout()
@@ -2762,8 +2758,7 @@ class AutomationPage(QWidget):
         self.block_lighting = block(switches(self.LIGHTS), gcard, dcard, heading="Automatic lighting")
 
         scard, sv = titled_card("save", "#0891b2", "Scheduled backups",
-                                "Backs up every game's saves (Steam, Heroic, Lutris and emulators) on a schedule. "
-                                "Runs only when no game is playing and the battery is above 30%.")
+                                "Backs up every game's saves on a schedule, only when no game runs and the battery is above 30%.")
         self.save_enable = QCheckBox("Back up automatically")
         self.save_enable.toggled.connect(lambda on: self.set_feature("save_backup", on))
         sv.addWidget(self.save_enable)
@@ -2980,9 +2975,7 @@ class ConnectPage(QWidget):
         v.addLayout(grid)
 
         rcard, rv = titled_card("smartphone", "#a855f7", "Phone remote",
-                                "Open a page on your phone to check battery and temps, change ring "
-                                "colors, set game colors and wake your PC. Works on your home Wi-Fi "
-                                "(and anywhere via Tailscale). Protected by a PIN.")
+                                'Battery, temps, ring colors and Wake my PC from your phone. Home Wi-Fi or Tailscale, PIN protected.')
         self.remote_enable = QCheckBox("Enable phone remote")
         self.remote_enable.toggled.connect(self.toggle_remote)
         rv.addWidget(self.remote_enable)
@@ -3434,8 +3427,7 @@ class LaunchersPage(QWidget):
         self.last_run = []
         self.removing = []
         v = page_shell(self, "Launchers",
-                       "Add stores, cloud gaming and TV apps to your Steam library, ready in Game Mode, or remove "
-                       "them again. Powered by NonSteamLaunchers.")
+                       'Stores, cloud gaming and TV apps in your Steam library, ready in Game Mode. Powered by NonSteamLaunchers.')
         self.checks = {}
         for group, items in core.NSL_GROUPS.items():
             v.addWidget(label(group.upper(), "section"))
@@ -3473,9 +3465,7 @@ class LaunchersPage(QWidget):
 
         v.addWidget(label("LIBRARY ART", "section"))
         ac, av = titled_card("images", "#8b5cf6", "Library art",
-                             "Blank blue tiles get a cover, banner and icon made right here on your handheld from "
-                             "each program's own icon. Nothing is downloaded. New launchers get theirs "
-                             "automatically.")
+                             "Gives blank tiles a cover, banner and icon made from each program's own icon. Nothing is downloaded.")
         arow = QHBoxLayout()
         self.btn_art = button("Fix artwork", self.fix_artwork, "primary")
         arow.addWidget(self.btn_art)
@@ -3486,8 +3476,7 @@ class LaunchersPage(QWidget):
 
         v.addWidget(label("CLEAN UP", "section"))
         cc, cv = titled_card("trash", "#ef4444", "Leftover data",
-                             "Finds what removed launchers left behind: old Proton prefixes, installer downloads, "
-                             "the game scanner once nothing uses it, and old shortcut backups. You pick what goes.")
+                             'What removed launchers left behind: old prefixes, installers and backups. You pick what goes.')
         crow = QHBoxLayout()
         self.btn_clean = button("Find leftovers", self.find_leftovers)
         crow.addWidget(self.btn_clean)
@@ -3853,8 +3842,7 @@ class GamesPage(QWidget):
         self.game, self.settings = None, None
         self.checks, self.other = {}, ""
         self.v = page_shell(self, "Game settings",
-                            "Switches instead of typing launch options, the right Proton per game, and help when a "
-                            "game won't start. Changes apply the next time the game starts.")
+                            "Switches instead of launch options, Proton per game, and help when a game won't start.")
         self.body = QVBoxLayout()
         self.body.setSpacing(12)
         self.v.addLayout(self.body)
@@ -3914,8 +3902,7 @@ class GamesPage(QWidget):
     def qam_card(self) -> QWidget:
         have = core.qam_installed()
         card, cv = titled_card("gamepad-2", "#14b8a6", "Quick Access panel",
-                               "Ally Hub in the ••• menu while you play: battery and temperatures, this game's "
-                               "switches, Game Boost, lighting and a save backup button. Needs Decky Loader.")
+                               'Battery, temps, game switches, Game Boost and lighting in the ••• menu. Needs Decky Loader.')
         row = QHBoxLayout()
         if not have:
             row.addWidget(button("Add to Quick Access", self.qam_install, "primary"))
@@ -4413,11 +4400,9 @@ class SavesPage(QWidget):
         self.hub = hub
         self.snaps, self.undo = {}, {}
         v = page_shell(self, "Saves",
-                       "A safety net for your progress: Ally Hub snapshots a game's saves every time it starts, so "
-                       "a corrupted save or a choice you regret is one restore away.")
+                       "Every game's saves are snapshotted when it starts, so a bad save is one restore away.")
         card, cv = titled_card("save", "#22c55e", "Save time machine",
-                               "Uses Ludusavi, which knows where thousands of games keep their saves, including "
-                               "Windows games under Proton. Snapshots stay on your handheld.")
+                               'Uses Ludusavi, which knows where thousands of games keep saves. Snapshots stay on your handheld.')
         self.tm_cb = QCheckBox("Snapshot a game's saves every time it starts")
         self.tm_cb.toggled.connect(self.set_on)
         cv.addWidget(self.tm_cb)
@@ -4560,8 +4545,7 @@ class SleepPage(QWidget):
         super().__init__()
         self.hub = hub
         v = page_shell(self, "Sleep",
-                       "Ally Hub watches every sleep: how much battery it cost, what woke the handheld, and sleeps "
-                       "that didn't work. If something's wrong, it says what and offers a fix.")
+                       "What each sleep cost, what woke the handheld, and a fix when something's off.")
         card, cv = titled_card("moon", "#6366f1", "Recent sleeps")
         self.summary = label("", "cardDesc", wrap=True)
         cv.addWidget(self.summary)
@@ -4686,8 +4670,7 @@ class StoragePage(QWidget):
         self.result = None
         self.boxes = []
         v = page_shell(self, "Storage",
-                       "See where your space went and clear what Steam leaves behind after you uninstall games. "
-                       "Nothing is deleted until you pick it.")
+                       'Where your space went, and what Steam leaves behind. Nothing is deleted until you pick it.')
         card, cv = titled_card("hard-drive", "#0ea5e9", "Your drives")
         self.drive_box = QVBoxLayout()
         self.drive_box.setSpacing(10)
@@ -4866,9 +4849,7 @@ class PerformancePage(QWidget):
 
         card, cv = titled_card(
             "rocket", "#f97316", "Game Boost",
-            "When a game starts, the CPU switches to its performance setting and Ally Hub pauses its own "
-            "backups, updates and reports. Everything goes back when you quit. TDP and GPU clocks stay "
-            "with SteamOS. On battery it boosts a little less, to save power.")
+            'Snappier CPU while a game runs, a little gentler on battery. Back to normal when you quit.')
         self.boost_cb = QCheckBox("Boost my games")
         self.boost_cb.toggled.connect(self.set_boost)
         cv.addWidget(self.boost_cb)
@@ -4884,8 +4865,7 @@ class PerformancePage(QWidget):
         tune_head = label("TUNE-UP", "section")
         tcard, tv = titled_card(
             "memory-stick", "#22c55e", "System tune-up",
-            "The memory and kernel settings that Bazzite, CachyOS and CryoUtilities ship. One tap applies "
-            "everything your SteamOS supports, and Undo all puts it back.")
+            'The memory and kernel tweaks Bazzite and CachyOS ship. One tap to apply, one to undo.')
         self.tune_box = QVBoxLayout()
         self.tune_box.setSpacing(8)
         tv.addLayout(self.tune_box)
@@ -4901,8 +4881,7 @@ class PerformancePage(QWidget):
         v.addWidget(label("EVERY GAME", "section"))
         gcard, gv = titled_card(
             "sparkles", "#ef4444", "Upscaling for every game",
-            "Set once and every game gets it, the way Bazzite does it: no launch options to edit. "
-            "Changes apply after you restart the handheld.")
+            'Set once and every game gets it, no launch options. Applies after a restart.')
         self.env_checks = {}
         for key, (_vars, title, desc) in core.GAME_ENV_OPTIONS.items():
             cb = QCheckBox(title)
@@ -5289,8 +5268,7 @@ class SystemPage(QWidget):
         self.card_storage = sto
 
         prof, pv = titled_card("file-down", "#f59e0b", "Your setup in one file",
-                               "Export every app, Decky plugin, theme, lighting and automation "
-                               "setting. After a SteamOS reinstall, import it to rebuild everything.")
+                               'Every app, plugin, theme and setting in one file. Import it after a reinstall to rebuild everything.')
         pr = QHBoxLayout()
         pr.addWidget(button("Export profile", self.export_profile, "primary"))
         pr.addWidget(button("Import profile…", self.import_profile))
@@ -5319,8 +5297,7 @@ class SystemPage(QWidget):
         self.card_boot = boot
 
         bk, bkv = titled_card("archive", "#a855f7", "Back up settings",
-                              "Saves Decky plugin settings, Ally Hub settings and MangoHud config into "
-                              "~/AllyHub-Backups/auto, no password needed. Update Guardian also does this daily.")
+                              'Decky, Ally Hub and MangoHud settings, saved to ~/AllyHub-Backups/auto. Also runs daily.')
         bkr = QHBoxLayout()
         bkr.addWidget(button("Back up now", self.backup, "primary"))
         bkr.addWidget(button("Open folder", lambda: hub.launch(
@@ -5779,10 +5756,7 @@ class UpdatesPage(QWidget):
         grid.addWidget(ucard, 0, 0)
 
         rcard, rv = titled_card("bug", "#e11d48", "Error reports",
-                                "When something breaks, Ally Hub files a GitHub issue in the project "
-                                "repository. Fixes go out with the next update. Personal details "
-                                "(IP and MAC addresses, your username, PIN and keys) are removed first. "
-                                "Reports are public.")
+                                'When something breaks, a public GitHub issue is filed so a fix can follow. Personal details are removed first.')
         self.report_cb = QCheckBox("Send error reports")
         self.report_cb.toggled.connect(self.toggle_reporting)
         rv.addWidget(self.report_cb)
@@ -6242,8 +6216,7 @@ class Hub(QMainWindow):
         add_block(self.appearance, self.build_glyphs_card(), heading="Controller icons")
         retitle(self.updates, "General", "How much Ally Hub shows, the background helper, and updates.")
         mcard, mv = titled_card("layout-grid", "#0ea5e9", "How much to show",
-                                "Simple keeps things calm. Advanced adds the expert controls: system tune-up, "
-                                "Proton per game, wake blockers, SSH and the activity log.")
+                                'Simple keeps things calm. Advanced adds tune-up, Proton per game, wake blockers, SSH and the log.')
         mr = QHBoxLayout()
         self.mode_box = QComboBox()
         self.mode_box.addItems(["Simple", "Advanced"])
@@ -6265,8 +6238,7 @@ class Hub(QMainWindow):
     # ---- controller glyphs: CSS Loader + the Handheld Controller Glyphs theme (1.3.7.7) ----
     def build_glyphs_card(self) -> QWidget:
         card, cv = titled_card("gamepad-2", "#8b5cf6", "Controller glyphs",
-                               "Xbox-style button icons across Steam's screens. Ally Hub installs CSS Loader; the "
-                               "Handheld Controller Glyphs theme is two taps inside it.")
+                               'Xbox-style button icons across Steam. Ally Hub installs CSS Loader; the theme is two taps in it.')
         self.glyph_status = label("", "cardMeta", wrap=True)
         cv.addWidget(self.glyph_status)
         row = QHBoxLayout()
