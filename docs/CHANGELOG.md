@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.7.2
+
+- The info line at the bottom of Home is no longer cut off, and it shows a short device name ("ROG Xbox Ally X")
+  instead of the vendor and model codes.
+- **Smoother Ally Hub lighting:** frames are now timed so the time spent sending each one counts toward the frame
+  rate, and on battery it runs at up to 15 frames a second instead of 10.
+- **A better-looking Quick Access panel:** a battery card with a level bar and CPU, GPU and power at a glance, and a
+  "Now playing" header for the game's switches. Update it from Games → Game settings.
+
 ## 1.3.7.1
 
 First test build under the new numbering: Stable 1.3.7 plus test revision 1 (at most 10 before Stable). On top of

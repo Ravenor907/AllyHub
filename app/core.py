@@ -210,6 +210,16 @@ def device_name() -> str:
     return f"{vendor} {product}".strip() or "Unknown device"
 
 
+def short_device_name(product: str = None) -> str:
+    """"ROG Xbox Ally X" for people to read: no vendor, no model codes like RC73XA_RC73XA (device_name() keeps
+    everything for reports)."""
+    product = read_text("/sys/class/dmi/id/product_name") if product is None else product
+    words = product.split()
+    while len(words) > 1 and re.fullmatch(r"[A-Z0-9_-]*\d[A-Z0-9_-]*", words[-1]):
+        words.pop()
+    return " ".join(words) or device_name()
+
+
 def in_game_mode() -> bool:
     return (os.environ.get("XDG_CURRENT_DESKTOP", "").lower() == "gamescope"
             or "GAMESCOPE_WAYLAND_DISPLAY" in os.environ)
@@ -3413,7 +3423,7 @@ def proton_log(appid) -> str:
 # only talks to the agent's local socket (CONTROL_SOCK, this user only). Bump QAM_VERSION when they change.
 # ==========================================================================
 
-QAM_VERSION = "1.0.1"
+QAM_VERSION = "1.0.2"
 QAM_DIR = HOME / "homebrew/plugins/AllyHub"
 QAM_STAGE = DATA_DIR / "qam-plugin"
 QAM_PLUGIN_JSON = r'''{
@@ -3505,6 +3515,43 @@ function Icon() {
 
 function temp(v) { return v === null || v === undefined ? "–" : `${Math.round(v)}°`; }
 
+// ---- look (1.3.7.2): a hero card for battery and temps, pills, colored game header ----
+const ACCENT = "linear-gradient(135deg, #e11d48 0%, #8b5cf6 100%)";
+const card = { borderRadius: "12px", padding: "12px 14px", margin: "4px 0 6px",
+               background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.08)" };
+function pct(text) { const m = /(\d+)/.exec(text || ""); return m ? Math.min(100, +m[1]) : null; }
+function Pill(label, value, key) {
+  return h("div", { key, style: { flex: 1, textAlign: "center", padding: "6px 4px", borderRadius: "10px",
+                                   background: "rgba(0,0,0,0.25)" } },
+    h("div", { style: { fontSize: "11px", opacity: 0.7, textTransform: "uppercase", letterSpacing: "0.04em" } }, label),
+    h("div", { style: { fontSize: "16px", fontWeight: 700, marginTop: "2px" } }, value));
+}
+function Hero(s) {
+  const p = pct(s.battery);
+  const color = p === null ? "#8b5cf6" : p <= 15 ? "#ef4444" : p <= 35 ? "#f59e0b" : "#22c55e";
+  const charging = /charg/i.test(s.battery || "") && !/dis/i.test(s.battery || "");
+  return h("div", { style: { ...card, background: "rgba(255,255,255,0.05)" } },
+    h("div", { style: { display: "flex", alignItems: "baseline", justifyContent: "space-between" } },
+      h("div", { style: { fontSize: "30px", fontWeight: 800, lineHeight: 1 } }, p === null ? "–" : `${p}%`,
+        charging ? h("span", { style: { fontSize: "14px", marginLeft: "6px", opacity: 0.8 } }, "⚡") : null),
+      h("div", { style: { fontSize: "13px", opacity: 0.8, textAlign: "right" } },
+        s.time_left && s.time_left !== "n/a" ? `${s.time_left} left` : (charging ? "Charging" : ""))),
+    h("div", { style: { height: "6px", borderRadius: "3px", background: "rgba(255,255,255,0.12)", margin: "10px 0" } },
+      h("div", { style: { width: `${p || 0}%`, height: "100%", borderRadius: "3px", background: color,
+                          transition: "width 0.4s" } })),
+    h("div", { style: { display: "flex", gap: "6px" } },
+      Pill("CPU", temp(s.cpu), "c"), Pill("GPU", temp(s.gpu), "g"),
+      Pill(s.watts ? "Power" : "Fan", s.watts ? `${s.watts} W` : (s.fan ? `${s.fan}` : "–"), "w")));
+}
+function GameHeader(name, live) {
+  return h("div", { style: { ...card, background: ACCENT, border: "none", color: "#fff" } },
+    h("div", { style: { fontSize: "11px", opacity: 0.85, textTransform: "uppercase", letterSpacing: "0.06em" } }, "Now playing"),
+    h("div", { style: { fontSize: "17px", fontWeight: 800, marginTop: "2px", overflow: "hidden",
+                        textOverflow: "ellipsis", whiteSpace: "nowrap" } }, name),
+    h("div", { style: { fontSize: "11px", opacity: 0.85, marginTop: "4px" } },
+      live ? "Switches apply the next time you start it." : "Reading this game's settings…"));
+}
+
 function Content() {
   const [s, setS] = useState(null);
   const [level, setLevel] = useState(null);       // brightness while the slider moves
@@ -3542,16 +3589,11 @@ function Content() {
   }
 
   const sections = [];
-  sections.push(h(PanelSection, { title: "Status", key: "status" },
-    h(PanelSectionRow, null, h(Field, { focusable: true, label: "Battery",
-      description: `${s.battery}${s.time_left && s.time_left !== "n/a" ? " · " + s.time_left + " left" : ""}${s.watts ? " · " + s.watts + " W" : ""}` })),
-    h(PanelSectionRow, null, h(Field, { focusable: true, label: "Temperatures",
-      description: `CPU ${temp(s.cpu)} · GPU ${temp(s.gpu)}${s.fan ? " · fan " + s.fan + " rpm" : ""}` }))));
+  sections.push(h(PanelSection, { key: "status" }, h(PanelSectionRow, null, Hero(s))));
 
   if (s.game) {
     const flags = s.game_flags;
-    const rows = [h(PanelSectionRow, { key: "name" }, h(Field, { focusable: true, label: s.game_name || "This game",
-      description: flags ? "Switches apply the next time you start it." : "Reading this game's settings…" }))];
+    const rows = [h(PanelSectionRow, { key: "name" }, GameHeader(s.game_name || "This game", !!flags))];
     if (flags) {
       for (const [key, title, desc] of GAME_SWITCHES) {
         if (key === "lsfg" && !s.lsfg && !flags.includes(key)) continue;
