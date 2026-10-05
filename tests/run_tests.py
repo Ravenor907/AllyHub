@@ -144,6 +144,31 @@ _ur.urlopen = _uo
 core.TOKEN_FILE.unlink()
 core.DATA_DIR.chmod(0o755); core.secure_data_dir()
 check(oct(core.DATA_DIR.stat().st_mode & 0o777) == "0o700", "Ally Hub's data folder is private")
+# ---- Testing Rescue: a way out that works without the app ----
+core.update_config(lambda c: c["updates"].__setitem__("channel", "testing"))
+(Path(HOME) / "Desktop").mkdir(exist_ok=True); (Path(HOME) / "Desktop/allyhub.desktop").write_text("x")
+check(core.sync_testing_rescue() and core.RESCUE_DESKTOP.exists() and core.RESCUE_ON_DESKTOP.exists()
+      and "Ally Hub Testing Rescue" in core.RESCUE_DESKTOP.read_text(), "Testing: the rescue entry sits next to Ally Hub")
+check(subprocess.run(["bash", "-n", str(core.RESCUE_SH)]).returncode == 0 and "import core" not in core.RESCUE_SH.read_text(),
+      "the rescue script is valid bash and uses none of the app's code")
+_app = core.DATA_DIR; _prev = _app / "previous"
+_prev.mkdir(parents=True, exist_ok=True)
+(_app / "VERSION").write_text("6.4.0"); (_app / "core.py").write_text("broken")
+(_prev / "VERSION").write_text("6.3.5"); (_prev / "core.py").write_text("good")
+core.save_update_state({"pending": "6.4.0"})
+_r = subprocess.run(["bash", str(core.RESCUE_SH)], input="1\ny\n\n", capture_output=True, text=True, timeout=60,
+                    env=dict(os.environ, PATH="/usr/bin:/bin"))
+_st = core.update_state()
+check((_app / "VERSION").read_text() == "6.3.5" and (_app / "core.py").read_text() == "good" and "6.4.0" in _st.get("bad", [])
+      and "pending" not in _st, "Rescue → Roll back puts the previous version back and never offers the bad one again: "
+      + _r.stdout[-300:] + _r.stderr[-300:])
+check("1.4.0" in _r.stdout + _r.stderr or "1.3.5" in _r.stdout + _r.stderr, "the rescue shows public version numbers")
+core.update_config(lambda c: c["updates"].__setitem__("channel", "stable"))
+check(not core.sync_testing_rescue() and not core.RESCUE_DESKTOP.exists() and not core.RESCUE_DIR.exists()
+      and not core.RESCUE_ON_DESKTOP.exists(), "Stable: the rescue entry is gone")
+for _f in (_app / "VERSION", _app / "core.py"):
+    _f.unlink()
+shutil.rmtree(_prev); core.save_update_state({})
 import socket as _sock
 _h = _sock.gethostname()
 _s2 = core.scrub(f"steam 76561198012345678 on {_h} ok")

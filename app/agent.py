@@ -1028,6 +1028,7 @@ class Agent:
         self.safely("boost", self.recover_boost)
         self.safely("lighting", core.migrate_chip_spiral)
         self.safely("privacy", core.secure_data_dir)
+        self.safely("rescue", core.sync_testing_rescue)      # Testing: a way out that works without the app
         while not self.stopping:
             self.reload_config()
             if not self.cfg["agent"].get("enabled", True):

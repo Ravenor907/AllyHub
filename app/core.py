@@ -5524,6 +5524,10 @@ def install_update(expected: str, branch: str = "main", allow_older: bool = Fals
     st["history"] = st["history"][-20:]
     save_update_state(st)
     app_log("update", f"installed {expected} (from {VERSION})")
+    try:
+        sync_testing_rescue()
+    except Exception:
+        pass
     return True, f"Updated to {display_version(expected)}"
 
 
@@ -5615,6 +5619,161 @@ def on_probation(component: str = None) -> bool:
     if st.get("pending") != VERSION:
         return False
     return component is None or component not in (st.get("healthy_by") or [])
+
+
+# ==========================================================================
+# Testing Rescue (1.4.2, the owner's call): on the Testing channel, an app-menu entry next to Ally Hub that can roll
+# back the test build, go back to Stable or uninstall, even when the test build won't open. It is a standalone bash
+# script outside the app folder (updates and rollbacks never touch it) and imports nothing from Ally Hub.
+# ==========================================================================
+
+RESCUE_DIR = HOME / ".local/share/allyhub-rescue"
+RESCUE_SH = RESCUE_DIR / "rescue.sh"
+RESCUE_ICON = RESCUE_DIR / "rescue.svg"
+RESCUE_DESKTOP = HOME / ".local/share/applications/allyhub-testing-rescue.desktop"
+RESCUE_ON_DESKTOP = HOME / "Desktop/allyhub-testing-rescue.desktop"
+
+RESCUE_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+<rect width="64" height="64" rx="14" fill="#f59e0b"/>
+<circle cx="32" cy="32" r="17" fill="none" stroke="#ffffff" stroke-width="9"/>
+<g stroke="#b45309" stroke-width="9"><path d="M20 20l6 6M44 20l-6 6M20 44l6-6M44 44l-6-6"/></g>
+<rect x="38" y="40" width="22" height="18" rx="5" fill="#1f2937"/>
+<text x="49" y="54" font-family="sans-serif" font-size="13" font-weight="700" fill="#fbbf24" text-anchor="middle">T</text>
+</svg>
+"""
+
+RESCUE_SCRIPT = r'''#!/usr/bin/env bash
+# Ally Hub Testing Rescue. Made by Ally Hub while it's on the Testing channel, so a test build that won't open
+# can be rolled back, swapped for Stable or removed. It doesn't use any of Ally Hub's own code on purpose.
+APP="$HOME/.local/share/allyhub"
+PREV="$APP/previous"
+STATE="$APP/update_state.json"
+CFG="$HOME/.config/allyhub/config.json"
+REPO_URL="https://github.com/@REPO@"
+TITLE="Ally Hub Testing Rescue"
+NL=$'\n'
+ME_MENU="@DESKTOP@"
+ME_DESK="@ONDESK@"
+
+pub() { local v="$1"; [ -n "$v" ] || { echo "?"; return; }; echo "$(( ${v%%.*} - 5 )).${v#*.}"; }   # build 6.4.1 = 1.4.1
+say() {
+    if command -v kdialog >/dev/null 2>&1; then kdialog --title "$TITLE" --msgbox "$1"
+    elif command -v zenity >/dev/null 2>&1; then zenity --info --title "$TITLE" --text "$1"
+    else printf '%s\n' "$1"; read -r -p "Press Enter to close" _; fi
+}
+sure() {
+    if command -v kdialog >/dev/null 2>&1; then kdialog --title "$TITLE" --warningyesno "$1"
+    elif command -v zenity >/dev/null 2>&1; then zenity --question --title "$TITLE" --text "$1"
+    else printf '%s [y/N] ' "$1"; read -r a; [ "$a" = y ] || [ "$a" = Y ]; fi
+}
+pick() {
+    local text="Ally Hub $(pub "$(cat "$APP/VERSION" 2>/dev/null)") is a test build. What would you like to do?"
+    if command -v kdialog >/dev/null 2>&1; then
+        kdialog --title "$TITLE" --menu "$text" rollback "Roll back to the version before this one" \
+            stable "Go back to Stable (keeps your settings)" uninstall "Uninstall Ally Hub"
+    elif command -v zenity >/dev/null 2>&1; then
+        zenity --list --title "$TITLE" --text "$text" --column key --column Action --hide-column 1 \
+            rollback "Roll back to the version before this one" stable "Go back to Stable (keeps your settings)" \
+            uninstall "Uninstall Ally Hub"
+    else
+        echo "$text" >&2; echo "1) Roll back  2) Go back to Stable  3) Uninstall" >&2; read -r n
+        case "$n" in 1) echo rollback;; 2) echo stable;; 3) echo uninstall;; esac
+    fi
+}
+in_terminal() {     # long jobs run where you can watch them
+    if command -v konsole >/dev/null 2>&1; then konsole -e bash -c "$1; echo; read -r -p 'Press Enter to close this window' _"
+    else bash -c "$1"; fi
+}
+remove_me() { rm -f "$ME_MENU" "$ME_DESK"; rm -rf "$HOME/.local/share/allyhub-rescue"; }
+
+case "$(pick)" in
+rollback)
+    if [ ! -f "$PREV/core.py" ]; then
+        say "There's no earlier version saved on this handheld. Use \"Go back to Stable\" instead."; exit 0
+    fi
+    bad="$(cat "$APP/VERSION" 2>/dev/null)"; good="$(cat "$PREV/VERSION" 2>/dev/null)"
+    sure "Roll back from $(pub "$bad") to $(pub "$good")?${NL}${NL}Ally Hub won't install $(pub "$bad") again." || exit 0
+    systemctl --user stop allyhub-agent.service 2>/dev/null
+    pkill -f "$APP/allyhub.py" 2>/dev/null
+    cp -rf "$PREV/." "$APP/" && rm -rf "$APP/__pycache__"
+    python3 - "$STATE" "$bad" "$good" <<'PY'
+import json, sys, time
+path, bad, good = sys.argv[1:4]
+try:
+    st = json.load(open(path))
+except Exception:
+    st = {}
+st.setdefault("bad", [])
+if bad and bad not in st["bad"]:
+    st["bad"].append(bad)
+st.pop("pending", None)
+st["rolled_back"] = {"from": bad, "to": good, "reason": "Testing Rescue", "at": time.time()}
+json.dump(st, open(path, "w"), indent=2)
+PY
+    systemctl --user is-enabled -q allyhub-agent.service 2>/dev/null && systemctl --user start allyhub-agent.service
+    say "Rolled back to $(pub "$good"). Open Ally Hub as usual.${NL}${NL}You're still on the Testing channel; the next test build will be offered when it's out."
+    ;;
+stable)
+    sure "Go back to Stable?${NL}${NL}Ally Hub downloads the stable version and reinstalls it. Your settings stay." || exit 0
+    python3 - "$CFG" <<'PY'
+import json, sys
+path = sys.argv[1]
+try:
+    cfg = json.load(open(path))
+except Exception:
+    cfg = {}
+cfg.setdefault("updates", {})["channel"] = "stable"
+json.dump(cfg, open(path, "w"), indent=2)
+PY
+    pkill -f "$APP/allyhub.py" 2>/dev/null
+    tmp="$(mktemp -d)"
+    in_terminal "git clone -q --depth 1 '$REPO_URL' '$tmp/AllyHub' && bash '$tmp/AllyHub/scripts/install.sh' && rm -f '$ME_MENU' '$ME_DESK' && rm -rf '$HOME/.local/share/allyhub-rescue'; rm -rf '$tmp'"
+    ;;
+uninstall)
+    sure "Uninstall Ally Hub?${NL}${NL}Your mods, apps and backups stay." || exit 0
+    pkill -f "$APP/allyhub.py" 2>/dev/null
+    if [ -f "$APP/uninstall.sh" ]; then
+        in_terminal "bash '$APP/uninstall.sh'"
+    else
+        tmp="$(mktemp -d)"
+        in_terminal "git clone -q --depth 1 '$REPO_URL' '$tmp/AllyHub' && bash '$tmp/AllyHub/scripts/uninstall.sh'; rm -rf '$tmp'"
+    fi
+    remove_me
+    ;;
+esac
+'''
+
+
+def testing_rescue_files() -> dict:
+    """{path: (text, mode)} for the Testing Rescue (script, icon, app-menu entry, desktop icon when Ally Hub has one)."""
+    script = (RESCUE_SCRIPT.replace("@REPO@", repo_name()).replace("@DESKTOP@", str(RESCUE_DESKTOP))
+              .replace("@ONDESK@", str(RESCUE_ON_DESKTOP)))
+    entry = ("[Desktop Entry]\nType=Application\nName=Ally Hub Testing Rescue\n"
+             "Comment=Roll back the Ally Hub test build, go back to Stable, or uninstall\n"
+             f"Exec=bash {RESCUE_SH}\nIcon={RESCUE_ICON}\nTerminal=false\nCategories=Utility;Settings;Game;\n")
+    files = {RESCUE_SH: (script, 0o755), RESCUE_ICON: (RESCUE_SVG, 0o644), RESCUE_DESKTOP: (entry, 0o755)}
+    if (HOME / "Desktop/allyhub.desktop").exists():
+        files[RESCUE_ON_DESKTOP] = (entry, 0o755)
+    return files
+
+
+def sync_testing_rescue(cfg: dict = None) -> bool:
+    """Testing channel: make sure the rescue entry exists (and is current). Stable: remove it. True if it's there."""
+    on = update_channel(cfg) == "testing"
+    if not on:
+        for p in (RESCUE_DESKTOP, RESCUE_ON_DESKTOP):
+            p.unlink(missing_ok=True)
+        shutil.rmtree(RESCUE_DIR, ignore_errors=True)
+        return False
+    for path, (text, mode) in testing_rescue_files().items():
+        try:
+            if read_text(path) != text:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text)
+            path.chmod(mode)
+        except OSError:
+            pass
+    return RESCUE_SH.exists()
 
 
 def changelog_text() -> str:
