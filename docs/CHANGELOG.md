@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.7.4
+
+- **Failures now say what happened and what to do**, in plain words: a cancelled password, no internet, no space
+  left. No more "exit code 1" with a wall of log.
+- **Each task says when it's done** (with how long it took), and the status shows how many are still waiting.
+- An unexpected error no longer looks like a crash: Ally Hub says it's still running and whether a fix can follow.
+
 ## 1.3.7.3
 
 - **Calmer, smoother Ally Hub spiral:** it spins about half as fast, and the colors blend from frame to frame
