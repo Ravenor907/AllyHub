@@ -1029,6 +1029,7 @@ class Agent:
         self.safely("lighting", core.migrate_chip_spiral)
         self.safely("privacy", core.secure_data_dir)
         self.safely("rescue", core.sync_testing_rescue)      # Testing: a way out that works without the app
+        self.safely("menu", core.tidy_menu_entry)
         while not self.stopping:
             self.reload_config()
             if not self.cfg["agent"].get("enabled", True):

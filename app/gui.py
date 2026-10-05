@@ -7116,10 +7116,11 @@ def single_instance(app) -> bool:
 def main():
     sys.excepthook = _excepthook
     core.app_log("gui", f"start {VERSION} ({'game mode' if GAMEMODE else 'desktop'})")
-    try:
-        core.sync_testing_rescue()
-    except Exception:
-        pass
+    for fix in (core.sync_testing_rescue, core.tidy_menu_entry):
+        try:
+            fix()
+        except Exception:
+            pass
     for fix in (core.migrate_chip_spiral, core.secure_data_dir):
         try:
             fix()

@@ -75,6 +75,7 @@ check(top == [".claude", ".github", ".gitignore", "LICENSE", "README.md", "VERSI
               "scripts", "tests"], "tidy repo top level: " + ", ".join(top))
 # install.sh run from scripts/ finds and copies every app file (only its copy step, no network)
 inst = open(os.path.join({root!r}, "scripts", "install.sh")).read()
+check("Categories=Utility;\\n" in inst and "Settings;Game" not in inst, "the installer puts Ally Hub in one menu folder")
 check("--first-install" in inst and 'FRESH' in inst, "a fresh install sets itself up (helper on, Game Mode entry, setup)")
 copy_part = inst.split('rm -rf "$APP_DIR/__pycache__"')[0]
 tmp_sh = os.path.join({root!r}, "scripts", ".copy_test.sh")
@@ -144,6 +145,11 @@ _ur.urlopen = _uo
 core.TOKEN_FILE.unlink()
 core.DATA_DIR.chmod(0o755); core.secure_data_dir()
 check(oct(core.DATA_DIR.stat().st_mode & 0o777) == "0o700", "Ally Hub's data folder is private")
+_me = core.MENU_ENTRIES[0]; _me.parent.mkdir(parents=True, exist_ok=True)
+_me.write_text("[Desktop Entry]\nName=Ally Hub\nCategories=Utility;Settings;Game;\n")
+check(core.tidy_menu_entry() and "Categories=Utility;\n" in _me.read_text() and not core.tidy_menu_entry(),
+      "Ally Hub shows once in the app menu (Utilities), not under Games, Utilities and System")
+_me.unlink()
 # ---- Testing Rescue: a way out that works without the app ----
 core.update_config(lambda c: c["updates"].__setitem__("channel", "testing"))
 (Path(HOME) / "Desktop").mkdir(exist_ok=True); (Path(HOME) / "Desktop/allyhub.desktop").write_text("x")

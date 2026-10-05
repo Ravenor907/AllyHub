@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.4.3
+
+- **Ally Hub shows up once in the app menu**, under Utilities, instead of under Games, Utilities and System. Existing
+  installs are fixed automatically.
+
 ## 1.4.2
 
 - **Ally Hub Testing Rescue:** on the Testing channel there's now an entry in the app menu (and on the desktop,
