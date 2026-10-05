@@ -53,7 +53,7 @@ Comment=Mods, plugins, themes, lighting and automation for the ROG Xbox Ally X
 Exec=$BIN_DIR/allyhub
 Icon=$APP_DIR/allyhub.svg
 Terminal=false
-Categories=Utility;Settings;Game;
+Categories=Utility;
 EOF
 chmod +x "$DESKTOP_FILE"
 

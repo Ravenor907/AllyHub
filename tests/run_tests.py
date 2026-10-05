@@ -75,6 +75,7 @@ check(top == [".claude", ".github", ".gitignore", "LICENSE", "README.md", "VERSI
               "scripts", "tests"], "tidy repo top level: " + ", ".join(top))
 # install.sh run from scripts/ finds and copies every app file (only its copy step, no network)
 inst = open(os.path.join({root!r}, "scripts", "install.sh")).read()
+check("Categories=Utility;\\n" in inst and "Settings;Game" not in inst, "the installer puts Ally Hub in one menu folder")
 check("--first-install" in inst and 'FRESH' in inst, "a fresh install sets itself up (helper on, Game Mode entry, setup)")
 copy_part = inst.split('rm -rf "$APP_DIR/__pycache__"')[0]
 tmp_sh = os.path.join({root!r}, "scripts", ".copy_test.sh")
@@ -144,6 +145,11 @@ _ur.urlopen = _uo
 core.TOKEN_FILE.unlink()
 core.DATA_DIR.chmod(0o755); core.secure_data_dir()
 check(oct(core.DATA_DIR.stat().st_mode & 0o777) == "0o700", "Ally Hub's data folder is private")
+_me = core.MENU_ENTRIES[0]; _me.parent.mkdir(parents=True, exist_ok=True)
+_me.write_text("[Desktop Entry]\nName=Ally Hub\nCategories=Utility;Settings;Game;\n")
+check(core.tidy_menu_entry() and "Categories=Utility;\n" in _me.read_text() and not core.tidy_menu_entry(),
+      "Ally Hub shows once in the app menu (Utilities), not under Games, Utilities and System")
+_me.unlink()
 import socket as _sock
 _h = _sock.gethostname()
 _s2 = core.scrub(f"steam 76561198012345678 on {_h} ok")
@@ -1459,10 +1465,35 @@ REMOTE.update(v="1.2.1", broken=False)
 ok, _ = core.install_update("1.2.1")
 core.VERSION = "1.2.1"
 check(core.startup_check("agent") == "probation", "probation after good update")
+core.update_config(lambda c: c["agent"].__setitem__("enabled", True))
 core.mark_healthy("agent")
-check(not core.on_probation(), "marked healthy, probation over")
+check(core.on_probation() and core.on_probation("gui") and not core.on_probation("agent"),
+      "the helper working doesn't end probation for the window (what let 1.4.0 slip through)")
+core.mark_healthy("gui")
+check(not core.on_probation(), "both parts worked: probation over")
+# the 1.4.0 case: the helper is fine, the window crashes on every start
+REMOTE.update(v="1.2.2", broken=False)
+ok, _ = core.install_update("1.2.2")
+core.VERSION = "1.2.2"
+check(core.startup_check("agent") == "probation", "helper starts")
+core.mark_healthy("agent")
+_rs = []
+_rsa = core.restart_agent_service
+core.restart_agent_service = lambda: _rs.append(1)
+for _ in range(core.MAX_UNHEALTHY_BOOTS):
+    check(core.startup_check("gui") == "probation", "window start counted on its own")
+check(core.startup_check("gui") == "rolled_back" and (app / "VERSION").read_text() == "1.2.1" and _rs,
+      "the window failing to start rolls back even though the helper was fine, and the helper restarts on the old files")
+core.restart_agent_service = _rsa
+check(core.startup_check("agent") == "ok", "after the rollback nothing is on probation")
+_st = core.update_state(); _st.update(pending=core.VERSION, boots=2); core.save_update_state(_st)
+check(core.startup_check("gui") == "probation" and core.update_state()["boots"] == {{"gui": 1}},
+      "a count saved by an older version doesn't break anything")
+_st = core.update_state(); _st.pop("pending"); core.save_update_state(_st)
+core.VERSION = "1.2.1"
+_prev = core.previous_version()
 ok, msg = core.rollback("manual test")
-check(ok and (app / "VERSION").read_text() == "1.0.0", "manual rollback works")
+check(ok and (app / "VERSION").read_text() == _prev, "manual rollback works")
 core.VERSION = "1.0.0"
 REMOTE.update(v="1.3.0", broken=False, folders=True)
 ok, msg = core.install_update("1.3.0")

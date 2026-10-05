@@ -4004,6 +4004,27 @@ def gamemode_desktop_text() -> str:
             f"Exec={LAUNCHER} --gamemode\nIcon={APP_DIR / 'allyhub.svg'}\nNoDisplay=true\nTerminal=false\n")
 
 
+MENU_ENTRIES = (HOME / ".local/share/applications/allyhub.desktop", HOME / "Desktop/allyhub.desktop")
+
+
+def tidy_menu_entry() -> bool:
+    """Ally Hub shows once in the app menu, under Utilities. Installers before 1.4.3 listed three categories, so KDE
+    showed it under Games, Utilities and System (the owner noticed). Fixes existing entries in place."""
+    changed = False
+    for p in MENU_ENTRIES:
+        try:
+            text = p.read_text()               # not read_text(): that strips, and the file keeps its layout
+        except OSError:
+            continue
+        if text and re.search(r"^Categories=(?!Utility;$).*$", text, re.M):
+            try:
+                p.write_text(re.sub(r"^Categories=.*$", "Categories=Utility;", text, flags=re.M))
+                changed = True
+            except OSError:
+                pass
+    return changed
+
+
 def in_steam_library() -> bool:
     return any(n.strip().lower() == "ally hub" for n in steam_shortcut_names())
 
@@ -5501,7 +5522,8 @@ def install_update(expected: str, branch: str = "main", allow_older: bool = Fals
                 shutil.copy2(repo_file(src, f), APP_DIR / f)
         shutil.rmtree(APP_DIR / "__pycache__", ignore_errors=True)
     st = update_state()
-    st.update({"pending": expected, "from": VERSION, "boots": 0, "installed_at": time.time(), "branch": branch})
+    st.update({"pending": expected, "from": VERSION, "boots": {}, "healthy_by": [], "installed_at": time.time(),
+               "branch": branch})
     st.setdefault("history", []).append({"from": VERSION, "to": expected, "at": time.time()})
     st["history"] = st["history"][-20:]
     save_update_state(st)
@@ -5537,31 +5559,66 @@ def rollback(reason: str, mark_bad: bool = True) -> tuple:
     return True, f"Rolled back to {prev}"
 
 
+# Probation (1.4.1, the owner: "an automatic rollback for a number of failed starts"). Each part proves itself:
+# the app window ("gui") and the background helper ("agent") count their own starts. 1.4.0 showed why: the helper
+# started fine and ended probation for the whole update while the window crashed on every start, so nothing rolled
+# back. Now the update stays on probation until the window has worked (and the helper too, when it's on), and
+# MAX_UNHEALTHY_BOOTS failed starts of either part roll it back.
+
+def _boots(st: dict) -> dict:
+    b = st.get("boots")
+    return dict(b) if isinstance(b, dict) else {}       # older versions saved one number for both parts
+
+
 def startup_check(component: str) -> str:
-    """Call at startup. Returns 'ok', 'probation' or 'rolled_back'."""
+    """Call at startup (the GUI only once it knows it's the only window). Returns 'ok', 'probation' or
+    'rolled_back'."""
     st = update_state()
-    if not st.get("pending") or st["pending"] != VERSION:
+    if st.get("pending") != VERSION or component in (st.get("healthy_by") or []):
         return "ok"
-    st["boots"] = st.get("boots", 0) + 1
+    boots = _boots(st)
+    boots[component] = boots.get(component, 0) + 1
+    st["boots"] = boots
     save_update_state(st)
-    if st["boots"] > MAX_UNHEALTHY_BOOTS:
-        rollback(f"{component} failed to start {MAX_UNHEALTHY_BOOTS} times after updating")
-        return "rolled_back"
+    if boots[component] > MAX_UNHEALTHY_BOOTS:
+        what = "Ally Hub's window" if component == "gui" else "the background helper"
+        ok, _msg = rollback(f"{what} failed to start {MAX_UNHEALTHY_BOOTS} times after updating")
+        if ok and component != "agent":
+            restart_agent_service()      # it may be running the bad version's code: back to the old one
+        return "rolled_back" if ok else "probation"
     return "probation"
+
+
+def restart_agent_service() -> None:
+    """After a rollback from the GUI: the helper restarts on the restored files (only if it was running)."""
+    run_quiet(["systemctl", "--user", "try-restart", "allyhub-agent.service"], timeout=20)
 
 
 def mark_healthy(component: str) -> None:
     st = update_state()
-    if st.get("pending") == VERSION:
+    if st.get("pending") != VERSION:
+        return
+    hb = list(st.get("healthy_by") or [])
+    if component not in hb:
+        hb.append(component)
+    boots = _boots(st)
+    boots.pop(component, None)
+    st.update(healthy_by=hb, boots=boots)
+    need = ["gui"] + (["agent"] if load_config()["agent"].get("enabled") else [])
+    if all(c in hb for c in need):       # every part that runs has worked: probation is over
         st.pop("pending", None)
-        st["boots"] = 0
-        st["healthy"] = {"version": VERSION, "at": time.time(), "by": component}
-        save_update_state(st)
-        app_log("update", f"{VERSION} confirmed healthy by {component}")
+        st["boots"], st["healthy_by"] = {}, []
+        st["healthy"] = {"version": VERSION, "at": time.time(), "by": "+".join(hb)}
+    save_update_state(st)
+    app_log("update", f"{VERSION} confirmed healthy by {component}")
 
 
-def on_probation() -> bool:
-    return update_state().get("pending") == VERSION
+def on_probation(component: str = None) -> bool:
+    """Is this version still being checked? With a component: has that part not proven itself yet?"""
+    st = update_state()
+    if st.get("pending") != VERSION:
+        return False
+    return component is None or component not in (st.get("healthy_by") or [])
 
 
 def changelog_text() -> str:

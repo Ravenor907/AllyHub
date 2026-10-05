@@ -6668,7 +6668,7 @@ class Hub(QMainWindow):
     def maybe_check_updates(self):
         up = load_config()["updates"]
         st = core.update_state()
-        if (up.get("auto_update") and not core.agent_running() and not core.on_probation()
+        if (up.get("auto_update") and not core.agent_running() and not core.on_probation("gui")
                 and time.time() - st.get("last_check", 0) > core.UPDATE_INTERVAL_S):
             BackgroundTask(self, core.check_for_update,
                            lambda r: r.get("available") and self.toast(
@@ -6680,6 +6680,7 @@ class Hub(QMainWindow):
         if self.runner.busy() and not ask(self, "A task is still running. Quit anyway?"):
             ev.ignore()
             return
+        core.mark_healthy("gui")          # opened and closed normally: not a failed start, however quick
         ev.accept()
 
 
@@ -6691,9 +6692,10 @@ def _excepthook(etype, evalue, tb):
     sys.__excepthook__(etype, evalue, tb)
     reported = core.report_exception("gui", (etype, evalue, tb))
     hint = core.report_hint()
-    if core.on_probation() and time.time() - _STARTED < 120:
-        ok, _msg = core.rollback(f"GUI crashed right after updating: {etype.__name__}: {evalue}")
+    if core.on_probation("gui") and time.time() - _STARTED < 120:
+        ok, _msg = core.rollback(f"Ally Hub's window crashed right after updating: {etype.__name__}: {evalue}")
         if ok:
+            core.restart_agent_service()
             msg_error(None, APP_NAME, "The new version of Ally Hub hit an error, so it went "
                                                  "back to the previous version. Restarting…")
             os.execv(sys.executable, [sys.executable, str(core.APP_DIR / "allyhub.py")] + sys.argv[1:])
@@ -6736,14 +6738,13 @@ def single_instance(app) -> bool:
 
 
 def main():
-    if core.startup_check("gui") == "rolled_back":
-        os.execv(sys.executable, [sys.executable, str(core.APP_DIR / "allyhub.py")] + sys.argv[1:])
     sys.excepthook = _excepthook
     core.app_log("gui", f"start {VERSION} ({'game mode' if GAMEMODE else 'desktop'})")
-    try:
-        core.secure_data_dir()
-    except Exception:
-        pass
+    for fix in (core.secure_data_dir, core.tidy_menu_entry):
+        try:
+            fix()
+        except Exception:
+            pass
     global _SCALE_SET_BY_US
     if "QT_SCALE_FACTOR" not in os.environ:
         os.environ["QT_SCALE_FACTOR"] = str(core.ui_scale(load_config()["theme"], GAMEMODE))
@@ -6761,6 +6762,10 @@ def main():
     if not single_instance(app):                    # already open: it was brought to the front
         core.app_log("gui", "second launch: showed the open window instead")
         return
+    # counted only now: tapping the icon while Ally Hub is open isn't a failed start
+    if core.startup_check("gui") == "rolled_back":
+        app._instance_server.close()
+        os.execv(sys.executable, [sys.executable, str(core.APP_DIR / "allyhub.py")] + sys.argv[1:])
     app.setDesktopFileName("allyhub")
     font = QFont("Noto Sans")
     font.setPointSize(11)
