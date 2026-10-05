@@ -15,7 +15,7 @@ if [ -f "$APP_DIR/core.py" ] && command -v python3 >/dev/null; then
 fi
 rm -rf "$APP_DIR" "$HOME/.config/allyhub" "$HOME/.local/share/allyhub-rescue"
 rm -f "$HOME/.local/share/applications/allyhub-testing-rescue.desktop" "$HOME/Desktop/allyhub-testing-rescue.desktop"
-rm -f "$HOME/.local/share/Steam/controller_base/templates/controller_allyhub_ally_x.vdf"
+rm -f "$HOME"/.local/share/Steam/controller_base/templates/controller_allyhub_ally_x*.vdf
 rm -f "$HOME/.config/environment.d/90-allyhub-games.conf"
 rm -f "$HOME/.local/bin/allyhub" \
       "$HOME/.local/share/applications/allyhub.desktop" \

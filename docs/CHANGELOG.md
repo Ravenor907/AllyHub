@@ -1,10 +1,8 @@
 # Changelog
 
-## 1.3.7.5
+## 1.3.7.6
 
-- **Xbox Ally X controller layout:** Games > Game settings has a new card that adds a ready-made Ally X layout to
-  Steam's templates, with every control mapped (back buttons copy the face buttons) so each one is easy to edit.
-  It has a Remove button, and the uninstaller removes it too.
+- Removed the Xbox Ally X controller layout card that 1.3.7.5 added. It's not coming back.
 
 ## 1.3.7.4
 
