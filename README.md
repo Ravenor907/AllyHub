@@ -199,8 +199,8 @@ This is a personal project built for my own Ally X, shared in case it helps some
 **Bug reports and suggestions are welcome** through [Issues](../../issues/new/choose). Every one gets a
 reply and I read them all, but I decide what goes into the app.
 
-**About AI use:** the code, error fixes and issue replies are written by Claude, Anthropic's AI. I direct the
-work, test it on my own Ally X and decide what ships. Replies from Claude are signed as such.
+**About AI use:** Ally Hub is written with Claude, Anthropic's AI. I direct the work, test it on my own Ally X and
+decide what ships.
 
 ## 🧹 Uninstall
 
