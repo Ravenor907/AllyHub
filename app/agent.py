@@ -138,10 +138,27 @@ class Animator(threading.Thread):
             fps = 20
         bat = core.battery_info()
         if bat.get("status") == "Discharging" and light.get("on_battery", "slow") == "slow":
-            # two thirds of the chosen rate (30 -> 20, 20 -> 13, 10 stays 10). It was a flat 15 cap, so on battery
-            # Smooth and Silky looked exactly the same (the owner, 1.4.1)
-            fps = max(10, min(fps, round(fps * 2 / 3)))
+            # two thirds of the chosen rate, never below the old 15 (30 -> 20, 20 -> 15, 10 stays 10). It was a flat
+            # 15 cap, so on battery Smooth and Silky looked exactly the same (the owner, 1.4.1)
+            fps = max(min(fps, 15), round(fps * 2 / 3))
         return fps
+
+    def _timed(self, send, animated: bool) -> bool:
+        """Send a frame and, while animating, log the real frame rate once a minute (the owner's videos showed
+        about 3 fps when the setting said 20: this line in the log says what the rings actually get)."""
+        t0 = time.monotonic()
+        ok = send()
+        if not animated:
+            return ok
+        st = getattr(self, "_stat", None)
+        if st is None or t0 - st[2] > 90:                 # first frame, or animation was paused: start over
+            st = self._stat = [0, 0.0, t0]
+        st[0] += 1
+        st[1] += time.monotonic() - t0
+        if t0 - st[2] >= 60 and st[0]:
+            log(f"lighting: {st[0] / (t0 - st[2]):.1f} frames a second, {st[1] / st[0] * 1000:.0f} ms to send each")
+            self._stat = [0, 0.0, t0]
+        return ok
 
     def run(self):
         reported = False
@@ -213,7 +230,7 @@ class Animator(threading.Thread):
             self._zones = zones
             key = ("zones", tuple(zones), brightness)
             send = lambda: core.hid_zone_frame(zones, brightness, self.agent.leds, light.get("hid_method"),
-                                               light.get("gamma"))
+                                               light.get("gamma"), light.get("stream_all", True) is not False)
         else:
             frame = core.effect_frame(effect, t if animated else 0.0)
             if not animated and effect["type"] != "static":
@@ -221,7 +238,7 @@ class Animator(threading.Thread):
             key = (frame, brightness)
             send = lambda: core.apply_lighting(frame, brightness, enums, self.agent.leds, light.get("encoding"))
         if key != self.last_frame:
-            if send():
+            if self._timed(send, animated):
                 self.last_frame = key
                 self.ok = True
             else:

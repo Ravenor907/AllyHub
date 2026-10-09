@@ -363,9 +363,14 @@ core.kernel_lights_off = lambda leds: "off"
 core.hid_reset_session()
 check(core.hid_zone_frame([(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 255)], 128, [], "m6"), "zone frame sent")
 check(core.hid_zone_frame([(0, 0, 255)] * 4, 255, [], "m6"), "second frame sent")
-f1, f2 = frames
-check(any(p[1] == 0xB5 for p in f1) and [p[1] for p in f2] == [0xD1] + [0xB3] * 4,
-      "first frame commits, later frames are bare zone commands (no chip-memory writes)")
+check(core.hid_zone_frame([(0, 0, 255)] * 4, 255, [], "m6"), "an unchanged frame is fine")
+check(core.hid_zone_frame([(0, 0, 255)] * 3 + [(255, 0, 0)], 255, [], "m6"), "one zone changes")
+check(core.hid_zone_frame([(0, 0, 255)] * 4, 255, [], "m6", all_zones=False), "per-zone mode")
+f1, f2, f3, f4 = frames
+check(any(p[1] == 0xB5 for p in f1) and [(p[1], p[2]) for p in f2] == [(0xB3, 0x00)],
+      "first frame commits; then a one-color frame is ONE zone-'all' packet (no enable, no chip-memory writes)")
+check(len(frames) == 4 and [(p[1], p[2]) for p in f3] == [(0xB3, 0x04)] and [(p[1], p[2]) for p in f4] == [(0xB3, 0x04)],
+      "unchanged frames send nothing; otherwise only the zones that changed")
 check([tuple(p[4:7]) for p in f1 if p[1] == 0xB3] == [(128, 0, 0), (0, 128, 0), (0, 0, 128), (128, 128, 128)],
       "brightness folded into the colors, each zone its own color")
 core.hid_send, core._stream_nodes, core.kernel_lights_off = _hs, _nodes, _off
@@ -1118,7 +1123,10 @@ check(core.led_gamma((255, 0, 0)) == (255, 0, 0) and core.led_gamma((0, 0, 0)) =
       and core.led_gamma((255, 255, 255), 0.5) == (128, 128, 128),
       "LED gamma keeps pure colors and white exact, and brightness scales the light")
 _g = core.led_gamma(core.hex_to_rgb("#0ea5e9"))
-check(_g[0] <= 1 and _g[1] < 165 * 0.7 and _g[2] > 190, "mixed colors lose the wash: the weak channels drop the most " + str(_g))
+check(_g[0] <= 1 and _g[1] < 165 * 0.7 and _g[2] == 233, "mixed colors lose the wash; the strongest channel keeps its value "
+      + str(_g))
+check(core.led_gamma((60, 0, 0)) == (60, 0, 0) and core.led_gamma((255, 0, 51), 0.12)[0] == 31,
+      "a dim frame stays as bright as before (breathing never fades to black)")
 check(core.led_gamma((128, 64, 0), gamma="bad") == core.led_gamma((128, 64, 0)), "a bad gamma setting falls back")
 # ---- reports: attachments, snapshot, instant upload, per-version repeats, manual reports ----
 posts = []
@@ -1427,7 +1435,7 @@ check((sl / "multi_intensity").read_text() == "255 0 0", "lighting re-sent after
 # streaming: with a commit-once chip method the agent draws every frame itself (no more "only breathing")
 sent = []
 _zf = core.hid_zone_frame
-core.hid_zone_frame = lambda zones, b, leds=None, method=None, gamma=None: (sent.append((tuple(zones), method)), True)[1]
+core.hid_zone_frame = lambda zones, b, leds=None, method=None, gamma=None, all_zones=True: (sent.append((tuple(zones), method)), True)[1]
 st = agent.Animator(types.SimpleNamespace(cfg={"lighting": {"encoding": "hid", "hid_method": "m6", "fps": 30}},
                                           leds=core.find_leds()))
 st.spec = (core.normalize_effect(dict(core.PRESETS["RGB Spiral"], engine="smooth")), 255, {})
@@ -1447,7 +1455,7 @@ for _f in (30, 20, 10):
 st.agent.cfg = {"lighting": {"fps": 30, "on_battery": "full"}}
 _rates.append(st.fps())
 core.battery_info = _bi
-check(_rates == [20, 13, 10, 30], "on battery, Smoothness still matters (slow = two thirds, full = as chosen): "
+check(_rates == [20, 15, 10, 30], "on battery, Smoothness still matters (slow = two thirds, full = as chosen): "
       + str(_rates))
 # ---- Game Boost in the agent ----
 fk = Path(HOME) / "boostcpu" / "policy0"; fk.mkdir(parents=True)

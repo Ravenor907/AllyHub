@@ -102,7 +102,8 @@ DEFAULT_CONFIG = {
     "lighting": {"effect": None, "fps": 20, "on_battery": "slow", "custom": {}, "controller": "huesync",
                  "chip_spiral": False,     # True once saved spirals were moved to the chip's spiral (1.3.4)
                  "gamma": 2.2,             # LED color correction (1.4.1.1): see led_gamma
-                 "color_spirals_fixed": False},   # True once color spirals left the chip (1.4.1.1)
+                 "color_spirals_fixed": False,    # True once color spirals left the chip (1.4.1.1)
+                 "stream_all": True},             # one-color frames as one zone-"all" packet (1.4.1.2)
     # channel "stable" follows main; "testing" also follows the testing branch (the owner's test builds)
     "updates": {"repo": REPO_DEFAULT, "auto_update": True, "reporting": False, "channel": "stable"},
     # Tools > Performance. The tune-up itself lives in /etc, so only Game Boost's switch is here.
@@ -1075,8 +1076,9 @@ def lighting_access_details(leds: list = None) -> str:
 
 # LEDs give out light in proportion to the value they get, but colors are picked as screen (sRGB) values, which
 # are gamma-encoded. Sent as-is, a color's weaker channels glow far too bright and every color looks washed out
-# toward white (the owner, 1.4.1). Converting to light first keeps colors true: (255, 0, 0) stays pure red,
-# while #0ea5e9 sends roughly (0, 96, 205) instead of (14, 165, 233).
+# toward white (the owner, 1.4.1). Only the MIX is corrected: the strongest channel keeps its value, so brightness,
+# fades and a breathe's lowest point behave exactly as before. 1.4.1.1 corrected the whole value, which made dim
+# frames step visibly and sent breathing to black (the owner). #0ea5e9 sends (0, 109, 233) instead of (14, 165, 233).
 LED_GAMMA = 2.2
 _GAMMA_LUT = {}
 
@@ -1092,7 +1094,13 @@ def led_gamma(rgb: tuple, k: float = 1.0, gamma: float = None) -> tuple:
     if lut is None:
         lut = _GAMMA_LUT[g] = [(i / 255) ** g for i in range(256)]
     k = max(0.0, min(1.0, k))
-    return tuple(int(round(255 * lut[max(0, min(255, int(v)))] * k)) for v in rgb)
+    vals = [max(0, min(255, int(round(v)))) for v in rgb]
+    top = max(vals) if vals else 0
+    if not top:
+        return tuple(0 for _ in vals)
+    base = lut[top]
+    # each channel's share of the strongest one, corrected; the strongest channel itself is untouched
+    return tuple(int(round(top * (lut[v] / base) * k)) for v in vals)
 
 
 def hid_brightness_level(brightness: int) -> int:
@@ -1356,9 +1364,19 @@ def _stream_nodes(leds: list) -> dict:
     return nodes
 
 
-def hid_zone_frame(zones: list, brightness: int, leds: list = None, method: str = None, gamma: float = None) -> bool:
+def _zone_cmd(zone: str, rgb: tuple) -> bytes:
+    r, g, b = (max(0, min(255, int(v))) for v in rgb)
+    return _hid_buf([HID_REPORT, 0xB3, HID_ZONES[zone], HID_MODES["solid"], r, g, b, 0x00, 0x00, 0x00, 0, 0, 0])
+
+
+def hid_zone_frame(zones: list, brightness: int, leds: list = None, method: str = None, gamma: float = None,
+                   all_zones: bool = True) -> bool:
     """Send one frame (four zone colors) to the chip. Brightness is folded into the colors, which
-    dims smoothly instead of the chip's four brightness steps; led_gamma keeps the colors true."""
+    dims smoothly instead of the chip's four brightness steps; led_gamma keeps the colors true.
+    The chip is slow to take packets (the owner's 1.4.1 video: five packets a frame came out at about 3 frames a
+    second), so once the colors are committed a frame is as few packets as possible: one packet for zone "all" when
+    every zone shows the same color (all_zones), otherwise only the zones that changed, and nothing at all when
+    nothing changed. The RGB enable goes out with the first, committing frame of a session."""
     leds = leds if leds is not None else find_leds()
     m = hid_method(method)
     key = method or DEFAULT_HID_METHOD
@@ -1369,10 +1387,22 @@ def hid_zone_frame(zones: list, brightness: int, leds: list = None, method: str 
     _dynamic_off_for(m, nodes, key)
     k = max(0, min(255, int(brightness))) / 255
     scaled = [led_gamma(z, k, gamma) for z in zones]
-    packets = hid_packets("solid", scaled[0], zones=list(zip(ZONE_NAMES, scaled)), init=m["init"])
-    packets = _shape_packets(packets, m, "static:255", key)
+    sess = _HID_SESSION.setdefault(key, {})
+    last = sess.get("last")
+    if m.get("commit") == "first" and sess.get("mode") == "static:255" and last and len(last) == len(scaled):
+        if scaled == last:
+            return True                                   # nothing changed: nothing to send
+        if all_zones and all(z == scaled[0] for z in scaled):
+            packets = [_zone_cmd("all", scaled[0])]
+        else:
+            packets = [_zone_cmd(zn, z) for zn, z, old in zip(ZONE_NAMES, scaled, last) if z != old]
+    else:
+        packets = hid_packets("solid", scaled[0], zones=list(zip(ZONE_NAMES, scaled)), init=m["init"])
+        packets = _shape_packets(packets, m, "static:255", key)
     gap = m.get("stream_gap", 0.006)
-    return hid_send(nodes["lighting"], packets, feature=m["feature"], gap=gap)[0]
+    ok = hid_send(nodes["lighting"], packets, feature=m["feature"], gap=gap)[0]
+    sess["last"] = scaled if ok else None          # after a failed send, the next frame sends every zone again
+    return ok
 
 
 def hid_apply_effect(effect: dict, brightness: int, leds: list = None, method: str = None) -> bool:
@@ -1482,7 +1512,7 @@ EFFECT_TYPES = {
     "twinkle": {"name": "Twinkle",      "colors": (2, 2), "param": "Sparkle amount"},
     "spiral":  {"name": "Spiral",       "colors": (0, 4), "param": "Color spread"},
 }
-EFFECT_DEFAULT_PARAM = {"breathe": 0.12, "cycle": 1.0, "flicker": 0.55, "twinkle": 0.45, "spiral": 0.75}
+EFFECT_DEFAULT_PARAM = {"breathe": 0.25, "cycle": 1.0, "flicker": 0.55, "twinkle": 0.45, "spiral": 0.75}
 # Spiral-only settings (other effect types never carry these keys, so saved effects stay as they were)
 SPIRAL_OPTIONS = {
     "direction": (("cw", "Clockwise"), ("ccw", "Counter-clockwise")),
@@ -1497,7 +1527,7 @@ ZONE_POS = ((0, 0), (0, 1), (1, 0), (1, 1))     # (stick, half) for left_left, l
 DEFAULT_COLORS = ["#e11d48", "#8b5cf6", "#06b6d4", "#22c55e"]
 
 PRESETS = {
-    "ROG Pulse":  {"type": "breathe", "colors": ["#ff0033"], "speed": 1.0, "param": 0.08},
+    "ROG Pulse":  {"type": "breathe", "colors": ["#ff0033"], "speed": 1.0, "param": 0.2},
     "Xbox Glow":  {"type": "breathe", "colors": ["#22c55e"], "speed": 0.6, "param": 0.3},
     "Rainbow":    {"type": "cycle", "colors": [], "speed": 1.0, "param": 1.0},
     "Aurora":     {"type": "wave", "colors": ["#22c55e", "#14b8a6", "#6366f1", "#a855f7"], "speed": 0.55},

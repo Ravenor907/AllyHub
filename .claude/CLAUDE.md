@@ -129,10 +129,15 @@ shows no cursor for a pad, Wayland can't warp the real one), focus follows it, a
 R3 (button 10) left-clicks too (1.4.1.1; there is no right click). Clicks on buttons, combos and text boxes use
 the D-pad's own path (`animateClick`, `showPopup`, Steam keyboard): a synthetic mouse click alone didn't register on
 the handheld. Never click outside an open `_sheet`.
-**LED colors (1.4.1.1):** every color sent to the chip goes through `core.led_gamma` (sRGB to light, gamma
-`config["lighting"]["gamma"]`, default 2.2); without it colors looked washed out toward white. Brightness scales the
-light. Neon Vortex is Ally Hub's style (the chip's spiral is rainbow only; `migrate_color_spirals`). On battery,
-"slow" is two thirds of the chosen fps, not a flat cap. Pages must live in `scroll_page`.
+**LED colors (1.4.1.2):** every color sent to the chip goes through `core.led_gamma`: it corrects only the MIX
+(each channel's share of the strongest, gamma `config["lighting"]["gamma"]`, default 2.2); the strongest channel keeps
+its value. Without it colors looked washed out; correcting the whole value (1.4.1.1) made fades step and breathing go
+black. Keep breathe floors visible (default 25%).
+**Frame cost (1.4.1.2):** the owner's video measured ~3 fps with 5 packets a frame: the chip takes roughly 60 ms per
+packet. `hid_zone_frame` after the commit sends ONE zone-"all" packet for one-color frames (`stream_all`), only changed
+zones otherwise, nothing for an unchanged frame; never add packets to the per-frame path. The agent logs the real
+"frames a second" once a minute: read it before tuning lighting speed. Neon Vortex is Ally Hub's style (the chip's spiral is rainbow only; `migrate_color_spirals`). On battery,
+"slow" is two thirds of the chosen fps but never below 15 (unless fps is below 15). Pages must live in `scroll_page`.
 
 **Launchers page (the owner's call):** Store → Launchers (`LaunchersPage`) instead of NSL's own GUI.
 `nsl_install_cmd` downloads NSL's script and runs it with launcher names as arguments (its Decky plugin's
