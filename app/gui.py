@@ -296,9 +296,9 @@ JS_EVENT = struct.Struct("<IhBB")
 UP, DOWN, LEFT, RIGHT = "up", "down", "left", "right"
 
 
-class TapCounter(QObject):
-    """Counts taps (touch or mouse, or the pointer's A) on the top-left icon: 30 in a row unlock the owner's secret
-    Ally Hub theme (1.4.1.4). A pause longer than TAP_GAP_S starts over. Never eats the event."""
+class IconTaps(QObject):
+    """Counts taps (touch, mouse or the pointer) on the top-left icon for Hub.unlock_extra_theme. A pause longer than
+    TAP_GAP_S starts over. Never eats the event."""
     NEEDED = 30
     TAP_GAP_S = 2.0
 
@@ -314,7 +314,7 @@ class TapCounter(QObject):
         left = self.NEEDED - self.count
         if left <= 0:
             self.count = 0
-            self.hub.unlock_secret_theme()
+            self.hub.unlock_extra_theme()
         elif left <= 5:
             self.hub.toast(f"{left} more…", 900)
 
@@ -470,6 +470,7 @@ class GamepadNav(QObject):
                 self.hub.step_sub(-1 if n == 2 else 1)
             return
         if n == 1:                      # left stick up/down scrolls the page, like a browser (1.4.1)
+            self._wiggle(value)
             self.stick_y = value if abs(value) > 7000 else 0
             if self.stick_y and not self.stick.isActive():
                 self.stick.start(16)
@@ -507,6 +508,23 @@ class GamepadNav(QObject):
         if self.held:
             self.move(self.held)
             self.repeat.start(110)
+
+    WIGGLE_S, WIGGLE_FLIPS, WIGGLE_GAP_S = 10.0, 8, 1.5
+
+    def _wiggle(self, value: int):
+        """Scrolling up and down (left stick) without a break for WIGGLE_S turns on the Ally Hub theme
+        (Hub.unlock_extra_theme with apply)."""
+        d = 1 if value > 16000 else -1 if value < -16000 else 0
+        if not d or d == getattr(self, "_wig_dir", 0):
+            return
+        now = time.monotonic()
+        if now - getattr(self, "_wig_last", 0.0) > self.WIGGLE_GAP_S:
+            self._wig_start, self._wig_flips = now, 0
+        self._wig_flips += 1
+        self._wig_last, self._wig_dir = now, d
+        if now - self._wig_start >= self.WIGGLE_S and self._wig_flips >= self.WIGGLE_FLIPS:
+            self._wig_start, self._wig_flips = now, 0
+            self.hub.unlock_extra_theme(apply=True)
 
     # ---- pointer (right stick, 1.4.1) ----
     @staticmethod
@@ -966,8 +984,8 @@ def monogram_badge(text: str, color: str, size: int = 56) -> QLabel:
     return lb
 
 
-# The owner's Ally Hub wordmark (assets/banner.png, cropped onto a rounded black plate), kept in the code so it
-# ships with every update (a new file would need old clients to learn a new file list). Never redraw it.
+# The owner's Ally Hub wordmark (his own image, on a rounded black plate), used with the Ally Hub theme. Kept in the
+# code so it ships with every update. Never redraw it.
 BRAND_LOGO_PNG = (
     "iVBORw0KGgoAAAANSUhEUgAAAU4AAABgCAYAAABygpubAABTe0lEQVR42u29abRlRZUu+s2ItffJPkkgISVpTRpRIRHxFiAoiDRK36YgAtKoJI3l"
     "u75r1aiH43pL37XKV+PWlUZRIEkSEMSrSCOUINIUqDRKItKJNAokSpMNeU6es/eKmO9HrCYiVqxmNycBq/YYhzzss/dqYkXMmPOb3/wmwXoRAEbj"
@@ -4697,7 +4715,7 @@ class SetupPage(QWidget):
 
     # ---- steps ----
     def step_welcome(self):
-        logo = brand_logo(110) if load_config()["theme"].get("preset") in core.SECRET_THEMES else None
+        logo = brand_logo(110) if load_config()["theme"].get("preset") in core.EXTRA_THEMES else None
         if logo is not None:
             lb = QLabel()
             lb.setPixmap(logo)
@@ -5964,8 +5982,8 @@ class AppearancePage(QWidget):
             b.clicked.connect(lambda _=False, t=name: self.set_preset(t))
             self.theme_btns[name] = b
             grid.addWidget(b, n // 4, n % 4)
-            if name in core.SECRET_THEMES:
-                b.hide()                    # secret: shown by update_secret (unlocked + Advanced)
+            if name in core.EXTRA_THEMES:
+                b.hide()                    # shown by update_extras (turned on + Advanced)
         v.addLayout(grid)
 
         v.addWidget(label("ACCENT COLORS", "section"))
@@ -6036,18 +6054,18 @@ class AppearancePage(QWidget):
         v.addLayout(cr)
         v.addStretch()
 
-    def update_secret(self):
-        """The secret themes show once unlocked (Konami code) and only in Advanced, or while one is in use."""
+    def update_extras(self):
+        """Extra themes show once turned on (Hub.unlock_extra_theme) and only in Advanced, or while one is in use."""
         t = load_config()["theme"]
-        show = bool(t.get("secret_unlocked")) and advanced_mode()
-        for name in core.SECRET_THEMES:
+        show = bool(t.get("extra_themes")) and advanced_mode()
+        for name in core.EXTRA_THEMES:
             b = self.theme_btns.get(name)
             if b is not None and b.parentWidget() is not None:      # never show a parentless widget (own window)
                 b.setVisible(show or t.get("preset") == name)
 
     def refresh(self):
         t = load_config()["theme"]
-        self.update_secret()
+        self.update_extras()
         for name, b in self.theme_btns.items():
             b.setChecked(name == t.get("preset"))
         pal = core.theme_palette(t)
@@ -6531,8 +6549,8 @@ class Hub(QMainWindow):
         self.top_frame.setObjectName("topBar")
         self.brand_badge = brand_icon(38)
         self.brand_label = label(APP_NAME, "brandSmall")
-        self._has_logo = False                         # the secret Ally Hub theme shows the wordmark (update_brand)
-        self._taps = TapCounter(self)                  # 30 taps on the top-left icon unlock that theme
+        self._has_logo = False                         # the Ally Hub theme shows the wordmark (update_brand)
+        self._taps = IconTaps(self)
         for w in (self.brand_badge, self.brand_label):
             w.installEventFilter(self._taps)
         self.hint_lb = label("LB", "key")
@@ -6724,7 +6742,7 @@ class Hub(QMainWindow):
     def apply_mode(self):
         on = advanced_mode()
         if getattr(self, "appearance", None) is not None:
-            self.appearance.update_secret()            # the secret theme is listed in Advanced only
+            self.appearance.update_extras()            # extra themes are listed in Advanced only
         for box in list(_ADVANCED):
             try:
                 box.setVisible(on)
@@ -6906,8 +6924,8 @@ class Hub(QMainWindow):
         self.update_brand()
 
     def update_brand(self):
-        """The secret Ally Hub theme puts the owner's wordmark in the top bar instead of icon + name."""
-        logo = brand_logo(36) if load_config()["theme"].get("preset") in core.SECRET_THEMES else None
+        """The Ally Hub theme puts the owner's wordmark in the top bar instead of icon + name."""
+        logo = brand_logo(36) if load_config()["theme"].get("preset") in core.EXTRA_THEMES else None
         self._has_logo = logo is not None
         if logo is not None:
             self.brand_label.setPixmap(logo)
@@ -6917,13 +6935,20 @@ class Hub(QMainWindow):
             self.brand_label.setToolTip("")
         self.brand_badge.setVisible(getattr(self, "bars", "top") == "sides" or not self._has_logo)
 
-    def unlock_secret_theme(self):
-        """30 taps on the top-left icon (TapCounter): the owner's secret Ally Hub theme shows under Customize > Theme
-        (Advanced)."""
-        first = not load_config()["theme"].get("secret_unlocked")
-        update_config(lambda c: c["theme"].__setitem__("secret_unlocked", True))
-        self.appearance.update_secret()
-        self.toast(("Secret theme unlocked! " if first else "Already unlocked. ")
+    def unlock_extra_theme(self, apply: bool = False):
+        """IconTaps (30 taps) lists the Ally Hub theme under Customize > Theme in Advanced; GamepadNav's scroll gesture
+        also switches to it right away (apply)."""
+        first = not load_config()["theme"].get("extra_themes")
+        core.play_sound(core.theme_sound())          # the user's own sound file, if there is one
+        update_config(lambda c: c["theme"].update(extra_themes=True, **(
+            {"preset": core.EXTRA_THEMES[0], "accent": None, "accent2": None} if apply else {})))
+        if apply:
+            self.apply_theme()
+            self.appearance.refresh()
+            self.toast("Ally Hub theme on!", 5000)
+            return
+        self.appearance.update_extras()
+        self.toast(("Ally Hub theme unlocked! " if first else "Already unlocked. ")
                    + ("It's under Customize → Theme." if advanced_mode() else
                       "Switch to Advanced (Settings → General) to see it under Customize → Theme."), 7000)
 

@@ -71,7 +71,8 @@ REFUSAL_PATTERNS = re.compile(
 # ==========================================================================
 
 DEFAULT_CONFIG = {
-    "theme": {"preset": "ROG Crimson", "brand_theme": False, "secret_unlocked": False, "brand_reverted": False, "accent": None, "accent2": None,
+    "theme": {"preset": "ROG Crimson", "brand_theme": False, "extra_themes": False, "brand_reverted": False,
+              "keys_tidied": False, "accent": None, "accent2": None,
               "scale": 100, "controller_nav": "auto", "ui_scale": "auto",
               # Game Mode and Desktop Mode show the same size differently, so each remembers its own
               # (None = use the shared "scale"/"ui_scale" above, which older versions saved)
@@ -1342,16 +1343,50 @@ def migrate_color_spirals() -> bool:
     return bool(changed)
 
 
-SECRET_THEMES = ("Ally Hub",)
+EXTRA_THEMES = ("Ally Hub",)
+
+
+def theme_sound() -> Optional[Path]:
+    """A sound of the user's own (never shipped with Ally Hub): ~/.config/allyhub/unlock-sound.<mp3|wav|ogg|flac>."""
+    for ext in ("mp3", "wav", "ogg", "flac", "oga"):
+        p = CONFIG_DIR / f"unlock-sound.{ext}"
+        if p.is_file():
+            return p
+    return None
+
+
+def play_sound(path: Optional[Path]) -> bool:
+    """Play a sound file in the background through PipeWire (pw-play), PulseAudio (paplay) or ffplay."""
+    if not path:
+        return False
+    for cmd in (["pw-play"], ["paplay"], ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet"]):
+        if shutil.which(cmd[0]):
+            try:
+                subprocess.Popen(cmd + [str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 start_new_session=True)
+                return True
+            except OSError:
+                continue
+    return False
 
 
 def migrate_brand_theme() -> bool:
-    """Once (1.4.1.4): test build 1.4.1.3 made the Ally Hub theme the default; the owner made it a secret theme
-    instead, so installs it was given to go back to ROG Crimson (unless it was unlocked the secret way)."""
+    """Once: installs that test build 1.4.1.3 moved to the Ally Hub theme go back to ROG Crimson, unless that theme
+    was turned on since. Also, once, drops theme keys no version uses (a test build's leftovers)."""
     t = load_config()["theme"]
+    if not t.get("keys_tidied"):
+        def tidy(c):
+            known = DEFAULT_CONFIG["theme"]
+            for k in [k for k in c["theme"] if k not in known]:
+                v = c["theme"].pop(k)
+                if k.endswith("_unlocked") and v is True:
+                    c["theme"]["extra_themes"] = True
+            c["theme"]["keys_tidied"] = True
+        update_config(tidy)
+        t = load_config()["theme"]
     if t.get("brand_reverted"):
         return False
-    back = t.get("preset") in SECRET_THEMES and not t.get("secret_unlocked")
+    back = t.get("preset") in EXTRA_THEMES and not t.get("extra_themes")
     update_config(lambda c: c["theme"].update(brand_reverted=True, **({"preset": "ROG Crimson"} if back else {})))
     return back
 
@@ -1867,9 +1902,7 @@ THEMES = {
                         border="#d5d9e5", text="#151826", muted="#5d6479",
                         accent="#6366f1", accent2="#ec4899",
                         hero=("#e0e3ff", "#f3e1f5", "#dff1ff"), on_accent="#ffffff"),
-    # SECRET (1.4.1.4, the owner's call): black and orange like his Ally Hub logo, black text on orange. Listed only
-    # in Advanced after 30 taps on the top-left icon (SECRET_THEMES, gui.TapCounter); with it on, the header shows
-    # his wordmark.
+    # extra theme (EXTRA_THEMES): black and orange, black text on orange; with it on, the top bar shows the wordmark
     "Ally Hub": dict(bg="#050505", side="#0b0b0b", surface="#121212", surface2="#1c1c1c",
                      border="#2e2418", text="#f5f5f5", muted="#a39a90",
                      accent="#ff8a00", accent2="#ffa31a",
