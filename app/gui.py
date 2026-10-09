@@ -21,8 +21,8 @@ from core import (APP_NAME, CATALOG, CATALOG_BY_ID, HOME, USER, VERSION, Item, l
 
 from PySide6.QtCore import (QBuffer, QByteArray, QEvent, QIODevice, QObject, QPoint, QPointF, QProcess, QProcessEnvironment, QRectF, QSize,
                             QSocketNotifier, Qt, QTimer, QUrl, Signal)
-from PySide6.QtGui import (QColor, QDesktopServices, QFont, QIcon, QImage, QImageReader, QKeyEvent, QPainter,
-                           QPainterPath, QPen, QPixmap, QTextCursor)
+from PySide6.QtGui import (QColor, QDesktopServices, QFont, QIcon, QImage, QImageReader,
+                           QKeyEvent, QMouseEvent, QPainter, QPainterPath, QPen, QPixmap, QTextCursor)
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
     QAbstractButton, QAbstractItemView, QAbstractScrollArea, QApplication, QCheckBox, QColorDialog, QComboBox,
@@ -296,6 +296,33 @@ JS_EVENT = struct.Struct("<IhBB")
 UP, DOWN, LEFT, RIGHT = "up", "down", "left", "right"
 
 
+class PadPointer(QWidget):
+    """The right stick's pointer (1.4.1, the owner's call). Drawn by Ally Hub itself: Game Mode shows no cursor for a
+    controller, and Desktop Mode on Wayland can't move the real one. Always a child of the window (never top-level)
+    and transparent to clicks, so widgetAt() finds what's under it."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WA_NoSystemBackground)
+        self.setFixedSize(28, 28)
+        self.hide()
+
+    def paintEvent(self, _ev):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        path = QPainterPath()
+        pts = [(3, 2), (3, 22), (8.5, 16.5), (12.5, 25), (16, 23.5), (12, 15.5), (19.5, 15.5)]
+        path.moveTo(*pts[0])
+        for x, y in pts[1:]:
+            path.lineTo(x, y)
+        path.closeSubpath()
+        p.setPen(QPen(QColor("#111111"), 1.6))
+        p.setBrush(QColor("#ffffff"))
+        p.drawPath(path)
+        p.end()
+
+
 class GamepadNav(QObject):
     def __init__(self, hub):
         super().__init__(hub)
@@ -305,9 +332,16 @@ class GamepadNav(QObject):
         self.held = None
         self.repeat = QTimer(self)
         self.repeat.timeout.connect(self._repeat)
-        self.stick_y = 0                 # right stick: free scrolling of the page
+        self.stick_y = 0                 # left stick: free scrolling of the page (1.4.1; was the right stick)
         self.stick = QTimer(self)
         self.stick.timeout.connect(self._stick_scroll)
+        self.ptr = [0, 0]                # right stick: the pointer (1.4.1)
+        self.pointer = QTimer(self)
+        self.pointer.timeout.connect(self._move_pointer)
+        self.pointer_widget = None       # PadPointer, made on first use
+        self.pointer_pos = None          # global position (QPoint, rounded)
+        self._pxy = None                 # the same, unrounded, so slow tilts move evenly both ways
+        self.mouse_mode = False          # the pointer was used last: A clicks where it points
         self.scan_timer = QTimer(self)
         self.scan_timer.timeout.connect(self.scan)
         self.enabled = False
@@ -378,7 +412,13 @@ class GamepadNav(QObject):
         if not value:
             return
         if n == 0:
-            self.activate()
+            if self.mouse_mode and self._popup_view() is None:
+                # after this read: a handler that opens a dialog must not run its loop inside the joystick reader
+                QTimer.singleShot(0, lambda: self.click(Qt.LeftButton))
+            else:
+                self.activate()
+        elif n == 10:                    # R3: right click where the pointer is
+            QTimer.singleShot(0, lambda: self.click(Qt.RightButton))
         elif n == 1:
             self.back()
         elif n == 2:
@@ -392,7 +432,7 @@ class GamepadNav(QObject):
             QDesktopServices.openUrl(QUrl("steam://open/keyboard"))
 
     def _axis(self, n, value):
-        if self._sheet_open() and n in (2, 3, 5):          # triggers wait for the pop-up
+        if self._sheet_open() and n in (2, 5):             # triggers wait for the pop-up (axis 3 is the pointer)
             return
         if n in (2, 5):                 # LT / RT switch sections inside a tab
             pressed = value > 8000
@@ -401,23 +441,32 @@ class GamepadNav(QObject):
             if pressed and not was:
                 self.hub.step_sub(-1 if n == 2 else 1)
             return
-        if n == 4:                      # right stick up/down scrolls the page, like a browser
+        if n == 1:                      # left stick up/down scrolls the page, like a browser (1.4.1)
             self.stick_y = value if abs(value) > 7000 else 0
             if self.stick_y and not self.stick.isActive():
                 self.stick.start(16)
             elif not self.stick_y:
                 self.stick.stop()
             return
-        if n in (0, 6):
+        if n == 0:                      # left stick sideways: nothing (the D-pad moves between controls)
+            return
+        if n in (3, 4):                 # right stick: the pointer (1.4.1)
+            self.ptr[0 if n == 3 else 1] = value if abs(value) > 6000 else 0
+            if any(self.ptr) and not self.pointer.isActive():
+                self.pointer.start(16)
+            return
+        if n == 6:
             d = LEFT if value < -16000 else RIGHT if value > 16000 else None
             self._direction(d, f"a{n}")
-        elif n in (1, 7):
+        elif n == 7:
             d = UP if value < -16000 else DOWN if value > 16000 else None
             self._direction(d, f"a{n}")
 
     def _direction(self, d, source):
         prev = self.axis.get(source)
         self.axis[source] = d
+        if d:
+            self.leave_mouse_mode()      # the D-pad (buttons or hat) takes over: A acts on the focused control
         if d and d != prev:
             self.held = d
             self.move(d)
@@ -430,6 +479,71 @@ class GamepadNav(QObject):
         if self.held:
             self.move(self.held)
             self.repeat.start(110)
+
+    # ---- pointer (right stick, 1.4.1) ----
+    @staticmethod
+    def _speed(v: int) -> float:
+        """Pixels per frame: a curve, so small tilts are precise and a full tilt crosses the screen in about a second."""
+        if not v:
+            return 0.0
+        f = min(1.0, (abs(v) - 6000) / (32767 - 6000))
+        return (1 if v > 0 else -1) * (1.5 + f * f * 22)
+
+    def _move_pointer(self):
+        win = self.hub
+        if not any(self.ptr) or QApplication.activeWindow() is None:
+            self.pointer.stop()
+            return
+        top_left = win.mapToGlobal(QPoint(0, 0))
+        if self._pxy is None:
+            c = win.mapToGlobal(win.rect().center())
+            self._pxy = (float(c.x()), float(c.y()))
+        x = min(max(self._pxy[0] + self._speed(self.ptr[0]), top_left.x()), top_left.x() + win.width() - 2)
+        y = min(max(self._pxy[1] + self._speed(self.ptr[1]), top_left.y()), top_left.y() + win.height() - 2)
+        self._pxy = (x, y)
+        self.pointer_pos = QPoint(round(x), round(y))
+        self.mouse_mode = True
+        if self.pointer_widget is None:
+            self.pointer_widget = PadPointer(win)
+        self.pointer_widget.move(win.mapFromGlobal(self.pointer_pos))
+        self.pointer_widget.raise_()
+        self.pointer_widget.show()
+        target = QApplication.widgetAt(self.pointer_pos)     # focus follows the pointer, so you see what A hits
+        while target is not None and not (target.focusPolicy() & Qt.TabFocus):
+            target = target.parentWidget()                   # a label inside a card button, a list's viewport
+            if target is win:
+                target = None
+        if target is not None and target is not QApplication.focusWidget() and target.isEnabled() \
+                and not self._outside_sheet(target):
+            target.setFocus(Qt.MouseFocusReason)
+
+    def _outside_sheet(self, w) -> bool:
+        sheet = getattr(self.hub, "_sheet", None)
+        return sheet is not None and not sheet.isAncestorOf(w)
+
+    def leave_mouse_mode(self):
+        self.mouse_mode = False
+        if self.pointer_widget is not None:
+            self.pointer_widget.hide()
+
+    def click(self, button):
+        """A (left) or R3 (right) click where the pointer is."""
+        if self.pointer_pos is None or (self.pointer_widget is not None and not self.pointer_widget.isVisible()):
+            return
+        target = QApplication.widgetAt(self.pointer_pos)
+        if target is None:
+            return
+        if self._outside_sheet(target):  # never click behind an open pop-up: A acts inside it instead
+            self.leave_mouse_mode()
+            self.activate()
+            return
+        local = QPointF(target.mapFromGlobal(self.pointer_pos))
+        glob = QPointF(self.pointer_pos)
+        # mouse events only: no context-menu event, so no separate pop-up menu window ever opens
+        QApplication.sendEvent(target, QMouseEvent(QEvent.MouseButtonPress, local, glob, button, button,
+                                                   Qt.NoModifier))
+        QApplication.sendEvent(target, QMouseEvent(QEvent.MouseButtonRelease, local, glob, button, Qt.NoButton,
+                                                   Qt.NoModifier))
 
     # ---- scrolling ----
     def scroll_area(self, w=None):
@@ -968,7 +1082,8 @@ def key_hints(pairs, vertical: bool = False) -> QWidget:
     return w
 
 
-PAD_KEYS = [("A", "Select"), ("B", "Back"), ("RS", "Scroll"), ("Y", "Refresh"), ("Menu", "Keyboard")]
+PAD_KEYS = [("A", "Select"), ("B", "Back"), ("LS", "Scroll"), ("RS", "Pointer"), ("Y", "Refresh"),
+            ("Menu", "Keyboard")]
 TAB_ICONS = {"Home": "activity", "Store": "store", "Games": "gamepad-2", "Customize": "palette",
              "Settings": "settings"}
 
@@ -1013,7 +1128,8 @@ def run_dialog(dlg) -> int:
         overlay.show()
         overlay.raise_()
         hub._sheet = dlg
-        QTimer.singleShot(0, lambda: _focus_first(dlg))
+        if getattr(hub, "gamepad", None) is not None:
+            hub.gamepad.leave_mouse_mode()   # the pointer would sit under the dimmer: the D-pad drives the pop-up        QTimer.singleShot(0, lambda: _focus_first(dlg))
         return dlg.exec()
     except Exception:
         core.report_exception("gui-dialog")
@@ -5719,8 +5835,7 @@ class UpdatesPage(QWidget):
         super().__init__()
         self.hub = hub
         v = page_shell(self, "Updates & Reports",
-                       "Ally Hub keeps itself up to date and can report its own errors so they get "
-                       "fixed automatically.")
+                       "Ally Hub keeps itself up to date and can report its own errors.")
         self.testing_banner = QFrame()            # the owner's call: test builds come with a clear way out
         self.testing_banner.setObjectName("banner")
         tbl = QHBoxLayout(self.testing_banner)
@@ -5813,8 +5928,8 @@ class UpdatesPage(QWidget):
         self.key_guide = hcard               # only while no key is saved
 
         # small disclosure (the owner's call): who builds and maintains Ally Hub
-        v.addWidget(label("Ally Hub is built and maintained with Claude, Anthropic's AI, under the developer's direction. "
-                          "Error reports and daily fixes are handled by Claude.", "cardMeta", wrap=True))
+        v.addWidget(label("Ally Hub is built with Claude, Anthropic's AI, under the developer's direction.",
+                          "cardMeta", wrap=True))
         v.addStretch()
         self.installed_new = None
 
@@ -7077,7 +7192,7 @@ class Hub(QMainWindow):
         """Upload queued reports right away instead of waiting for the agent's next pass."""
         def done(r):
             if isinstance(r, tuple) and r[0]:
-                self.toast("Report sent. It'll be looked at in the next daily fix-up.", 6000)
+                self.toast("Report sent. Thanks!", 6000)
             elif isinstance(r, tuple) and r[1]:
                 self.toast("Couldn't send the report. Check your access key on Settings → General.", 8000)
         BackgroundTask(self, core.upload_reports, done)
@@ -7118,8 +7233,8 @@ def _excepthook(etype, evalue, tb):
             os.execv(sys.executable, [sys.executable, str(core.APP_DIR / "allyhub.py")] + sys.argv[1:])
     msg_warn(None, APP_NAME, "Something went wrong, but Ally Hub is still running.\n\n"
                         + ("It was reported automatically, so a fix can follow in an update."
-                           if reported else hint or "Turn on error reports in Settings → General to get problems "
-                                                    "like this fixed automatically.")
+                           if reported else hint or "Turn on error reports in Settings → General so problems "
+                                                    "like this get reported.")
                         + f"\n\nDetails: {etype.__name__}: {str(evalue)[:160]}")
 
 

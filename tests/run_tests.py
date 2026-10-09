@@ -1675,6 +1675,21 @@ hub.set_tab(2, 0)
 hub.gamepad._axis(5, 32767); hub.gamepad._axis(5, -32767)
 check(hub.current_page() is hub.performance, "RT moves to the next section")
 hub.gamepad._axis(2, 32767); hub.gamepad._axis(2, -32767)
+# 1.4.1 controls (the owner's call): left stick scrolls, right stick is a pointer, R3 right-clicks, D-pad unchanged
+_g = hub.gamepad
+_g._axis(1, 30000)
+check(_g.stick_y == 30000, "left stick up/down scrolls the page")
+_g._axis(1, 0)
+_g._axis(4, 30000)
+check(_g.ptr[1] == 30000 and _g.stick_y == 0, "right stick drives the pointer, not scrolling")
+_g._axis(3, -30000); _g._axis(3, 0); _g._axis(4, 0)
+check(_g._speed(0) == 0 and 0 < _g._speed(8000) < _g._speed(20000) < _g._speed(32767) and _g._speed(-32767) < 0,
+      "the pointer moves faster the further the stick is pushed, both ways")
+tryit("pointer frame, A and R3 clicks", lambda: (_g._move_pointer(), _g._button(10, 1), _g._button(0, 1),
+                                                 _g._button(0, 0)))
+_g.mouse_mode = True
+_g._button(13, 1); _g._button(13, 0)
+check(not _g.mouse_mode, "the D-pad takes over from the pointer (A acts on the focused control again)")
 check(hub.current_page() is hub.games, "LT moves back a section")
 core.update_config(lambda c: c["setup"].__setitem__("done", True))
 hub.set_tab(0, 0); hub.update_setup_chip()

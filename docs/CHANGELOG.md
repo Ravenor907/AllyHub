@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.4.1
+
+- **New controls:** the left stick scrolls the page, the right stick moves a pointer and R3 right-clicks. The
+  D-pad still moves between controls. While you use the pointer, A clicks wherever it points; press the D-pad and
+  A goes back to the highlighted control.
+
 ## 1.4.0
 
 **A cleaner, simpler Ally Hub.** Everything you had is still here, in fewer places:

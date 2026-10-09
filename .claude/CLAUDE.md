@@ -121,8 +121,12 @@ add new icons from github.com/lucide-icons/lucide `icons/*.svg`.
 The store only shows UPDATE when its version is newer (`plugin_newer`).
 
 **Controller scrolling:** `GamepadNav.move` scrolls the page by most of a screen when the next
-control is far away or missing (`_too_far`), so read-only content is reachable; the right stick (js axis 4)
-scrolls freely (`_stick_scroll`). Never scroll the window behind a dialog. Pages must live in `scroll_page`.
+control is far away or missing (`_too_far`), so read-only content is reachable. Never scroll the window behind a dialog.
+**Controls (1.4.1, the owner's call):** D-pad moves between controls (unchanged); the LEFT stick (js axis 1) scrolls
+freely (`_stick_scroll`); the RIGHT stick (axes 3/4) moves `PadPointer`, Ally Hub's own drawn pointer (Game Mode
+shows no cursor for a pad, Wayland can't warp the real one), focus follows it, and A clicks where it points
+(`click`, synthetic QMouseEvents to `QApplication.widgetAt`) until the D-pad is used again (`leave_mouse_mode`).
+R3 (button 10) right-clicks. Never click outside an open `_sheet`. Pages must live in `scroll_page`.
 
 **Launchers page (the owner's call):** Store → Launchers (`LaunchersPage`) instead of NSL's own GUI.
 `nsl_install_cmd` downloads NSL's script and runs it with launcher names as arguments (its Decky plugin's
