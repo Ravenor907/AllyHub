@@ -1131,9 +1131,14 @@ check(core.migrate_brand_theme() is False and core.load_config()["theme"]["prese
       "a turned-on extra theme stays")
 core.update_config(lambda c: c["theme"].update(preset="ROG Crimson", extra_themes=False))
 check(core.theme_sound() is None and core.play_sound(None) is False, "no sound file: nothing plays")
-(core.CONFIG_DIR / "unlock-sound.mp3").write_bytes(b"x")
-check(core.theme_sound() == core.CONFIG_DIR / "unlock-sound.mp3", "the user's own sound file is found")
-(core.CONFIG_DIR / "unlock-sound.mp3").unlink()
+(Path(HOME) / "Downloads").mkdir(exist_ok=True)
+(Path(HOME) / "Downloads" / "hub-intro-sound.mp3").write_bytes(b"x")
+check(core.theme_sound() == core.DATA_DIR / "theme-sound.mp3" and (core.DATA_DIR / "theme-sound.mp3").exists(),
+      "the user's own sound file is found and imported into the app")
+(Path(HOME) / "Downloads" / "hub-intro-sound.mp3").unlink()
+check(core.theme_sound() == core.DATA_DIR / "theme-sound.mp3", "and keeps working from inside the app")
+check(core.import_theme_sound(Path(HOME) / "nope.txt") is None, "only sound files are imported")
+(core.DATA_DIR / "theme-sound.mp3").unlink()
 core.update_config(lambda c: c["theme"].update(keys_tidied=False, old_unlocked=True, extra_themes=False))
 core.migrate_brand_theme()
 _t2 = core.load_config()["theme"]
@@ -1780,20 +1785,26 @@ check(_b64g.b64decode(gui.BRAND_LOGO_PNG)[:8] == b"\x89PNG\r\n\x1a\n", "the Ally
 tryit("header logo", lambda: (gui.brand_logo(36), hub.update_brand()))
 _unlocked = []
 _real_unlock = hub.unlock_extra_theme
-hub.unlock_extra_theme = lambda: _unlocked.append(1)
-for _i in range(29):
+_real_act = hub.activate_extra_theme
+hub.activate_extra_theme = lambda: _unlocked.append(1)
+for _i in range(14):
     hub._taps.tap()
-check(not _unlocked, "29 taps on the top-left icon don't unlock anything")
+check(not _unlocked, "14 taps on the top-left icon don't do anything")
 hub._taps.tap()
-check(_unlocked == [1] and hub._taps.count == 0, "the 30th tap turns on the extra theme")
+check(_unlocked == [1] and hub._taps.count == 0, "the 15th tap switches to the extra theme")
 hub._taps.last -= 10
 hub._taps.tap()
 check(hub._taps.count == 1, "a long pause starts the count over")
+for _i in range(15):
+    hub._taps.tap()
+check(_unlocked == [1, 1], "and it works every time")
+hub.activate_extra_theme = _real_act
 hub.unlock_extra_theme = _real_unlock
-tryit("turn on the extra theme", hub.unlock_extra_theme)
+tryit("turn on the extra theme", hub.activate_extra_theme)
 _wig = []
 _real_unlock2 = hub.unlock_extra_theme
-hub.unlock_extra_theme = lambda apply=False: _wig.append(apply)
+_real_act2 = hub.activate_extra_theme
+hub.activate_extra_theme = lambda: _wig.append(True)
 _g2 = hub.gamepad
 _g2._wig_last = 0.0
 _g2._wig_dir = 0
@@ -1805,11 +1816,20 @@ check(not _wig, "a few quick flicks don't count")
 _g2._wig_start = _t.monotonic() - 11
 _g2._wiggle(30000 if _g2._wig_dir < 0 else -30000)
 check(_wig == [True], "scrolling up and down for 10 seconds turns the Ally Hub theme on right away")
+_s = object()
+_t3 = _t.monotonic()
+hub._sl = {"s": _s, "start": _t3 - 11, "t": _t3, "v": 50, "d": 1, "flips": 1}
+hub._slider_moved(_s, 40)
+check(_wig == [True, True], "a slider moved back and forth for 10 seconds switches to it too")
+hub._sl = {"s": _s, "start": _t3 - 3, "t": _t3, "v": 50, "d": 1, "flips": 5}
+hub._slider_moved(_s, 40)
+check(_wig == [True, True], "but not after a few seconds of normal adjusting")
+hub.activate_extra_theme = _real_act2
 hub.unlock_extra_theme = _real_unlock2
 tryit("apply the extra theme", lambda: hub.unlock_extra_theme(apply=True))
 check(core.load_config()["theme"]["preset"] == "Ally Hub", "applied")
 core.update_config(lambda c: c["theme"].update(preset="ROG Crimson"))
-check(core.load_config()["theme"]["extra_themes"], "unlocking is remembered")
+check(core.load_config()["theme"]["extra_themes"], "it's remembered")
 tryit("extra theme listing", hub.appearance.update_extras)
 _mine = {"type": "static", "colors": ["#22c55e"]}
 core.update_config(lambda c: c["lighting"].update(controller="allyhub", effect=_mine, before_theme=None))

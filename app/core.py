@@ -1349,28 +1349,79 @@ EXTRA_THEMES = ("Ally Hub",)
 THEME_LIGHTING = {"type": "breathe", "colors": ["#ff8a00"], "speed": 0.6, "param": 0.45}
 
 
+SOUND_EXTS = ("mp3", "wav", "ogg", "oga", "flac", "opus")
+SOUND_MAX_BYTES = 20 * 1024 * 1024
+
+
+def import_theme_sound(src: Path) -> Optional[Path]:
+    """Copy a sound of the user's own into Ally Hub's data folder (it's never shipped with Ally Hub)."""
+    try:
+        src = Path(src)
+        ext = src.suffix.lower().lstrip(".")
+        if ext not in SOUND_EXTS or not src.is_file() or src.stat().st_size > SOUND_MAX_BYTES:
+            return None
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        for e in SOUND_EXTS:
+            (DATA_DIR / f"theme-sound.{e}").unlink(missing_ok=True)
+        dest = DATA_DIR / f"theme-sound.{ext}"
+        shutil.copyfile(src, dest)
+        return dest
+    except OSError:
+        return None
+
+
+def _looks_like_theme_sound(name: str) -> bool:
+    n = name.lower()
+    return any(k in n for k in ("intro-sound", "intro_sound", "introsound", "unlock-sound", "theme-sound"))
+
+
 def theme_sound() -> Optional[Path]:
-    """A sound of the user's own (never shipped with Ally Hub): ~/.config/allyhub/unlock-sound.<mp3|wav|ogg|flac>."""
-    for ext in ("mp3", "wav", "ogg", "flac", "oga"):
-        p = CONFIG_DIR / f"unlock-sound.{ext}"
+    """The extra theme's sound: Ally Hub's own copy, or (the first time) the user's file, found in their usual
+    folders and imported, so it then works from inside the app."""
+    for ext in SOUND_EXTS:
+        p = DATA_DIR / f"theme-sound.{ext}"
         if p.is_file():
             return p
+    places = [CONFIG_DIR] + [HOME / d for d in ("Downloads", "Music", "Desktop", "Documents")] + [HOME]
+    for d in places:
+        try:
+            files = sorted(f for f in d.iterdir() if f.is_file()) if d.is_dir() else []
+        except OSError:
+            continue
+        for f in files:
+            if f.suffix.lower().lstrip(".") in SOUND_EXTS and _looks_like_theme_sound(f.name):
+                got = import_theme_sound(f)
+                if got:
+                    app_log("sound", f"imported {f.name}")
+                    return got
     return None
 
 
+SOUND_PLAYERS = (["pw-play"], ["paplay"], ["gst-play-1.0", "-q"], ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet"],
+                 ["mpv", "--no-video", "--really-quiet"])
+
+
 def play_sound(path: Optional[Path]) -> bool:
-    """Play a sound file in the background through PipeWire (pw-play), PulseAudio (paplay) or ffplay."""
+    """Play a sound in the background. Players are tried in turn until one works (pw-play can lack MP3 support on
+    some systems); failures go to the app log."""
     if not path:
         return False
-    for cmd in (["pw-play"], ["paplay"], ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet"]):
-        if shutil.which(cmd[0]):
+    players = [cmd for cmd in SOUND_PLAYERS if shutil.which(cmd[0])]
+    if not players:
+        app_log("sound", "no audio player found")
+        return False
+
+    def run():
+        for cmd in players:
             try:
-                subprocess.Popen(cmd + [str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                 start_new_session=True)
-                return True
-            except OSError:
-                continue
-    return False
+                r = subprocess.run(cmd + [str(path)], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=60)
+                if r.returncode == 0:
+                    return
+                app_log("sound", f"{cmd[0]} exit {r.returncode}: {r.stderr.decode(errors='replace').strip()[-200:]}")
+            except (OSError, subprocess.TimeoutExpired) as e:
+                app_log("sound", f"{cmd[0]}: {e}")
+    threading.Thread(target=run, daemon=True).start()
+    return True
 
 
 def migrate_brand_theme() -> bool:
