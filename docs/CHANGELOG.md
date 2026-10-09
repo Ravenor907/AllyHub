@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.4.1.4
+
+- Back to the usual Ally Hub look: the original icon, header, default theme and README. If 1.4.1.3 switched your
+  theme, it switches back once.
+
 ## 1.4.1.3
 
 - **New look:** the Ally Hub logo in the header and on the setup welcome, the new app icon (app menu, Game Mode
