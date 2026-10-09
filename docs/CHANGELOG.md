@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.4.1.2
+
+- **Much smoother effects:** your video showed the rings only changing about 3 times a second, because every frame
+  was five separate messages to the lighting chip, and it's slow to take each one. A one-color frame (breathe,
+  cycle, wave, pulse and the like) is now a single message, zones that didn't change aren't re-sent, and a frame
+  that didn't change sends nothing. Spirals still send a message per ring zone.
+- **Breathing stays lit, colors stay true:** the color fix now only corrects how colors mix, so fades and the
+  lowest point of a breathe are back to their old brightness instead of dropping to black. The default lowest
+  brightness is also higher (25%, ROG Pulse 20%). Your own saved effects keep their setting.
+- **On battery, Smooth stays at 15 frames a second** (1.4.1.1 dropped it to 13); Silky runs at 20.
+- The activity log now notes how many frames a second the rings really get, once a minute while an effect runs.
+
 ## 1.4.1.1
 
 - **True colors on the rings:** colors are now converted for LEDs before they're sent, so presets no longer look
