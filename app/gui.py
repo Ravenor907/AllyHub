@@ -296,6 +296,34 @@ JS_EVENT = struct.Struct("<IhBB")
 UP, DOWN, LEFT, RIGHT = "up", "down", "left", "right"
 
 
+class TapCounter(QObject):
+    """Counts taps (touch or mouse, or the pointer's A) on the top-left icon: 30 in a row unlock the owner's secret
+    Ally Hub theme (1.4.1.4). A pause longer than TAP_GAP_S starts over. Never eats the event."""
+    NEEDED = 30
+    TAP_GAP_S = 2.0
+
+    def __init__(self, hub):
+        super().__init__(hub)
+        self.hub = hub
+        self.count, self.last = 0, 0.0
+
+    def tap(self):
+        now = time.monotonic()
+        self.count = self.count + 1 if now - self.last <= self.TAP_GAP_S else 1
+        self.last = now
+        left = self.NEEDED - self.count
+        if left <= 0:
+            self.count = 0
+            self.hub.unlock_secret_theme()
+        elif left <= 5:
+            self.hub.toast(f"{left} more…", 900)
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QEvent.MouseButtonPress:
+            self.tap()
+        return False
+
+
 class PadPointer(QWidget):
     """The right stick's pointer (1.4.1, the owner's call). Drawn by Ally Hub itself: Game Mode shows no cursor for a
     controller, and Desktop Mode on Wayland can't move the real one. Always a child of the window (never top-level)
@@ -1217,7 +1245,7 @@ def brand_icon(size: int) -> QLabel:
     if pm is not None and not pm.isNull():
         lb.setPixmap(pm)
         return lb
-    return monogram_badge("AH", "#ff8a00", size)
+    return monogram_badge("AH", "#e11d48", size)
 
 
 def scroll_page(inner: QWidget) -> QScrollArea:
@@ -3827,7 +3855,7 @@ def make_art(t: dict) -> tuple:
     """(pngs by kind, icon png) for one tile planned by core.art_plan."""
     icon, color = t.get("icon_png"), t.get("color")
     if t.get("self"):
-        icon, color = self_icon_png() or None, "#ff8a00"
+        icon, color = self_icon_png() or None, "#e11d48"
     glyph, glyph_color = art_glyph(t["name"])
     svgs = core.art_svgs(t["name"], icon, color or (None if icon else glyph_color), glyph)
     pngs = {k: rasterize_svg(svg, w, h) for k, (svg, w, h) in svgs.items()}
@@ -4669,13 +4697,13 @@ class SetupPage(QWidget):
 
     # ---- steps ----
     def step_welcome(self):
-        logo = brand_logo(110)
+        logo = brand_logo(110) if load_config()["theme"].get("preset") in core.SECRET_THEMES else None
         if logo is not None:
             lb = QLabel()
             lb.setPixmap(logo)
             lb.setAlignment(Qt.AlignCenter)
             self.body.addWidget(lb)
-        self.card("gamepad-2", "#ff8a00", "Welcome to Ally Hub",
+        self.card("gamepad-2", "#e11d48", "Welcome to Ally Hub",
                   "Mods and apps in one tap, smoother games, lighting, save snapshots and more, all working with the "
                   "controller. The next few steps set up the basics. Skip anything you don't want.")
 
@@ -5936,6 +5964,8 @@ class AppearancePage(QWidget):
             b.clicked.connect(lambda _=False, t=name: self.set_preset(t))
             self.theme_btns[name] = b
             grid.addWidget(b, n // 4, n % 4)
+            if name in core.SECRET_THEMES:
+                b.hide()                    # secret: shown by update_secret (unlocked + Advanced)
         v.addLayout(grid)
 
         v.addWidget(label("ACCENT COLORS", "section"))
@@ -6006,8 +6036,18 @@ class AppearancePage(QWidget):
         v.addLayout(cr)
         v.addStretch()
 
+    def update_secret(self):
+        """The secret themes show once unlocked (Konami code) and only in Advanced, or while one is in use."""
+        t = load_config()["theme"]
+        show = bool(t.get("secret_unlocked")) and advanced_mode()
+        for name in core.SECRET_THEMES:
+            b = self.theme_btns.get(name)
+            if b is not None and b.parentWidget() is not None:      # never show a parentless widget (own window)
+                b.setVisible(show or t.get("preset") == name)
+
     def refresh(self):
         t = load_config()["theme"]
+        self.update_secret()
         for name, b in self.theme_btns.items():
             b.setChecked(name == t.get("preset"))
         pal = core.theme_palette(t)
@@ -6491,11 +6531,10 @@ class Hub(QMainWindow):
         self.top_frame.setObjectName("topBar")
         self.brand_badge = brand_icon(38)
         self.brand_label = label(APP_NAME, "brandSmall")
-        logo = brand_logo(36)                          # the wordmark replaces "Ally Hub" + the square icon on top
-        self._has_logo = logo is not None
-        if logo is not None:
-            self.brand_label.setPixmap(logo)
-            self.brand_label.setToolTip(APP_NAME)
+        self._has_logo = False                         # the secret Ally Hub theme shows the wordmark (update_brand)
+        self._taps = TapCounter(self)                  # 30 taps on the top-left icon unlock that theme
+        for w in (self.brand_badge, self.brand_label):
+            w.installEventFilter(self._taps)
         self.hint_lb = label("LB", "key")
         self.tab_buttons = []
         for i, (name, _secs) in enumerate(self.TABS):
@@ -6684,6 +6723,8 @@ class Hub(QMainWindow):
 
     def apply_mode(self):
         on = advanced_mode()
+        if getattr(self, "appearance", None) is not None:
+            self.appearance.update_secret()            # the secret theme is listed in Advanced only
         for box in list(_ADVANCED):
             try:
                 box.setVisible(on)
@@ -6862,6 +6903,29 @@ class Hub(QMainWindow):
             w.setVisible(on)
         if self.health.isVisible():
             self.health.refresh_chart()
+        self.update_brand()
+
+    def update_brand(self):
+        """The secret Ally Hub theme puts the owner's wordmark in the top bar instead of icon + name."""
+        logo = brand_logo(36) if load_config()["theme"].get("preset") in core.SECRET_THEMES else None
+        self._has_logo = logo is not None
+        if logo is not None:
+            self.brand_label.setPixmap(logo)
+            self.brand_label.setToolTip(APP_NAME)
+        else:
+            self.brand_label.setText(APP_NAME)          # setText clears a pixmap
+            self.brand_label.setToolTip("")
+        self.brand_badge.setVisible(getattr(self, "bars", "top") == "sides" or not self._has_logo)
+
+    def unlock_secret_theme(self):
+        """30 taps on the top-left icon (TapCounter): the owner's secret Ally Hub theme shows under Customize > Theme
+        (Advanced)."""
+        first = not load_config()["theme"].get("secret_unlocked")
+        update_config(lambda c: c["theme"].__setitem__("secret_unlocked", True))
+        self.appearance.update_secret()
+        self.toast(("Secret theme unlocked! " if first else "Already unlocked. ")
+                   + ("It's under Customize → Theme." if advanced_mode() else
+                      "Switch to Advanced (Settings → General) to see it under Customize → Theme."), 7000)
 
     def update_top_status(self):
         sep = "\n" if getattr(self, "bars", "top") == "sides" else "   "

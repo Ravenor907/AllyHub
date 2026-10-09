@@ -1,9 +1,9 @@
 <p align="center">
-  <img src="assets/banner.png" alt="Ally Hub" width="100%">
+  <img src="assets/banner.svg" alt="Ally Hub" width="100%">
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.4.1.3-ff8a00?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.4.1.4-e11d48?style=flat-square">
   <img alt="SteamOS" src="https://img.shields.io/badge/SteamOS-3.8%2B-1a9fff?style=flat-square&logo=steam&logoColor=white">
   <img alt="Device" src="https://img.shields.io/badge/ROG%20Xbox%20Ally%20X-tested-8b5cf6?style=flat-square">
   <img alt="License" src="https://img.shields.io/github/license/Ravenor907/AllyHub?color=22c55e&style=flat-square">
@@ -45,8 +45,6 @@ and a phone remote. Works in Desktop Mode, and fully in Game Mode with just the 
 | 🤖 **Background helper** | Dock mode, Update Guardian, battery history and scheduled game save backups |
 | 📱 **Phone remote** | PIN-protected page to check battery and temps, change lighting and wake your PC |
 | 🔄 **Self-updating** | Updates itself and rolls back on its own if a new version misbehaves |
-
-<p align="center"><img src="assets/poster.jpg" alt="Ally Hub: SteamOS, mods, performance" width="360"></p>
 
 ## 🚀 Install
 

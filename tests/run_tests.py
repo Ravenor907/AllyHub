@@ -1119,18 +1119,19 @@ check(core.migrate_chip_spiral() is False and core.load_config()["lighting"]["ef
       "picking Ally Hub's style afterwards sticks")
 core.update_config(lambda c: (c["lighting"].update(effect=None, custom={}), c["game_colors"].clear()))
 check(core.DEFAULT_CONFIG["setup"]["password_known"] is False, "'I already have one' is remembered in setup")
-# ---- branding (1.4.1.3, the owner's images) ----
-import base64 as _b64
-check(core.DEFAULT_CONFIG["theme"]["preset"] == "Ally Hub" and core.THEMES["Ally Hub"]["on_accent"] == "#000000"
-      and core.theme_palette({"preset": "nope"})["accent"] == "#ff8a00", "the Ally Hub theme (black and orange) is the default")
-core.update_config(lambda c: c["theme"].update(preset="ROG Crimson", accent=None, accent2=None, brand_theme=False))
-check(core.migrate_brand_theme() is True and core.load_config()["theme"]["preset"] == "Ally Hub", "the old default moves to the brand theme once")
-core.update_config(lambda c: c["theme"].update(preset="ROG Crimson"))
-check(core.migrate_brand_theme() is False and core.load_config()["theme"]["preset"] == "ROG Crimson", "a theme picked afterwards stays")
+# ---- secret Ally Hub theme (1.4.1.4, the owner's call) ----
+check(core.DEFAULT_CONFIG["theme"]["preset"] == "ROG Crimson" and "Ally Hub" in core.SECRET_THEMES
+      and list(core.THEMES)[-1] == "Ally Hub" and core.theme_palette({"preset": "nope"})["accent"] == "#e11d48",
+      "ROG Crimson is the default again; Ally Hub is a secret theme, last in the grid")
+core.update_config(lambda c: c["theme"].update(preset="Ally Hub", secret_unlocked=False, brand_reverted=False))
+check(core.migrate_brand_theme() is True and core.load_config()["theme"]["preset"] == "ROG Crimson"
+      and core.migrate_brand_theme() is False, "installs 1.4.1.3 gave the brand theme go back once")
+core.update_config(lambda c: c["theme"].update(preset="Ally Hub", secret_unlocked=True, brand_reverted=False))
+check(core.migrate_brand_theme() is False and core.load_config()["theme"]["preset"] == "Ally Hub",
+      "an unlocked secret theme stays")
+core.update_config(lambda c: c["theme"].update(preset="ROG Crimson", secret_unlocked=False))
 _svg = (core.APP_DIR / "allyhub.svg").read_text()
-check('viewBox="0 0 256 256"' in _svg and "data:image/png;base64," in _svg
-      and _b64.b64decode(_svg.split("base64,")[1].split('"')[0])[:8] == b"\x89PNG\r\n\x1a\n",
-      "the app icon is the owner's icon, embedded in allyhub.svg (same file name for old clients)")
+check('viewBox="0 0 256 256"' in _svg and "data:image/png" not in _svg, "the app icon is the original Ally Hub icon")
 check(core.led_gamma((255, 0, 0)) == (255, 0, 0) and core.led_gamma((0, 0, 0)) == (0, 0, 0)
       and core.led_gamma((255, 255, 255), 0.5) == (128, 128, 128),
       "LED gamma keeps pure colors and white exact, and brightness scales the light")
@@ -1766,8 +1767,24 @@ check(_picked and _picked[0].get("allyhub_profile") and "remote_pin" not in _pic
       "profiles are picked with the controller, and never carry the remote PIN")
 tryit("restart decky (was a quick fix)", hub.restart_decky)
 import base64 as _b64g
-check(_b64g.b64decode(gui.BRAND_LOGO_PNG)[:8] == b"\x89PNG\r\n\x1a\n", "the header wordmark is a real PNG")
-tryit("header logo", lambda: gui.brand_logo(36))
+check(_b64g.b64decode(gui.BRAND_LOGO_PNG)[:8] == b"\x89PNG\r\n\x1a\n", "the secret theme's wordmark is a real PNG")
+tryit("header logo", lambda: (gui.brand_logo(36), hub.update_brand()))
+_unlocked = []
+_real_unlock = hub.unlock_secret_theme
+hub.unlock_secret_theme = lambda: _unlocked.append(1)
+for _i in range(29):
+    hub._taps.tap()
+check(not _unlocked, "29 taps on the top-left icon don't unlock anything")
+hub._taps.tap()
+check(_unlocked == [1] and hub._taps.count == 0, "the 30th tap unlocks the secret theme")
+hub._taps.last -= 10
+hub._taps.tap()
+check(hub._taps.count == 1, "a long pause starts the count over")
+hub.unlock_secret_theme = _real_unlock
+tryit("unlock secret theme", hub.unlock_secret_theme)
+check(core.load_config()["theme"]["secret_unlocked"], "unlocking is remembered")
+tryit("secret theme listing", hub.appearance.update_secret)
+core.update_config(lambda c: c["theme"].__setitem__("secret_unlocked", False))
 tryit("release notes panel", hub.show_release_notes)
 check("tweaks" not in vars(hub) and "backups" not in vars(hub) and not hasattr(gui, "TweaksPage")
       and [n for n, _ in hub.TABS[4][1]] == ["General", "Connections", "Activity log"]
