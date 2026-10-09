@@ -1640,8 +1640,15 @@ for n in hub.PAGE_NAMES + list(hub.ALIASES):
     tryit("go " + n, lambda n=n: hub.go(n))
 check(len(hub.TABS) == 5, "five top-level tabs")
 check([t for t, _ in hub.TABS] == ["Home", "Store", "Games", "Customize", "Settings"]
-      and sum(len(s) for _, s in hub.TABS) <= 15, "the owner's map: five tabs, few sections")
-check(sorted(map(id, hub.pages)) == sorted(map(id, [p for g in hub.groups for p in g.pages])), "every page lives in a tab")
+      and sum(len(s) for _, s in hub.TABS) <= 18, "the owner's map: five tabs, one row of sections each")
+check(set(map(id, hub.pages)) == set(map(id, [p for g in hub.groups for p in g.pages]))
+      and len(hub.pages) == len(set(map(id, hub.pages))), "every page lives in a tab, once")
+check(not hub.browse.chips and [n for n, _ in hub.TABS[1][1]][:5] == ["Essentials", "Mods", "Apps", "Decky plugins",
+      "Installed"], "Store's filters are its LT/RT sections: no chip row the controller can't reach")
+hub.go("Mods")
+check(hub.current_page() is hub.browse and hub.browse.filter == "mods", "a Store section picks its view")
+hub.groups[1].step(1)
+check(hub.browse.filter == "apps", "RT moves to the next Store view")
 hub.go("Doctor")
 check(hub.tab_index() == 0 and hub.current_page() is hub.health, "old names land in the new place (Doctor is in Overview)")
 check(hub.doctor.block.parent() is not None or True, "the Checkup is a block on Overview")
@@ -1675,9 +1682,9 @@ check(hub.groups[0].visible_indexes() == [0, 1, 2], "Setup's chip is gone once s
 hub.set_tab(0, 2); hub.step_sub(1)
 check(hub.current_page() is hub.health, "LT/RT skip hidden sections")
 hub.set_mode(0)
-check(3 not in hub.groups[4].visible_indexes() and not gui.advanced_mode(), "Simple hides the activity log")
+check(2 not in hub.groups[4].visible_indexes() and not gui.advanced_mode(), "Simple hides the activity log")
 hub.set_mode(1)
-check(3 in hub.groups[4].visible_indexes() and gui.advanced_mode(), "Advanced shows it")
+check(2 in hub.groups[4].visible_indexes() and gui.advanced_mode(), "Advanced shows it")
 hub.set_mode(0)
 hub.set_tab(2, 0)
 _seen_ref = []
@@ -1701,7 +1708,14 @@ tryit("profile picker", hub.system.import_profile)
 gui.ask_item, hub.import_profile = _ai3, _ip
 check(_picked and _picked[0].get("allyhub_profile") and "remote_pin" not in _picked[0]["config"]["agent"],
       "profiles are picked with the controller, and never carry the remote PIN")
-tryit("quick fixes", lambda: (hub.tweaks.refresh(), hub.tweaks.restart_decky()))
+tryit("restart decky (was a quick fix)", hub.restart_decky)
+tryit("release notes panel", hub.show_release_notes)
+check("tweaks" not in vars(hub) and "backups" not in vars(hub) and not hasattr(gui, "TweaksPage")
+      and [n for n, _ in hub.TABS[4][1]] == ["General", "Connections", "Activity log"]
+      and hub.ALIASES["Backups"] == "General" and hub.ALIASES["Activity"] == "Activity log",
+      "1.3.7.10: Quick fixes and the Backups section are folded in; old names still land")
+check(hub.launchers.btn_clean.parent() is not None and hub.automation.block_saves.parent() is not None,
+      "launcher leftovers and scheduled save backups are placed (Storage, Saves) and never float as windows")
 tryit("checkup toggle", lambda: (hub.doctor.toggle_all(), hub.doctor.toggle_all()))
 tryit("rerun setup", hub.rerun_setup)
 check(hub.current_page() is hub.setup and hub.setup.step == 0, "Run setup again opens step 1")

@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.3.7.10
+
+- **Every part of the Store works with the controller:** Essentials, Mods, Apps, Decky plugins, Installed and Launchers
+  are now the Store's sections, picked with LT/RT. The extra row of chips you couldn't reach is gone.
+- **Quick fixes are gone, not lost:** each fix moved to where you'd look for it. Restart Decky is under Your plugins,
+  Update all apps is under Apps, cleanups are in Storage, and the Checkup now checks that Ally Hub is in your Game
+  Mode library.
+- **All cleanup is in one place:** Home > Storage > More cleanup clears the shader cache, unused app runtimes and
+  leftovers from removed launchers.
+- **One Saves card:** snapshots when a game starts and backups on a schedule share the Save time machine card.
+- **Settings is shorter:** Backups moved into General, the full changelog became a "What's new" button, and alerts
+  show once, in the Checkup, instead of twice on Home.
+
 ## 1.3.7.9
 
 - **One place for each job:** installed Decky plugins are turned off or removed only under Your plugins. Store

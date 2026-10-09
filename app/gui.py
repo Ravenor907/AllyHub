@@ -1278,8 +1278,8 @@ class ItemCard(QFrame):
 
 
 class BrowsePage(QWidget):
-    """Store > Browse (1.4.0): mods, apps and Decky plugins in one place. Filter chips pick what shows; the Decky
-    plugin store is the StorePage, shown under its own chip. Every catalog card exists once (self.cards) and is
+    """Store's catalog: mods, apps and Decky plugins. Since 1.3.7.10 Store's sections (Essentials, Mods, Apps, Decky
+    plugins, Installed) pick the view through set_view; the Decky plugin store is the StorePage, under its section. Every catalog card exists once (self.cards) and is
     moved between the filter views, so update_cards keeps them all current."""
 
     FILTERS = [("essentials", "Essentials"), ("mods", "Mods"), ("apps", "Apps"), ("plugins", "Decky plugins"),
@@ -1292,19 +1292,7 @@ class BrowsePage(QWidget):
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
-        bar = QFrame()
-        bar.setObjectName("chipBar")
-        bh = QHBoxLayout(bar)
-        bh.setContentsMargins(36, 14, 36, 0)
-        bh.setSpacing(10)
-        self.chips = {}
-        for key, text in self.FILTERS:
-            c = button(text, lambda _=False, k=key: self.set_filter(k), "chip")
-            c.setCheckable(True)
-            self.chips[key] = c
-            bh.addWidget(c)
-        bh.addStretch()
-        v.addWidget(bar)
+        self.chips = {}                 # the filters are Store's sections now (Hub.TABS), picked with LT/RT
         self.stack = QStackedWidget()
         self.inner = QWidget()
         cv = QVBoxLayout(self.inner)
@@ -1317,8 +1305,10 @@ class BrowsePage(QWidget):
         top = QHBoxLayout()
         self.btn_all = button("Install all essentials", hub.install_essentials, "primary")
         top.addWidget(self.btn_all)
-        self.btn_plugins = button("Decky plugins", lambda: self.set_filter("plugins"))
-        top.addWidget(self.btn_plugins)
+        self.btn_update = button("Update all apps", lambda: hub.runner.submit(      # was a Quick fix
+            "Update apps", "flatpak update --user -y --noninteractive; flatpak update -y --noninteractive",
+            "flatpak-update"))
+        top.addWidget(self.btn_update)
         top.addStretch()
         cv.addLayout(top)
         self.list_v = QVBoxLayout()
@@ -1373,7 +1363,7 @@ class BrowsePage(QWidget):
         self.sub.setText(sub)
         self.btn_all.setVisible(key == "essentials" and any(
             i.recommended and not i.check(self.hub.state) for i in CATALOG))
-        self.btn_plugins.setVisible(key == "installed")
+        self.btn_update.setVisible(key in ("apps", "installed"))
         while self.list_v.count():                     # take the cards out; they're reused, never deleted
             it = self.list_v.takeAt(0)
             lay, w = it.layout(), it.widget()
@@ -1400,6 +1390,10 @@ class BrowsePage(QWidget):
             self.list_v.addLayout(grid)
         if not shown:
             self.list_v.addWidget(label("Nothing here yet.", "cardDesc"))
+        self.inner.layout().activate()      # focus_page picks by position: positions must be current
+
+    def set_view(self, key: str):
+        self.filter = key               # Hub.on_page_shown calls refresh() next, which draws it once
 
     def refresh(self):
         self.set_filter(self.filter or "essentials")
@@ -1424,10 +1418,13 @@ class GroupPage(QWidget):
     """A top-level tab: a row of section chips over a stack of pages."""
 
     def __init__(self, hub, sections: list):
+        """sections: (name, page) or (name, page, view). Sections that share a page show it once in the stack and
+        call page.set_view(view) when picked (Store's Essentials / Mods / Apps / Decky plugins / Installed)."""
         super().__init__()
         self.hub = hub
-        self.names = [n for n, _ in sections]
-        self.pages = [p for _, p in sections]
+        self.names = [sec[0] for sec in sections]
+        self.pages = [sec[1] for sec in sections]
+        self.views = [sec[2] if len(sec) > 2 else "" for sec in sections]
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(0)
@@ -1445,12 +1442,15 @@ class GroupPage(QWidget):
         bh.addStretch()
         self.lt_rt = key_hints([("LT", ""), ("RT", "")])
         bh.addWidget(self.lt_rt)
-        bar.setVisible(len(sections) > 1)
         self.hidden = set()
         v.addWidget(bar)
+        if len(sections) < 2:
+            bar.hide()                      # after it has a parent: hide() on a parentless frame is safe, show isn't
         self.stack = QStackedWidget()
+        self._slot = []                       # stack index per section; a shared page is added once
         for p in self.pages:
-            self.stack.addWidget(p)
+            j = next((self._slot[k] for k, q in enumerate(self.pages[:len(self._slot)]) if q is p), None)
+            self._slot.append(self.stack.addWidget(p) if j is None else j)
         v.addWidget(self.stack, 1)
         self.index = 0
 
@@ -1478,8 +1478,11 @@ class GroupPage(QWidget):
         self.index = i % len(self.pages)
         for n, c in enumerate(self.chips):
             c.setChecked(n == self.index)
-        self.stack.setCurrentIndex(self.index)
-        self.hub.on_page_shown(self.pages[self.index])
+        self.stack.setCurrentIndex(self._slot[self.index])
+        page = self.pages[self.index]
+        if self.views[self.index] and hasattr(page, "set_view"):
+            page.set_view(self.views[self.index])
+        self.hub.on_page_shown(page)
 
     def current(self):
         return self.pages[self.index]
@@ -1591,6 +1594,7 @@ class StorePage(QWidget):
         srow = QHBoxLayout()
         self.btn_safe = button("Turn all plugins off", self.safe_mode)
         srow.addWidget(self.btn_safe)
+        srow.addWidget(button("Restart Decky", lambda: hub.restart_decky()))      # was a Quick fix
         srow.addStretch()
         mv.addLayout(srow)
         mv.addWidget(label("If Game Mode acts up after installing plugins, turn them all off, then back on one at a "
@@ -2762,8 +2766,14 @@ class AutomationPage(QWidget):
         dv.addStretch()
         self.block_lighting = block(switches(self.LIGHTS), gcard, dcard, heading="Automatic lighting")
 
-        scard, sv = titled_card("save", "#0891b2", "Back up on a schedule",
-                                "Backs up every game's saves on a schedule, only when no game runs and the battery is above 30%.")
+        # 1.3.7.10: part of the Save time machine card (Games > Saves), not a card of its own
+        scard = QWidget()
+        sv = QVBoxLayout(scard)
+        sv.setContentsMargins(0, 8, 0, 0)
+        sv.setSpacing(8)
+        sv.addWidget(label("ON A SCHEDULE", "section"))
+        sv.addWidget(label("Backs up every game's saves, only when no game runs and the battery is above 30%.",
+                           "cardMeta", wrap=True))
         self.save_enable = QCheckBox("Back up automatically")
         self.save_enable.toggled.connect(lambda on: self.set_feature("save_backup", on))
         sv.addWidget(self.save_enable)
@@ -3203,7 +3213,7 @@ class HealthPage(QWidget):
         for n, t in enumerate(self.live.values()):
             grid.addWidget(t, n // 3, n % 3)
         v.addLayout(grid)
-        self.slot = v.count()          # the Checkup and Quick fixes go here (Hub puts them in)
+        self.slot = v.count()          # the Checkup goes here (Hub puts it in)
         v.addWidget(label("HISTORY", "section"))
         chips = QHBoxLayout()
         self.series_chips, self.range_chips = {}, {}
@@ -3256,18 +3266,7 @@ class HealthPage(QWidget):
             self.setup_items.addWidget(label("○  " + t, "bannerText"))
         self.setup_card.setVisible(bool(left) and not hidden)
         self.pw_banner.hide()           # the Checkup lists a missing password with its fix (one place, 1.4.0)
-        clear_layout(self.alerts_box)
-        for a in core.read_json(core.DATA_DIR / "alerts.json", []) or []:
-            f = QFrame()
-            f.setObjectName("banner")
-            h = QHBoxLayout(f)
-            h.setContentsMargins(20, 12, 20, 12)
-            h.addWidget(label(a.get("text", ""), "bannerText", wrap=True), 1)
-            if a.get("id", "").startswith("decky-missing"):
-                h.addWidget(button("Repair Decky",
-                                   lambda: self.hub.on_item_action("decky", "install"), "primary"))
-            h.addWidget(button("Dismiss", lambda _=False, i=a.get("id"): self.hub.dismiss_alert(i)))
-            self.alerts_box.addWidget(f)
+        clear_layout(self.alerts_box)     # Update Guardian alerts show in the Checkup, with their fix (1.3.7.10)
 
     def hide_setup(self, *_args):
         update_config(lambda c: c.setdefault("setup", {}).__setitem__("checklist_hidden", True))
@@ -3479,15 +3478,8 @@ class LaunchersPage(QWidget):
         av.addLayout(arow)
         v.addWidget(ac)
 
-        v.addWidget(label("CLEAN UP", "section"))
-        cc, cv = titled_card("trash", "#ef4444", "Leftover data",
-                             'What removed launchers left behind: old prefixes, installers and backups. You pick what goes.')
-        crow = QHBoxLayout()
-        self.btn_clean = button("Find leftovers", self.find_leftovers)
-        crow.addWidget(self.btn_clean)
-        crow.addStretch()
-        cv.addLayout(crow)
-        v.addWidget(cc)
+        # leftovers are found from Home > Storage > More cleanup (Hub.compose_sections puts this button there)
+        self.btn_clean = button("Find launcher leftovers", self.find_leftovers)
         v.addStretch()
         self.update_button()
 
@@ -3785,8 +3777,8 @@ class LaunchersPage(QWidget):
                 parts.append("Steam's connection for plugins is off, so remove the tiles yourself: select one in "
                              "your library, press the menu button, then Manage → Remove non-Steam game.")
             msg_info(self, APP_NAME, "\n\n".join(parts) if parts else
-                                    "Removed: " + ", ".join(names) + ". Tap Find leftovers to free the space "
-                                                                     "they used.")
+                                    "Removed: " + ", ".join(names) + ". To free the space they used: Home → "
+                                                                     "Storage → Find launcher leftovers.")
         BackgroundTask(self, remove, done)
 
     # ---- leftovers ----
@@ -3797,7 +3789,7 @@ class LaunchersPage(QWidget):
 
     def _show_leftovers(self, items):
         self.btn_clean.setEnabled(True)
-        self.btn_clean.setText("Find leftovers")
+        self.btn_clean.setText("Find launcher leftovers")
         if not isinstance(items, list) or not items:
             msg_info(self, APP_NAME, "Nothing left over. All clean ✔")
             return
@@ -4407,7 +4399,9 @@ class SavesPage(QWidget):
         v = page_shell(self, "Saves",
                        "Every game's saves are snapshotted when it starts, so a bad save is one restore away.")
         card, cv = titled_card("save", "#22c55e", "Save time machine",
-                               'Uses Ludusavi, which knows where thousands of games keep saves. Snapshots stay on your handheld.')
+                               "Snapshots a game's saves when it starts, and backs up every game on a schedule. "
+                               "Uses Ludusavi.")
+        self.tm_layout = cv                  # Hub.compose_sections adds the scheduled backup here
         self.tm_cb = QCheckBox("Snapshot a game's saves every time it starts")
         self.tm_cb.toggled.connect(self.set_on)
         cv.addWidget(self.tm_cb)
@@ -5068,6 +5062,8 @@ class DoctorPage(QWidget):
         row.addWidget(button("Check again", self.run_checks))
         self.btn_all = button("Show all checks", self.toggle_all)
         row.addWidget(self.btn_all)
+        if not GAMEMODE:                    # was a Quick fix; only makes sense in Desktop Mode
+            row.addWidget(button("Return to Game Mode", hub.return_to_game_mode))
         row.addStretch()
         cv.addLayout(row)
         self.block = card
@@ -5109,6 +5105,11 @@ class DoctorPage(QWidget):
             add("fail" if expected else "warn", "Decky Loader",
                 "Missing. A SteamOS update probably removed it." if expected else "Not installed.",
                 "Repair" if expected else "Install", lambda: h.on_item_action("decky", "install"), expected)
+
+        lib = core.in_steam_library()      # was a Quick fix (1.3.7.10)
+        add("ok" if lib else "warn", "Game Mode library",
+            "Ally Hub is in your Steam library." if lib else "Ally Hub isn't in your Steam library yet.",
+            None if lib else "Add", None if lib else h.add_to_steam, False)
 
         net = probe.get("net")             # None: the check itself didn't finish, so say so instead of "fine"
         add("ok" if net else "warn" if net is None else "fail", "Internet",
@@ -5171,6 +5172,8 @@ class DoctorPage(QWidget):
                 "Apply again" if off else None, h.performance.apply_tuneup if off else None, False)
 
         for a in core.read_json(core.DATA_DIR / "alerts.json", []) or []:
+            if a.get("id", "").startswith("decky-missing") and not decky:
+                continue                    # the Decky Loader row above already offers the repair
             add("warn", "Update Guardian", a.get("text", ""), "Dismiss",
                 lambda _=False, i=a.get("id"): h.dismiss_alert(i), False)
         return out
@@ -5239,7 +5242,7 @@ class DoctorPage(QWidget):
 
 class SystemPage(QWidget):
     """Not a page since 1.4.0: it builds blocks that other sections show (battery card under Battery & sleep,
-    storage tools under Storage, profile and settings backup under Backups, SSH under Connections, boot video
+    storage tools under Storage, profile and settings backup under General, SSH under Connections, boot video
     under Theme) and keeps their logic."""
 
     def __init__(self, hub):
@@ -5261,11 +5264,19 @@ class SystemPage(QWidget):
         bv.addLayout(lr)
         self.card_battery = bat
 
-        sto, sv = titled_card("hard-drive", "#0ea5e9", "SD card and shader cache")
+        sto, sv = titled_card("hard-drive", "#0ea5e9", "More cleanup")
         self.storage_stats = label("", "cardDesc", wrap=True)
         sv.addWidget(self.storage_stats)
+        # 1.3.7.10: every cleanup in one place (launcher leftovers and unused app runtimes used to live elsewhere);
+        # Hub.compose_sections adds the launcher leftovers button (LaunchersPage keeps its logic)
+        self.clean_row = QHBoxLayout()
+        self.clean_row.addWidget(button("Clear shader cache", self.clear_shaders))
+        self.clean_row.addWidget(button("Remove unused app runtimes", lambda: hub.runner.submit(
+            "Remove unused app runtimes", "flatpak uninstall --user --unused -y --noninteractive; "
+                                          "flatpak uninstall --unused -y --noninteractive", "flatpak-clean")))
+        self.clean_row.addStretch()
+        sv.addLayout(self.clean_row)
         sr = QHBoxLayout()
-        sr.addWidget(button("Clear shader cache", self.clear_shaders))
         self.btn_sd = button("Let apps see the SD card", self.toggle_sd)
         sr.addWidget(self.btn_sd)
         sr.addStretch()
@@ -5751,6 +5762,7 @@ class UpdatesPage(QWidget):
         self.btn_rollback = button("Roll back", self.do_rollback, "danger")
         self.btn_restart = button("Restart Ally Hub", hub.restart_app, "primary")
         ur.addWidget(self.btn_check)
+        ur.addWidget(button("What's new", lambda: hub.show_release_notes()))     # replaces the full changelog
         ur.addWidget(self.btn_restart)
         ur.addWidget(self.btn_rollback)
         ur.addStretch()
@@ -5803,14 +5815,6 @@ class UpdatesPage(QWidget):
         # small disclosure (the owner's call): who builds and maintains Ally Hub
         v.addWidget(label("Ally Hub is built and maintained with Claude, Anthropic's AI, under the developer's direction. "
                           "Error reports and daily fixes are handled by Claude.", "cardMeta", wrap=True))
-        v.addWidget(label("CHANGELOG", "section"))
-        self.changelog = label("", "cardDesc", wrap=True)
-        self.changelog.setTextFormat(Qt.MarkdownText)
-        cl = card_frame()
-        cll = QVBoxLayout(cl)
-        cll.setContentsMargins(20, 16, 20, 16)
-        cll.addWidget(self.changelog)
-        v.addWidget(cl)
         v.addStretch()
         self.installed_new = None
 
@@ -5854,7 +5858,6 @@ class UpdatesPage(QWidget):
         if rb:
             self.rollback_text.setText(f"Version {rb.get('from')} had a problem ({rb.get('reason')}), "
                                        f"so Ally Hub went back to {rb.get('to')}. It's been reported.")
-        self.changelog.setText(core.changelog_text() or "No release notes yet.")
 
     def ack_rollback(self):
         st = core.update_state()
@@ -5983,51 +5986,13 @@ class UpdatesPage(QWidget):
 # Tweaks + Activity
 # ==========================================================================
 
-class TweaksPage(QWidget):
-    """Home > Overview's Quick fixes since 1.4.0 (it was Settings > Tweaks). The password and Decky repair live in
-    the Checkup when they're needed, so they aren't repeated here."""
-
-    def __init__(self, hub):
-        super().__init__()
-        self.hub = hub
-        card, cv = titled_card("wrench", "#8b5cf6", "Quick fixes", "One tap for the usual SteamOS hiccups.")
-        grid = QGridLayout()
-        grid.setSpacing(10)
-        self.btn_steam = button("Add Ally Hub to Game Mode", hub.add_to_steam)
-        self.btn_game_mode = button("Return to Game Mode", hub.return_to_game_mode)
-        fixes = [
-            button("Update all apps", lambda: hub.runner.submit(
-                "Update apps", "flatpak update --user -y --noninteractive; flatpak update -y --noninteractive",
-                "flatpak-update")),
-            button("Restart Decky", self.restart_decky),
-            button("Remove unused app runtimes", lambda: hub.runner.submit(
-                "Remove unused app runtimes", "flatpak uninstall --user --unused -y --noninteractive; "
-                                          "flatpak uninstall --unused -y --noninteractive", "flatpak-clean")),
-            self.btn_steam,
-            self.btn_game_mode,
-        ]
-        for n, b in enumerate(fixes):
-            grid.addWidget(b, n // 3, n % 3)
-        cv.addLayout(grid)
-        self.block = card
-
-    def restart_decky(self, *_args):
-        if self.hub.needs_password():
-            return
-        self.hub.runner.submit("Restart Decky", "sudo systemctl restart plugin_loader", "decky-restart")
-
-    def refresh(self):
-        self.btn_steam.setVisible(not core.in_steam_library())
-        self.btn_game_mode.setVisible(not GAMEMODE)
-
-
 class ActivityPage(QWidget):
     def __init__(self):
         super().__init__()
         v = QVBoxLayout(self)
         v.setContentsMargins(36, 32, 36, 32)
         v.setSpacing(12)
-        v.addWidget(label("Activity", "pageTitle"))
+        v.addWidget(label("Activity log", "pageTitle"))
         v.addWidget(label("Live output from installs and tweaks.", "pageSub"))
         self.log = QPlainTextEdit()
         self.log.setObjectName("log")
@@ -6049,37 +6014,30 @@ class ActivityPage(QWidget):
 # Main window
 # ==========================================================================
 
-class SectionPage(QWidget):
-    """A page that only holds blocks from other objects (Settings > Backups)."""
-
-    def __init__(self, title: str, sub: str, refreshers=()):
-        super().__init__()
-        page_shell(self, title, sub)
-        self._shell.addStretch()
-        self.refreshers = list(refreshers)
-
-    def refresh(self):
-        for f in self.refreshers:
-            f()
-
-
 class Hub(QMainWindow):
     # (tab, [(section name, attribute)]). 1.4.0 (the owner's call): grouped by what you're doing, few sections per
     # tab, expert controls behind Simple / Advanced. Setup shows as a section only until it's done.
     TABS = [
         ("Home", [("Overview", "health"), ("Battery & sleep", "sleep"), ("Storage", "storage"), ("Setup", "setup")]),
-        ("Store", [("Browse", "browse"), ("Launchers", "launchers")]),
+        # "page/view": one page shown with a view (1.3.7.10, the owner: the filter row under the sections couldn't be
+        # reached with the controller, so the filters became the sections)
+        ("Store", [("Essentials", "browse/essentials"), ("Mods", "browse/mods"), ("Apps", "browse/apps"),
+                   ("Decky plugins", "browse/plugins"), ("Installed", "browse/installed"),
+                   ("Launchers", "launchers")]),
         ("Games", [("Game settings", "games"), ("Performance", "performance"), ("Saves", "saves")]),
         ("Customize", [("Lighting", "lighting_section"), ("Theme", "appearance")]),
-        ("Settings", [("General", "updates"), ("Connections", "connect_page"), ("Backups", "backups"),
-                      ("Activity", "activity")]),
+        ("Settings", [("General", "updates"), ("Connections", "connect_page"), ("Activity log", "activity")]),
     ]
     # old section names (code paths, earlier docs) still land in the right place
     ALIASES = {"Home": "Overview", "Health": "Overview", "Doctor": "Overview", "Tweaks": "Overview",
-               "Sleep": "Battery & sleep", "System": "Battery & sleep", "Mods": "Browse", "Apps": "Browse",
-               "Plugin store": "Browse", "Plugin Store": "Browse", "Themes": "Theme", "Appearance": "Theme",
-               "Automation": "General", "Updates": "General", "Connect": "Connections", "Games": "Game settings"}
-    BROWSE_FILTERS = {"Mods": "mods", "Apps": "apps", "Plugin store": "plugins", "Plugin Store": "plugins"}
+               "Sleep": "Battery & sleep", "System": "Battery & sleep", "Browse": "Essentials", "Store": "Essentials",
+               "Plugin store": "Decky plugins", "Plugin Store": "Decky plugins", "Themes": "Theme", "Appearance": "Theme",
+               "Automation": "General", "Updates": "General", "Connect": "Connections", "Games": "Game settings",
+               "Backups": "General", "Activity": "Activity log", "Quick fixes": "Overview",
+               "Leftovers": "Storage"}
+
+    def section_page(self, attr: str):
+        return getattr(self, attr.partition("/")[0])
 
     @property
     def PAGE_NAMES(self):
@@ -6147,17 +6105,19 @@ class Hub(QMainWindow):
         self.doctor = DoctorPage(self)
         self.appearance = AppearancePage(self)
         self.updates = UpdatesPage(self)
-        self.tweaks = TweaksPage(self)
         self.activity = ActivityPage()
-        self.backups = SectionPage("Backups", "Your whole setup in one file, and your settings saved daily.",
-                                   [self.system.refresh])
         self.compose_sections()
-        self.pages = [getattr(self, attr) for _, secs in self.TABS for _, attr in secs]
+        self.pages = []                     # each page once, even when several sections show it
+        for _, secs in self.TABS:
+            for _, attr in secs:
+                pg = self.section_page(attr)
+                if all(pg is not q for q in self.pages):
+                    self.pages.append(pg)
 
         self.stack = QStackedWidget()
         self.groups = []
         for _name, secs in self.TABS:
-            g = GroupPage(self, [(n, getattr(self, attr)) for n, attr in secs])
+            g = GroupPage(self, [(n, self.section_page(attr), attr.partition("/")[2]) for n, attr in secs])
             self.groups.append(g)
             self.stack.addWidget(g)
 
@@ -6206,19 +6166,20 @@ class Hub(QMainWindow):
     # ---- sections built from blocks (1.4.0) ----
     def compose_sections(self):
         """Put each block on the page the owner's map gives it. The objects that built the blocks keep their logic
-        (self.system, self.automation, self.doctor, self.tweaks); only where the blocks show changed."""
+        (self.system, self.automation, self.doctor, self.launchers); only where the blocks show changed."""
         retitle(self.health, "Overview", "How your handheld is doing, and anything that needs you.")
-        self.health._shell.insertWidget(self.health.slot, block(self.doctor.block, self.tweaks.block))
+        self.health._shell.insertWidget(self.health.slot, self.doctor.block)
         retitle(self.sleep, "Battery & sleep", "Battery care, and what every sleep cost and what woke the handheld.")
         add_block(self.sleep, self.system.card_battery, 0)
-        add_block(self.storage, self.system.card_storage, heading="More")
-        add_block(self.saves, self.automation.block_saves, heading="Every game")
+        self.system.clean_row.insertWidget(2, self.launchers.btn_clean)
+        add_block(self.storage, self.system.card_storage)
+        self.saves.tm_layout.addWidget(self.automation.block_saves)
         add_block(self.lighting, self.automation.block_lighting)
         retitle(self.store_page, "Decky plugins", "The official Decky plugin store, and every plugin you have.")
         retitle(self.appearance, "Theme", "Colors, sizes, where the bars sit, and Steam's boot video.")
         add_block(self.appearance, self.system.card_boot, heading="Boot video")
         add_block(self.appearance, self.build_glyphs_card(), heading="Controller icons")
-        retitle(self.updates, "General", "How much Ally Hub shows, the background helper, and updates.")
+        retitle(self.updates, "General", "How much Ally Hub shows, the background helper, updates and backups.")
         mcard, mv = titled_card("layout-grid", "#0ea5e9", "How much to show",
                                 'Simple keeps things calm. Advanced adds tune-up, Proton per game, wake blockers, SSH and the log.')
         mr = QHBoxLayout()
@@ -6236,8 +6197,8 @@ class Hub(QMainWindow):
         retitle(self.connect_page, "Connections", "Wake your PC, play from anywhere, and control your handheld "
                                                   "from your phone.")
         add_block(self.connect_page, adv(self.system.card_ssh))
-        for card in (self.system.card_profile, self.system.card_backup):
-            add_block(self.backups, card)
+        # 1.3.7.10: backups live with the other app settings, not in a section of their own
+        add_block(self.updates, block(self.system.card_profile, self.system.card_backup, heading="Backups"))
 
     # ---- controller glyphs: CSS Loader + the Handheld Controller Glyphs theme (1.3.7.7) ----
     def build_glyphs_card(self) -> QWidget:
@@ -6307,7 +6268,7 @@ class Hub(QMainWindow):
                 box.setVisible(on)
             except RuntimeError:            # its page section was rebuilt
                 _ADVANCED.remove(box)
-        self.set_section_hidden("Activity", not on)
+        self.set_section_hidden("Activity log", not on)
         if getattr(self, "games", None) is not None and self.current_page() is self.games:
             self.games.refresh()            # the game view is built per game, so it's redrawn
 
@@ -6501,8 +6462,6 @@ class Hub(QMainWindow):
         return self.groups[self.tab_index()].current()
 
     def go(self, name: str):
-        if name in self.BROWSE_FILTERS:
-            self.browse.set_filter(self.BROWSE_FILTERS[name])
         if name == "Setup":
             self.set_section_hidden("Setup", False)
         name = self.ALIASES.get(name, name)
@@ -6568,7 +6527,7 @@ class Hub(QMainWindow):
             pass
         if page is not self.setup:
             self.update_setup_chip()
-        owners = {self.health: [self.tweaks.refresh], self.sleep: [self.system.refresh],
+        owners = {self.health: [], self.sleep: [self.system.refresh],
                   self.storage: [self.system.refresh], self.saves: [self.automation.refresh],
                   self.lighting_section: [self.automation.refresh], self.appearance: [self.system.refresh],
                   self.updates: [self.automation.refresh], self.connect_page: [self.system.refresh]}
@@ -6635,6 +6594,11 @@ class Hub(QMainWindow):
             pop.show()
             pop.raise_()
             self._toast_pop_timer.start(ms)
+
+    def restart_decky(self, *_args):
+        if self.needs_password():
+            return
+        self.runner.submit("Restart Decky", "sudo systemctl restart plugin_loader", "decky-restart")
 
     def dismiss_alert(self, alert_id):
         alerts = core.read_json(core.DATA_DIR / "alerts.json", []) or []
@@ -7056,34 +7020,41 @@ class Hub(QMainWindow):
         last = cfg["updates"].get("last_seen_version")
         if last != VERSION:
             update_config(lambda c: c["updates"].__setitem__("last_seen_version", VERSION))
-            notes = core.changelog_section(VERSION)
-            if last and notes:
-                dlg = QDialog(self)                    # a scrolling panel: release notes can be long
-                dlg.setWindowTitle(f"What's new in {core.display_version()}")
-                dv = QVBoxLayout(dlg)
-                dv.setContentsMargins(24, 20, 24, 20)
-                dv.addWidget(label(f"What's new in {core.display_version()}", "cardTitle"))
-                body = label("", "cardDesc", wrap=True)
-                body.setTextFormat(Qt.MarkdownText)
-                body.setText(notes)
-                inner = QWidget()
-                il = QVBoxLayout(inner)
-                il.addWidget(body)
-                il.addStretch()
-                sa = scroll_page(inner)
-                sa.setMinimumHeight(min(420, int(self.height() * 0.55)))
-                dv.addWidget(sa, 1)
-                row = QHBoxLayout()
-                row.addStretch()
-                ok = button("OK", dlg.accept, "primary")
-                ok.setDefault(True)
-                row.addWidget(ok)
-                dv.addLayout(row)
-                run_dialog(dlg)
+            if last and core.changelog_section(VERSION):
+                self.show_release_notes()
         st = core.update_state()
         rb = st.get("rolled_back")
         if rb and not rb.get("ack"):
             self.go("Updates")
+
+    def show_release_notes(self):
+        """This version's notes in a scrolling in-window panel (after an update, and from Settings > General)."""
+        notes = core.changelog_section(VERSION)
+        if not notes:
+            self.toast("No release notes for this version.")
+            return
+        dlg = QDialog(self)                    # a scrolling panel: release notes can be long
+        dlg.setWindowTitle(f"What's new in {core.display_version()}")
+        dv = QVBoxLayout(dlg)
+        dv.setContentsMargins(24, 20, 24, 20)
+        dv.addWidget(label(f"What's new in {core.display_version()}", "cardTitle"))
+        body = label("", "cardDesc", wrap=True)
+        body.setTextFormat(Qt.MarkdownText)
+        body.setText(notes)
+        inner = QWidget()
+        il = QVBoxLayout(inner)
+        il.addWidget(body)
+        il.addStretch()
+        sa = scroll_page(inner)
+        sa.setMinimumHeight(min(420, int(self.height() * 0.55)))
+        dv.addWidget(sa, 1)
+        row = QHBoxLayout()
+        row.addStretch()
+        ok = button("OK", dlg.accept, "primary")
+        ok.setDefault(True)
+        row.addWidget(ok)
+        dv.addLayout(row)
+        run_dialog(dlg)
 
     def report_problem(self):
         """One button for anything that's wrong: the user's words plus logs, job output and a system snapshot."""

@@ -24,16 +24,23 @@ move VERSION without making sure installed copies can still update.
 **Layout (1.4.0, the owner's call: "simple up front, complex under the hood", intuitive at a glance, customizable
 without feeling overwhelming).** `Hub.TABS`:
 - **Home:** Overview (`HealthPage`: notices, live tiles, then the Checkup (`DoctorPage.block`: only problems show,
-  "Show all checks" for the rest) and Quick fixes (`TweaksPage.block`), then history) · Battery & sleep (`SleepPage`
-  + `SystemPage.card_battery`) · Storage (`StoragePage` + `card_storage`) · Setup (chip only until setup is done).
-- **Store:** Browse (`BrowsePage`: chips Essentials / Mods / Apps / Decky plugins / Installed; the Decky store is the
-  `StorePage` under its chip; each catalog card exists once in `browse.cards`) · Launchers.
-- **Games:** Game settings (`GamesPage`) · Performance · Saves (`SavesPage` + `AutomationPage.block_saves`).
+  "Show all checks" for the rest; Update Guardian alerts show here only), then history) · Battery & sleep
+  (`SleepPage` + `SystemPage.card_battery`) · Storage (`StoragePage` + `card_storage` "More cleanup": shader cache,
+  unused app runtimes, launcher leftovers) · Setup (chip only until setup is done).
+- **Store (1.3.7.10):** Essentials · Mods · Apps · Decky plugins · Installed are sections that show ONE `BrowsePage`
+  with a view (`"browse/mods"` in `TABS`; `GroupPage` stacks a shared page once and calls `page.set_view`). Never put
+  a chip row inside a section again: the controller can't reach it (the owner, 1.3.7.9). The Decky store is the
+  `StorePage` under Decky plugins; each catalog card exists once in `browse.cards`. Then Launchers.
+- **Games:** Game settings (`GamesPage`) · Performance · Saves (`SavesPage`; `AutomationPage.block_saves` sits inside
+  the Save time machine card).
 - **Customize:** Lighting (studio gets `AutomationPage.block_lighting`) · Theme (`AppearancePage` + `card_boot`).
-- **Settings:** General (`UpdatesPage` with the Simple/Advanced card and `AutomationPage.block_general` on top) ·
-  Connections (`ConnectPage` + SSH) · Backups (`SectionPage`: profile, settings backup) · Activity (Advanced only).
+- **Settings:** General (`UpdatesPage` with the Simple/Advanced card and `AutomationPage.block_general` on top,
+  Backups (profile, settings backup) at the end, "What's new" instead of the full changelog) · Connections
+  (`ConnectPage` + SSH) · Activity log (Advanced only).
+**One place per job (1.3.7.10, the owner):** an installed plugin is turned off or removed only under Your plugins;
+other cards show a check and say where it's managed. Quick fixes are gone: each fix lives where it belongs.
 How it's built: a section is one existing page; blocks from other objects are added with `add_block` / `retitle`
-in `Hub.compose_sections`. `SystemPage`, `AutomationPage`, `DoctorPage` and `TweaksPage` are no longer pages: they
+in `Hub.compose_sections`. `SystemPage`, `AutomationPage` and `DoctorPage` are no longer pages: they
 build their blocks parentless and keep the logic. `on_page_shown` refreshes whatever opens, plus the owners of its
 blocks. A new feature goes on the page where someone would look for it; give it a block, don't add a section.
 **Simple / Advanced** (`config["theme"]["advanced"]`, Simple by default): wrap expert controls in `adv(widget)`
