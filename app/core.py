@@ -71,7 +71,7 @@ REFUSAL_PATTERNS = re.compile(
 # ==========================================================================
 
 DEFAULT_CONFIG = {
-    "theme": {"preset": "ROG Crimson", "accent": None, "accent2": None,
+    "theme": {"preset": "Ally Hub", "brand_theme": False, "accent": None, "accent2": None,
               "scale": 100, "controller_nav": "auto", "ui_scale": "auto",
               # Game Mode and Desktop Mode show the same size differently, so each remembers its own
               # (None = use the shared "scale"/"ui_scale" above, which older versions saved)
@@ -1342,6 +1342,18 @@ def migrate_color_spirals() -> bool:
     return bool(changed)
 
 
+def migrate_brand_theme() -> bool:
+    """Once (1.4.1.3, the owner's call): installs still on the old default theme (ROG Crimson, no custom accents)
+    switch to the Ally Hub theme. A theme picked afterwards stays."""
+    cfg = load_config()
+    if cfg["theme"].get("brand_theme"):
+        return False
+    t = cfg["theme"]
+    move = t.get("preset") == "ROG Crimson" and not t.get("accent") and not t.get("accent2")
+    update_config(lambda c: c["theme"].update(brand_theme=True, **({"preset": "Ally Hub"} if move else {})))
+    return move
+
+
 def uses_chip_effect(effect: dict) -> bool:
     e = normalize_effect(effect)
     return e["type"] == "spiral" and e.get("engine") == "chip"
@@ -1821,6 +1833,11 @@ def per_game_drain(rows: list) -> list:
 # ==========================================================================
 
 THEMES = {
+    # the owner's brand (1.4.1.3): black and orange, like the Ally Hub logo; black text on orange
+    "Ally Hub": dict(bg="#050505", side="#0b0b0b", surface="#121212", surface2="#1c1c1c",
+                     border="#2e2418", text="#f5f5f5", muted="#a39a90",
+                     accent="#ff8a00", accent2="#ffa31a",
+                     hero=("#2a1400", "#120900", "#000000"), on_accent="#000000"),
     "ROG Crimson": dict(bg="#0e1016", side="#13151d", surface="#171a24", surface2="#232838",
                         border="#2e3448", text="#e7e9f0", muted="#8a91a6",
                         accent="#e11d48", accent2="#8b5cf6",
@@ -1857,7 +1874,7 @@ THEMES = {
 
 
 def theme_palette(theme_cfg: dict) -> dict:
-    pal = dict(THEMES.get(theme_cfg.get("preset"), THEMES["ROG Crimson"]))
+    pal = dict(THEMES.get(theme_cfg.get("preset"), THEMES["Ally Hub"]))
     if theme_cfg.get("accent"):
         pal["accent"] = theme_cfg["accent"]
     if theme_cfg.get("accent2"):
