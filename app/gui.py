@@ -185,7 +185,8 @@ def write_helpers() -> Path:
     askpass = bindir / "allyhub-askpass"
     askpass.write_text(
         "#!/bin/sh\n"
-        "MSG='Ally Hub needs your password (sudo) to continue:'\n"
+        "TASK=$(printf '%s' \"${ALLYHUB_TASK:-a task}\" | tr -cd 'A-Za-z0-9 .,:()+_-' | cut -c1-80)\n"
+        "MSG=\"Ally Hub needs your password (sudo) for: $TASK\"\n"
         "if command -v kdialog >/dev/null 2>&1; then exec kdialog --title 'Ally Hub' --password \"$MSG\"\n"
         "elif command -v zenity >/dev/null 2>&1; then exec zenity --password --title='Ally Hub'\n"
         "fi\nexit 1\n")
@@ -240,7 +241,9 @@ class JobRunner(QObject):
         except OSError:
             self.log_file = None
         self.proc = QProcess(self)
-        self.proc.setProcessEnvironment(self.env)
+        env = QProcessEnvironment(self.env)
+        env.insert("ALLYHUB_TASK", label)        # the password prompt names the task asking (security review)
+        self.proc.setProcessEnvironment(env)
         self.proc.setWorkingDirectory(str(HOME))
         self.proc.setProcessChannelMode(QProcess.MergedChannels)
         self.proc.readyReadStandardOutput.connect(self._read)
@@ -6375,8 +6378,10 @@ class UpdatesPage(QWidget):
         t = self.token.text().strip()
         if not t:
             return
-        if not re.fullmatch(r"(github_pat_|ghp_)[A-Za-z0-9_]{20,}", t):
-            msg_warn(self, APP_NAME, "That doesn't look like a GitHub access key.")
+        if not re.fullmatch(r"github_pat_[A-Za-z0-9_]{20,}", t):
+            # fine-grained keys only: they can be limited to this one repo and to issues (security review)
+            msg_warn(self, APP_NAME, "Use a fine-grained GitHub access key (it starts with github_pat_). The steps "
+                                     "are just below.")
             return
         core.save_github_token(t)
         self.token.clear()
@@ -7445,18 +7450,18 @@ class Hub(QMainWindow):
         if plan["catalog"]:
             lines.append("Mods: " + ", ".join(CATALOG_BY_ID[i].name for i in plan["catalog"]))
         if plan["flatpaks"]:
-            lines.append(f"Apps: {len(plan['flatpaks'])} to install")
+            shown = plan["flatpaks"][:12]           # name every app, so a shared profile can't slip one in
+            lines.append("Apps: " + ", ".join(shown) + (f" and {len(plan['flatpaks']) - 12} more"
+                                                          if len(plan["flatpaks"]) > 12 else ""))
         if plan["decky_plugins"]:
             lines.append("Decky plugins: " + ", ".join(plan["decky_plugins"]))
         lines.append("Settings: theme, lighting, automation, game colors, Wake-on-LAN")
         sysp = plan["system"]
         if sysp.get("charge_limit") and sysp["charge_limit"] != "100":
             lines.append(f"Charge limit: {sysp['charge_limit']}%")
-        if sysp.get("ssh"):
-            lines.append("SSH: on")
         if not ask(self, "Import this profile?\n\n" + "\n".join(lines)):
             return
-        needs_root = plan["catalog"] or plan["decky_plugins"] or sysp.get("ssh") or sysp.get("charge_limit")
+        needs_root = plan["catalog"] or plan["decky_plugins"] or sysp.get("charge_limit")
         if needs_root and self.needs_password():
             return
         core.apply_profile_config(plan["config"])
@@ -7486,8 +7491,6 @@ class Hub(QMainWindow):
             cmd = self.system.charge_limit_cmd(sysp["charge_limit"])
             if cmd:
                 self.runner.submit("Restore charge limit", cmd, "charge-limit")
-        if sysp.get("ssh") and not core.sshd_active():
-            self.runner.submit("Turn SSH on", "sudo systemctl enable --now sshd", "ssh")
         if load_config()["agent"].get("enabled"):
             self.enable_agent()
         self.update_cards()

@@ -111,10 +111,13 @@ from pathlib import Path
 if shutil.which("curl") and shutil.which("bash"):
     _scr = Path(HOME) / "inst.sh"
     _scr.write_text('[ "$X" = 1 ] || X=1 exec env X=1 "$0" "$@"\necho "ran as $0"\n')
-    _r = subprocess.run(["bash", "-c", core.fetch_run(_scr.as_uri())], capture_output=True, text=True)
+    check("--proto =https --proto-redir =https" in core.fetch_run("https://x/y.sh"), "downloads are https only, even after redirects")
+    _r = subprocess.run(["bash", "-c", core.fetch_run(_scr.as_uri()).replace("--proto =https --proto-redir =https ", "")],
+                        capture_output=True, text=True)
     check(_r.returncode == 0 and "ran as bash" in _r.stdout, "fetched installers still re-run themselves like curl | sh: " + _r.stdout + _r.stderr)
     _r = subprocess.run(["bash", "-c", core.fetch_run((Path(HOME) / "missing.sh").as_uri())], capture_output=True, text=True)
     check(_r.returncode != 0, "a failed download is never run")
+import shlex
 _zip = Path(HOME) / "plug.zip"
 import zipfile as _zf, hashlib as _hl
 with _zf.ZipFile(_zip, "w") as z:
@@ -122,10 +125,16 @@ with _zf.ZipFile(_zip, "w") as z:
 _good = _hl.sha256(_zip.read_bytes()).hexdigest()
 check(core.store_artifact_hash({"versions": [{"hash": _good}]}) == _good and core.store_artifact_hash({"versions": [{"hash": "x"}]}) == "",
       "store hash read")
-_c = core.decky_store_install_cmd(_zip.as_uri(), "0" * 64).split("python3 -m zipfile")[0] + "echo EXTRACTED"
+def _local(cmd):     # the real command is https only: point it at the test file for the checksum check
+    return (cmd.replace(shlex.quote("https://store.test/p.zip"), shlex.quote(_zip.as_uri()))
+               .replace("--proto =https --proto-redir =https ", "").split("python3 -m zipfile")[0] + "echo EXTRACTED")
+check("exit 1" in core.decky_store_install_cmd("https://store.test/p.zip", "")
+      and "exit 1" in core.decky_store_install_cmd("http://store.test/p.zip", _good),
+      "a store plugin without a checksum, or not over https, is never installed")
+_c = _local(core.decky_store_install_cmd("https://store.test/p.zip", "0" * 64))
 _r = subprocess.run(["bash", "-c", _c], capture_output=True, text=True)
 check(_r.returncode != 0 and "EXTRACTED" not in _r.stdout, "a plugin download that doesn't match the store's checksum is never installed")
-_c = core.decky_store_install_cmd(_zip.as_uri(), _good).split("python3 -m zipfile")[0] + "echo EXTRACTED"
+_c = _local(core.decky_store_install_cmd("https://store.test/p.zip", _good))
 check("EXTRACTED" in subprocess.run(["bash", "-c", _c], capture_output=True, text=True).stdout, "a matching one goes ahead")
 import urllib.request as _ur, urllib.error as _ue, io as _io
 _seen_auth = []
@@ -1119,6 +1128,32 @@ check(core.migrate_chip_spiral() is False and core.load_config()["lighting"]["ef
       "picking Ally Hub's style afterwards sticks")
 core.update_config(lambda c: (c["lighting"].update(effect=None, custom={}), c["game_colors"].clear()))
 check(core.DEFAULT_CONFIG["setup"]["password_known"] is False, "'I already have one' is remembered in setup")
+# ---- security review 1.4.1.8 ----
+check(core.theme_palette({"preset": "ROG Crimson", "accent": "#fff}</style><script>alert(1)</script>"})["accent"] == "#e11d48",
+      "a theme color that isn't #rrggbb is ignored (no markup into the remote page or the stylesheet)")
+_p = core.profile_plan({"system": {"ssh": True, "charge_limit": "80"}}, {"flatpaks": set(), "decky": {}})
+check(_p["system"]["ssh"] is False and "ssh" not in core.build_profile({"flatpaks": set(), "decky": {}})["system"],
+      "profiles never turn SSH on")
+core.update_config(lambda c: c["agent"].__setitem__("save_backup_dir", "/home/me/mine"))
+core.apply_profile_config({"agent": {"save_backup_dir": "/tmp/evil"}, "theme": {"accent": "javascript:x", "preset": "Synthwave"}})
+_c = core.load_config()
+check(_c["agent"]["save_backup_dir"] == "/home/me/mine" and _c["theme"]["accent"] is None,
+      "a profile can't move save backups or carry a bad color")
+core.update_config(lambda c: (c["agent"].__setitem__("save_backup_dir", None), c["theme"].update(preset="ROG Crimson")))
+core.update_config(lambda c: c["updates"].__setitem__("repo", "x/y'; rm -rf ~ #"))
+check(core.repo_name() == core.REPO_DEFAULT, "a bad update repo name falls back to the real one")
+core.update_config(lambda c: c["updates"].__setitem__("repo", None))
+core.update_config(lambda c: c["agent"].__setitem__("remote_pin", "4321"))
+check(core.scrub("pin 4321 at 1696543210") == "pin <pin> at 1696543210", "the PIN is hidden only as a whole number")
+_snap = core.snapshot_settings()
+import tarfile as _tf, stat as _stt
+with _tf.open(_snap) as _t:
+    _cfgm = [m for m in _t.getmembers() if m.name.endswith(".config/allyhub/config.json")]
+    _cj = json.loads(_t.extractfile(_cfgm[0]).read()) if _cfgm else {}
+check(_cfgm and _cj["agent"]["remote_pin"] == "" and _stt.S_IMODE(_snap.stat().st_mode) == 0o600
+      and _stt.S_IMODE(core.SETTINGS_SNAP_DIR.stat().st_mode) == 0o700,
+      "settings backups are private and never hold the phone remote's PIN")
+core.update_config(lambda c: c["agent"].__setitem__("remote_pin", ""))
 # ---- the extra Ally Hub theme ----
 check(core.DEFAULT_CONFIG["theme"]["preset"] == "ROG Crimson" and "Ally Hub" in core.EXTRA_THEMES
       and list(core.THEMES)[-1] == "Ally Hub" and core.theme_palette({"preset": "nope"})["accent"] == "#e11d48",
@@ -1397,6 +1432,29 @@ for _pin in ["0000"] * 5 + ["4321"]:
     except urllib.error.HTTPError as e:
         _codes.append(e.code)
 check(_codes == [403] * 5 + [429], "five wrong PINs, then even the right one waits: " + str(_codes))
+# security review 1.4.1.8: the lockout can't be raced, all addresses together are capped, -1 lengths don't hang
+import threading as _th, types as _ty, socket as _so
+_H = agent.make_handler(a)
+def _who(ip):
+    return _ty.SimpleNamespace(client_address=(ip, 1), _pin=lambda: "4321")
+_res = []
+_ts = [_th.Thread(target=lambda: _res.append(_H._login(_who("10.9.9.9"), "0000"))) for _ in range(60)]
+[t.start() for t in _ts]; [t.join() for t in _ts]
+check(_res.count(0) <= agent.REMOTE_TRIES and _H._login(_who("10.9.9.9"), "4321") == -1,
+      "60 guesses at once from one address: only 5 are checked, then even the right PIN waits")
+_H = agent.make_handler(a)
+for _i in range(agent.REMOTE_GLOBAL_TRIES):
+    _H._login(_who(f"10.1.{_i}.1"), "0000")
+check(_H._login(_who("10.2.2.2"), "4321") == -1, "many addresses guessing together are stopped too")
+_s = _so.create_connection(("127.0.0.1", 18911), timeout=5)
+_s.sendall(b"POST /login HTTP/1.1\r\nHost: 127.0.0.1:18911\r\nContent-Length: -1\r\n\r\n")
+_s.settimeout(5)
+try:
+    _got = _s.recv(64)
+except OSError:
+    _got = b""
+_s.close()
+check(_got.startswith(b"HTTP/"), "a negative Content-Length is answered right away instead of reading forever")
 _rq = urllib.request.Request(base + "/api/status", headers={"Host": "evil.example.com"})
 try:
     op.open(_rq); check(False, "foreign host should be refused")

@@ -293,6 +293,7 @@ REMOTE_LOGIN = """<h1>Ally Hub Remote</h1><div class="sub">Enter the PIN shown i
 
 REMOTE_TRIES = 5          # wrong PINs from one address before it has to wait
 REMOTE_LOCK_S = 300       # how long it waits
+REMOTE_GLOBAL_TRIES = 20  # wrong PINs from all addresses together (in REMOTE_LOCK_S) before everyone waits
 
 
 def remote_host_ok(host: str) -> bool:
@@ -369,17 +370,30 @@ def make_handler(agent):
                 n, until = fails.get(self.client_address[0], [0, 0.0])
             return max(0, int(until - time.time())) if n >= REMOTE_TRIES else 0
 
-        def _login(self, pin: str) -> bool:
+        def _login(self, pin: str) -> int:
+            """1 = right PIN; 0 = wrong; -1 = locked out. The lockout check, the PIN check and the count happen in one
+            step under the lock, so many connections opened at once can't each squeeze in a guess (security review,
+            1.4.1.8). Wrong guesses from ALL addresses together are capped too (REMOTE_GLOBAL_TRIES)."""
             ip = self.client_address[0]
-            good = bool(pin) and bool(self._pin()) and secrets.compare_digest(pin, self._pin())
+            now = time.time()
             with lock:
+                n, until = fails.get(ip, [0, 0.0])
+                g = fails.get("*", [0, 0.0, now])
+                if until > now or g[1] > now:
+                    return -1
+                good = bool(pin) and bool(self._pin()) and secrets.compare_digest(pin, self._pin())
                 if good:
                     fails.pop(ip, None)
-                    return True
-                n, _until = fails.get(ip, [0, 0.0])
+                    return 1
                 n = 1 if n >= REMOTE_TRIES else n + 1     # after a lockout ends, counting starts over
-                fails[ip] = [n, time.time() + REMOTE_LOCK_S if n >= REMOTE_TRIES else 0.0]
-            return False
+                fails[ip] = [n, now + REMOTE_LOCK_S if n >= REMOTE_TRIES else 0.0]
+                if now - g[2] > REMOTE_LOCK_S:           # a fresh window for the global count
+                    g = [0, 0.0, now]
+                g[0] += 1
+                if g[0] >= REMOTE_GLOBAL_TRIES:
+                    g = [0, now + REMOTE_LOCK_S, now]
+                fails["*"] = g
+            return 0
 
         def _host_ok(self) -> bool:
             if remote_host_ok(self.headers.get("Host", "")):
@@ -440,11 +454,15 @@ def make_handler(agent):
                 if wait:
                     return self._send(429, self._login_page(f"Too many wrong PINs. Try again in {wait // 60 + 1} min."))
                 try:
-                    n = min(int(self.headers.get("Content-Length", 0)), 512)
+                    n = max(0, min(int(self.headers.get("Content-Length", 0)), 512))     # -1 would read forever
                     pin = parse_qs(self.rfile.read(n).decode("utf-8", "replace")).get("pin", [""])[0].strip()
                 except (ValueError, UnicodeError):
                     pin = ""
-                if not self._login(pin):
+                res = self._login(pin)
+                if res < 0:
+                    wait = max(self._locked_out(), 60)
+                    return self._send(429, self._login_page(f"Too many wrong PINs. Try again in {wait // 60 + 1} min."))
+                if res == 0:
                     return self._send(403, self._login_page("Wrong PIN."))
                 tok = secrets.token_urlsafe(24)
                 with lock:
@@ -460,7 +478,7 @@ def make_handler(agent):
             if not self._authed():
                 return self._send(403, '{"message":"locked"}', "application/json")
             try:
-                n = min(int(self.headers.get("Content-Length", 0)), 4096)
+                n = max(0, min(int(self.headers.get("Content-Length", 0)), 4096))
                 data = json.loads(self.rfile.read(n) or b"{}")
             except ValueError:
                 data = {}
