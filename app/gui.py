@@ -297,9 +297,9 @@ UP, DOWN, LEFT, RIGHT = "up", "down", "left", "right"
 
 
 class IconTaps(QObject):
-    """Counts taps (touch, mouse or the pointer) on the top-left icon for Hub.unlock_extra_theme. A pause longer than
-    TAP_GAP_S starts over. Never eats the event."""
-    NEEDED = 30
+    """Counts taps (touch, mouse or the pointer) on the top-left icon for Hub.activate_extra_theme. A pause longer
+    than TAP_GAP_S starts over. Never eats the event."""
+    NEEDED = 15
     TAP_GAP_S = 2.0
 
     def __init__(self, hub):
@@ -314,7 +314,7 @@ class IconTaps(QObject):
         left = self.NEEDED - self.count
         if left <= 0:
             self.count = 0
-            self.hub.unlock_extra_theme()
+            self.hub.activate_extra_theme()
         elif left <= 5:
             self.hub.toast(f"{left} more…", 900)
 
@@ -509,11 +509,11 @@ class GamepadNav(QObject):
             self.move(self.held)
             self.repeat.start(110)
 
-    WIGGLE_S, WIGGLE_FLIPS, WIGGLE_GAP_S = 10.0, 8, 1.5
+    WIGGLE_S, WIGGLE_FLIPS, WIGGLE_GAP_S = 10.0, 4, 2.0
 
     def _wiggle(self, value: int):
-        """Scrolling up and down (left stick) without a break for WIGGLE_S turns on the Ally Hub theme
-        (Hub.unlock_extra_theme with apply)."""
+        """Scrolling up and down (left stick) without a break for WIGGLE_S switches to the extra theme
+        (Hub.activate_extra_theme), every time."""
         d = 1 if value > 16000 else -1 if value < -16000 else 0
         if not d or d == getattr(self, "_wig_dir", 0):
             return
@@ -524,7 +524,7 @@ class GamepadNav(QObject):
         self._wig_last, self._wig_dir = now, d
         if now - self._wig_start >= self.WIGGLE_S and self._wig_flips >= self.WIGGLE_FLIPS:
             self._wig_start, self._wig_flips = now, 0
-            self.hub.unlock_extra_theme(apply=True)
+            self.hub.activate_extra_theme()
 
     # ---- pointer (right stick, 1.4.1) ----
     @staticmethod
@@ -5986,6 +5986,14 @@ class AppearancePage(QWidget):
                 b.hide()                    # shown by update_extras (turned on + Advanced)
         v.addLayout(grid)
 
+        self.sound_row = QWidget()                 # the extra theme's sound (shown with that theme, update_extras)
+        srl = QHBoxLayout(self.sound_row)
+        srl.setContentsMargins(0, 0, 0, 0)
+        srl.addWidget(label("Ally Hub theme sound", "cardDesc"))
+        srl.addWidget(button("Choose sound…", self.choose_sound))
+        srl.addStretch()
+        v.addWidget(self.sound_row)
+        self.sound_row.hide()
         v.addWidget(label("ACCENT COLORS", "section"))
         ar = QHBoxLayout()
         self.btn_a1 = button("Accent 1…", lambda: self.pick_accent("accent"))
@@ -6062,6 +6070,9 @@ class AppearancePage(QWidget):
             b = self.theme_btns.get(name)
             if b is not None and b.parentWidget() is not None:      # never show a parentless widget (own window)
                 b.setVisible(show or t.get("preset") == name)
+        row = getattr(self, "sound_row", None)
+        if row is not None and row.parentWidget() is not None:
+            row.setVisible(show or t.get("preset") in core.EXTRA_THEMES)
 
     def refresh(self):
         t = load_config()["theme"]
@@ -6088,7 +6099,23 @@ class AppearancePage(QWidget):
         self.refresh()
 
     def set_preset(self, name):
+        if name in core.EXTRA_THEMES:
+            self.hub.activate_extra_theme()           # with its sound, every time
+            return
         self._save(preset=name, accent=None, accent2=None)
+
+    def choose_sound(self):
+        path, _ = QFileDialog.getOpenFileName(self.hub, "Choose the theme's sound", str(HOME / "Downloads"),
+                                              "Sound (*.mp3 *.wav *.ogg *.oga *.flac *.opus)",
+                                              options=file_dialog_options())
+        if not path:
+            return
+        got = core.import_theme_sound(Path(path))
+        if not got:
+            self.hub.toast("That file can't be used (sound files up to 20 MB).", 5000)
+            return
+        core.play_sound(got)
+        self.hub.toast("Sound saved inside Ally Hub. It plays every time the theme goes on.", 5000)
 
     def pick_accent(self, key):
         cur = core.theme_palette(load_config()["theme"])[key]
@@ -6585,6 +6612,7 @@ class Hub(QMainWindow):
         self.updates = UpdatesPage(self)
         self.activity = ActivityPage()
         self.compose_sections()
+        self.watch_sliders()
         self.pages = []                     # each page once, even when several sections show it
         for _, secs in self.TABS:
             for _, attr in secs:
@@ -6932,8 +6960,7 @@ class Hub(QMainWindow):
 
     def extra_theme_on(self):
         """Every time the extra theme is switched on: the user's own sound file (never shipped) and, with Ally Hub
-        lighting, matching rings. The effect before is kept for extra_theme_off."""
-        core.play_sound(core.theme_sound())
+        lighting, matching rings (idempotent). The effect before is kept for extra_theme_off."""
         if core.lighting_shelved():
             return
         cur = load_config()["lighting"].get("effect")
@@ -6963,20 +6990,48 @@ class Hub(QMainWindow):
             self.brand_label.setToolTip("")
         self.brand_badge.setVisible(getattr(self, "bars", "top") == "sides" or not self._has_logo)
 
+    def activate_extra_theme(self):
+        """15 taps on the top-left icon, a slider moved for 10 seconds, the left stick scrolled up and down for 10
+        seconds, or picking it in the theme list: the extra theme goes on, with its sound, EVERY time (even when it's
+        already on)."""
+        snd = core.theme_sound()
+        core.play_sound(snd)
+        update_config(lambda c: c["theme"].update(extra_themes=True, preset=core.EXTRA_THEMES[0],
+                                                  accent=None, accent2=None))
+        self.apply_theme()                 # a switch also runs extra_theme_on (rings)
+        self.extra_theme_on()              # already on: the rings match again
+        self.appearance.refresh()
+        self.toast("Ally Hub theme on!" if snd else
+                   "Ally Hub theme on! Add its sound under Customize → Theme → Choose sound.", 5000)
+
     def unlock_extra_theme(self, apply: bool = False):
-        """Turns on the extra theme (IconTaps, GamepadNav._wiggle); apply also switches to it."""
-        first = not load_config()["theme"].get("extra_themes")
-        update_config(lambda c: c["theme"].update(extra_themes=True, **(
-            {"preset": core.EXTRA_THEMES[0], "accent": None, "accent2": None} if apply else {})))
-        if apply:
-            self.apply_theme()
-            self.appearance.refresh()
-            self.toast("Ally Hub theme on!", 5000)
+        self.activate_extra_theme()
+
+    def watch_sliders(self):
+        """Any slider moved back and forth without a break for 10 seconds switches to the extra theme."""
+        try:
+            sliders = list(self.findChildren(QSlider))
+        except Exception:
             return
-        self.appearance.update_extras()
-        self.toast(("Ally Hub theme unlocked! " if first else "Already unlocked. ")
-                   + ("It's under Customize → Theme." if advanced_mode() else
-                      "Switch to Advanced (Settings → General) to see it under Customize → Theme."), 7000)
+        for s in sliders:
+            try:
+                s.valueChanged.connect(lambda v, s=s: self._slider_moved(s, v))
+            except Exception:
+                pass
+
+    def _slider_moved(self, slider, value):
+        now = time.monotonic()
+        st = getattr(self, "_sl", None)
+        if st is None or st["s"] is not slider or now - st["t"] > 1.5:
+            self._sl = {"s": slider, "start": now, "t": now, "v": value, "d": 0, "flips": 0}
+            return
+        d = 1 if value > st["v"] else -1 if value < st["v"] else 0
+        if d and st["d"] and d != st["d"]:
+            st["flips"] += 1
+        st.update(t=now, v=value, d=d or st["d"])
+        if now - st["start"] >= 10 and st["flips"] >= 2:
+            self._sl = None
+            self.activate_extra_theme()
 
     def update_top_status(self):
         sep = "\n" if getattr(self, "bars", "top") == "sides" else "   "
