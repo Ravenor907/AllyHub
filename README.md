@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.4.1-e11d48?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.4.1.1-e11d48?style=flat-square">
   <img alt="SteamOS" src="https://img.shields.io/badge/SteamOS-3.8%2B-1a9fff?style=flat-square&logo=steam&logoColor=white">
   <img alt="Device" src="https://img.shields.io/badge/ROG%20Xbox%20Ally%20X-tested-8b5cf6?style=flat-square">
   <img alt="License" src="https://img.shields.io/github/license/Ravenor907/AllyHub?color=22c55e&style=flat-square">
@@ -142,8 +142,7 @@ asks what color you see, and keeps the one that works on your system.
 |---|---|
 | D-pad | Move between controls |
 | Left stick | Scroll the page |
-| Right stick | Pointer (A clicks where it points, the D-pad takes back over) |
-| **R3** | Right click |
+| Right stick | Pointer (A or R3 clicks where it points, the D-pad takes back over) |
 | **A** | Select |
 | **B** | Back, or close a pop-up |
 | D-pad left / right | Change a dropdown or slider |

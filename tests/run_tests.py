@@ -1092,10 +1092,11 @@ core.run_quiet = _rq
 check(all(_pw.values()), "password check says no only when passwd clearly says no: " + str(_pw))
 # the owner (1.3.4): the chip's own spiral is the default, the streamed one looked choppy
 check(core.normalize_effect({"type": "spiral"})["engine"] == "chip"
-      and all(core.uses_chip_effect(core.PRESETS[n]) for n in ("RGB Spiral", "Neon Vortex")),
-      "spirals default to the chip's built-in spiral")
-check(len(set(core.zone_frames(core.PRESETS["Neon Vortex"], 0.3))) > 1
-      and core.zone_frames(core.PRESETS["Neon Vortex"], 0.3) == core.zone_frames(dict(core.PRESETS["Neon Vortex"], rainbow=True, layout="linked"), 0.3),
+      and core.uses_chip_effect(core.PRESETS["RGB Spiral"]) and not core.uses_chip_effect(core.PRESETS["Neon Vortex"]),
+      "RGB Spiral runs on the chip; Neon Vortex (its own colors) is Ally Hub's style")
+_nv_chip = dict(core.PRESETS["Neon Vortex"], engine="chip")
+check(len(set(core.zone_frames(_nv_chip, 0.3))) > 1
+      and core.zone_frames(_nv_chip, 0.3) == core.zone_frames(dict(_nv_chip, rainbow=True, layout="linked"), 0.3),
       "a chip spiral previews as the rainbow the chip shows")
 core.update_config(lambda c: (c["lighting"].update(chip_spiral=False, effect=dict(core.PRESETS["Neon Vortex"], engine="smooth"),
                                                     custom={"Mine": {"type": "spiral", "engine": "smooth"}, "Calm": {"type": "breathe"}}),
@@ -1105,11 +1106,20 @@ _lc = core.load_config()
 check(_lc["lighting"]["effect"]["engine"] == "chip" and _lc["lighting"]["custom"]["Mine"]["engine"] == "chip"
       and _lc["lighting"]["custom"]["Calm"] == {"type": "breathe"} and _lc["game_colors"]["Halo"]["engine"] == "chip"
       and _lc["game_colors"]["Doom"] == "#ff0000" and _lc["lighting"]["chip_spiral"], "only spirals change: " + str(_lc["lighting"]))
+check(core.migrate_color_spirals() is True and core.load_config()["lighting"]["effect"]["engine"] == "smooth"
+      and core.load_config()["lighting"]["custom"]["Mine"]["engine"] == "chip" and core.migrate_color_spirals() is False,
+      "a color spiral moved to the chip (Neon Vortex) goes back to Ally Hub's style once; rainbow ones stay on the chip")
 core.update_config(lambda c: c["lighting"]["effect"].__setitem__("engine", "smooth"))
 check(core.migrate_chip_spiral() is False and core.load_config()["lighting"]["effect"]["engine"] == "smooth",
       "picking Ally Hub's style afterwards sticks")
 core.update_config(lambda c: (c["lighting"].update(effect=None, custom={}), c["game_colors"].clear()))
 check(core.DEFAULT_CONFIG["setup"]["password_known"] is False, "'I already have one' is remembered in setup")
+check(core.led_gamma((255, 0, 0)) == (255, 0, 0) and core.led_gamma((0, 0, 0)) == (0, 0, 0)
+      and core.led_gamma((255, 255, 255), 0.5) == (128, 128, 128),
+      "LED gamma keeps pure colors and white exact, and brightness scales the light")
+_g = core.led_gamma(core.hex_to_rgb("#0ea5e9"))
+check(_g[0] <= 1 and _g[1] < 165 * 0.7 and _g[2] > 190, "mixed colors lose the wash: the weak channels drop the most " + str(_g))
+check(core.led_gamma((128, 64, 0), gamma="bad") == core.led_gamma((128, 64, 0)), "a bad gamma setting falls back")
 # ---- reports: attachments, snapshot, instant upload, per-version repeats, manual reports ----
 posts = []
 def _fake_gh(method, path, data=None, **kw):
@@ -1417,7 +1427,7 @@ check((sl / "multi_intensity").read_text() == "255 0 0", "lighting re-sent after
 # streaming: with a commit-once chip method the agent draws every frame itself (no more "only breathing")
 sent = []
 _zf = core.hid_zone_frame
-core.hid_zone_frame = lambda zones, b, leds=None, method=None: (sent.append((tuple(zones), method)), True)[1]
+core.hid_zone_frame = lambda zones, b, leds=None, method=None, gamma=None: (sent.append((tuple(zones), method)), True)[1]
 st = agent.Animator(types.SimpleNamespace(cfg={"lighting": {"encoding": "hid", "hid_method": "m6", "fps": 30}},
                                           leds=core.find_leds()))
 st.spec = (core.normalize_effect(dict(core.PRESETS["RGB Spiral"], engine="smooth")), 255, {})
@@ -1428,6 +1438,17 @@ st.spec = (core.normalize_effect({"type": "breathe", "colors": ["#ff0000"]}), 25
 sent.clear(); st.step(); time.sleep(0.3); st.step()
 check(len(sent) == 2 and sent[0][0] != sent[1][0], "breathe animates frame by frame instead of the chip's pulse")
 core.hid_zone_frame = _zf
+_bi = core.battery_info
+core.battery_info = lambda: {"status": "Discharging"}
+_rates = []
+for _f in (30, 20, 10):
+    st.agent.cfg = {"lighting": {"fps": _f, "on_battery": "slow"}}
+    _rates.append(st.fps())
+st.agent.cfg = {"lighting": {"fps": 30, "on_battery": "full"}}
+_rates.append(st.fps())
+core.battery_info = _bi
+check(_rates == [20, 13, 10, 30], "on battery, Smoothness still matters (slow = two thirds, full = as chosen): "
+      + str(_rates))
 # ---- Game Boost in the agent ----
 fk = Path(HOME) / "boostcpu" / "policy0"; fk.mkdir(parents=True)
 (fk / "energy_performance_preference").write_text("balance_power")

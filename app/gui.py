@@ -417,8 +417,8 @@ class GamepadNav(QObject):
                 QTimer.singleShot(0, lambda: self.click(Qt.LeftButton))
             else:
                 self.activate()
-        elif n == 10:                    # R3: right click where the pointer is
-            QTimer.singleShot(0, lambda: self.click(Qt.RightButton))
+        elif n == 10:                    # R3: left click where the pointer is (1.4.1.1, the owner's call)
+            QTimer.singleShot(0, lambda: self.click(Qt.LeftButton))
         elif n == 1:
             self.back()
         elif n == 2:
@@ -527,7 +527,7 @@ class GamepadNav(QObject):
             self.pointer_widget.hide()
 
     def click(self, button):
-        """A (left) or R3 (right) click where the pointer is."""
+        """A or R3: a left click where the pointer is."""
         if self.pointer_pos is None or (self.pointer_widget is not None and not self.pointer_widget.isVisible()):
             return
         target = QApplication.widgetAt(self.pointer_pos)
@@ -537,6 +537,31 @@ class GamepadNav(QObject):
             self.leave_mouse_mode()
             self.activate()
             return
+        if button == Qt.LeftButton:
+            # buttons, lists and text boxes take the D-pad's own path (proven on the device): a synthetic mouse
+            # click alone didn't register on the handheld (the owner, 1.4.1)
+            ctrl = target
+            while ctrl is not None and not isinstance(ctrl, (QAbstractButton, QComboBox, QLineEdit, QSpinBox,
+                                                                 QAbstractItemView)):
+                ctrl = ctrl.parentWidget()
+            if ctrl is not None and ctrl.isEnabled():
+                if isinstance(ctrl, QAbstractButton):
+                    ctrl.setFocus(Qt.MouseFocusReason)
+                    ctrl.animateClick()
+                    return
+                if isinstance(ctrl, QComboBox):
+                    ctrl.setFocus(Qt.MouseFocusReason)
+                    ctrl.showPopup()
+                    return
+                if isinstance(ctrl, (QLineEdit, QSpinBox)):
+                    ctrl.setFocus(Qt.MouseFocusReason)
+                    QDesktopServices.openUrl(QUrl("steam://open/keyboard"))
+                    return
+                if isinstance(ctrl, QAbstractItemView):       # pick the row under the pointer first
+                    idx = ctrl.indexAt(ctrl.viewport().mapFromGlobal(self.pointer_pos))
+                    if idx.isValid():
+                        ctrl.setFocus(Qt.MouseFocusReason)
+                        ctrl.setCurrentIndex(idx)
         local = QPointF(target.mapFromGlobal(self.pointer_pos))
         glob = QPointF(self.pointer_pos)
         # mouse events only: no context-menu event, so no separate pop-up menu window ever opens
@@ -7280,7 +7305,7 @@ def main():
             fix()
         except Exception:
             pass
-    for fix in (core.migrate_chip_spiral, core.secure_data_dir):
+    for fix in (core.migrate_chip_spiral, core.migrate_color_spirals, core.secure_data_dir):
         try:
             fix()
         except Exception:

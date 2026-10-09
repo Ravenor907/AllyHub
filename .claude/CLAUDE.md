@@ -126,7 +126,13 @@ control is far away or missing (`_too_far`), so read-only content is reachable. 
 freely (`_stick_scroll`); the RIGHT stick (axes 3/4) moves `PadPointer`, Ally Hub's own drawn pointer (Game Mode
 shows no cursor for a pad, Wayland can't warp the real one), focus follows it, and A clicks where it points
 (`click`, synthetic QMouseEvents to `QApplication.widgetAt`) until the D-pad is used again (`leave_mouse_mode`).
-R3 (button 10) right-clicks. Never click outside an open `_sheet`. Pages must live in `scroll_page`.
+R3 (button 10) left-clicks too (1.4.1.1; there is no right click). Clicks on buttons, combos and text boxes use
+the D-pad's own path (`animateClick`, `showPopup`, Steam keyboard): a synthetic mouse click alone didn't register on
+the handheld. Never click outside an open `_sheet`.
+**LED colors (1.4.1.1):** every color sent to the chip goes through `core.led_gamma` (sRGB to light, gamma
+`config["lighting"]["gamma"]`, default 2.2); without it colors looked washed out toward white. Brightness scales the
+light. Neon Vortex is Ally Hub's style (the chip's spiral is rainbow only; `migrate_color_spirals`). On battery,
+"slow" is two thirds of the chosen fps, not a flat cap. Pages must live in `scroll_page`.
 
 **Launchers page (the owner's call):** Store → Launchers (`LaunchersPage`) instead of NSL's own GUI.
 `nsl_install_cmd` downloads NSL's script and runs it with launcher names as arguments (its Decky plugin's
