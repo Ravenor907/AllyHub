@@ -1317,7 +1317,7 @@ class BrowsePage(QWidget):
         top = QHBoxLayout()
         self.btn_all = button("Install all essentials", hub.install_essentials, "primary")
         top.addWidget(self.btn_all)
-        self.btn_plugins = button("Your Decky plugins", lambda: self.set_filter("plugins"))
+        self.btn_plugins = button("Decky plugins", lambda: self.set_filter("plugins"))
         top.addWidget(self.btn_plugins)
         top.addStretch()
         cv.addLayout(top)
@@ -1551,12 +1551,16 @@ class StoreRow(QFrame):
             set_pill(self.pill, "INSTALLED", "on")
         else:
             self.pill.setText("")
-        self.btn_install.setText("Reinstall / Update" if installed else "Install")
-        self.btn_install.setObjectName("" if installed else "primary")
+        # 1.3.7.9 (the owner's call): one place per job. Installed plugins are turned off or removed under
+        # Your plugins; a store card only installs, or updates when there's a newer version
+        upd = bool(installed and installed.get("version") and latest.get("name")
+                   and core.plugin_newer(latest["name"], installed["version"]))
+        self.btn_install.setText("Update" if upd else "Install")
+        self.btn_install.setObjectName("primary")
         repolish(self.btn_install)
+        self.btn_install.setVisible(not installed or upd)
         self.btn_install.setEnabled(decky_ok and not queued)
-        self.btn_remove.setVisible(bool(installed))
-        self.btn_remove.setEnabled(not queued)
+        self.btn_remove.setVisible(False)
 
 
 class StorePage(QWidget):
@@ -2650,9 +2654,10 @@ class HueSyncPage(QWidget):
 
     def refresh(self):
         decky = CATALOG_BY_ID["decky"].check(self.hub.state)
+        self.btn_install.setVisible(not self.installed())
         if self.installed():
-            self.status.setText("✔ Installed")
-            self.btn_install.setText("Reinstall / Update")
+            self.status.setText("✔ Installed. Updates and removal are in Store > Decky plugins.")
+            self.btn_install.setText("Install HueSync")
         elif not decky:
             self.status.setText("Needs Decky Loader first")
             self.btn_install.setText("Install Decky, then HueSync")
@@ -2757,7 +2762,7 @@ class AutomationPage(QWidget):
         dv.addStretch()
         self.block_lighting = block(switches(self.LIGHTS), gcard, dcard, heading="Automatic lighting")
 
-        scard, sv = titled_card("save", "#0891b2", "Scheduled backups",
+        scard, sv = titled_card("save", "#0891b2", "Back up on a schedule",
                                 "Backs up every game's saves on a schedule, only when no game runs and the battery is above 30%.")
         self.save_enable = QCheckBox("Back up automatically")
         self.save_enable.toggled.connect(lambda on: self.set_feature("save_backup", on))
@@ -5296,7 +5301,7 @@ class SystemPage(QWidget):
         btv.addLayout(br)
         self.card_boot = boot
 
-        bk, bkv = titled_card("archive", "#a855f7", "Back up settings",
+        bk, bkv = titled_card("archive", "#a855f7", "Settings backup",
                               'Decky, Ally Hub and MangoHud settings, saved to ~/AllyHub-Backups/auto. Also runs daily.')
         bkr = QHBoxLayout()
         bkr.addWidget(button("Back up now", self.backup, "primary"))
@@ -5995,9 +6000,8 @@ class TweaksPage(QWidget):
                 "Update apps", "flatpak update --user -y --noninteractive; flatpak update -y --noninteractive",
                 "flatpak-update")),
             button("Restart Decky", self.restart_decky),
-            button("Reinstall Decky", lambda: hub.on_item_action("decky", "install")),
-            button("Clean up app leftovers", lambda: hub.runner.submit(
-                "Clean up app leftovers", "flatpak uninstall --user --unused -y --noninteractive; "
+            button("Remove unused app runtimes", lambda: hub.runner.submit(
+                "Remove unused app runtimes", "flatpak uninstall --user --unused -y --noninteractive; "
                                           "flatpak uninstall --unused -y --noninteractive", "flatpak-clean")),
             self.btn_steam,
             self.btn_game_mode,
@@ -6166,7 +6170,7 @@ class Hub(QMainWindow):
         self.progress.hide()
         self.pad_hint = None
         self.btn_refresh = button("⟳ Refresh", self.refresh)
-        self.btn_log = button("View log", lambda: self.go("Activity"))
+        self.btn_log = button("Activity log", lambda: self.go("Activity"))
         self.btn_report = button("Report a problem", self.report_problem)
         self.btn_report.setToolTip("Report a problem")
         try:
@@ -6243,9 +6247,7 @@ class Hub(QMainWindow):
         cv.addWidget(self.glyph_status)
         row = QHBoxLayout()
         self.glyph_btn = button("", self.glyphs_action, "primary")
-        self.glyph_remove = button("Remove CSS Loader", self.glyphs_remove)
         row.addWidget(self.glyph_btn)
-        row.addWidget(self.glyph_remove)
         row.addStretch()
         cv.addLayout(row)
         self.update_glyphs()
@@ -6258,12 +6260,15 @@ class Hub(QMainWindow):
         plugin = "css loader" in (self.state.get("decky") or {})
         theme = core.glyphs_installed()
         busy = "store:CSS Loader" in self.runner.pending_keys()
+        change = ("To change the icons: in Game Mode press •••, open CSS Loader, find Handheld Controller Glyphs "
+                  "in your themes, then pick another device in its list, or switch the theme off for Steam's "
+                  "own icons.")
         if theme and plugin:
-            text, btn = ("✔ Handheld Controller Glyphs is installed. If the icons look wrong, open CSS Loader from "
-                         "the ••• menu, open the theme and pick ASUS ROG Xbox Ally in its device list."), ""
+            text, btn = "✔ Installed. " + change, ""
         elif plugin:
-            text, btn = ("CSS Loader is ready. Open it from the ••• menu, go to its store, search Handheld "
-                         "Controller Glyphs, install it and pick ASUS ROG Xbox Ally in the device list."), ""
+            text, btn = ("CSS Loader is ready. To add the icons:\n1. In Game Mode press ••• and open CSS Loader.\n"
+                         "2. Open its store, search Handheld Controller Glyphs and install it.\n"
+                         "3. Switch it on and pick ASUS ROG Xbox Ally in its device list.\n" + change), ""
         elif not decky:
             text, btn = "Needs Decky Loader first.", "Install Decky, then CSS Loader"
         else:
@@ -6271,13 +6276,12 @@ class Hub(QMainWindow):
         self.glyph_status.setText("Working on it…" if busy else text)
         self.glyph_btn.setText(btn)
         self.glyph_btn.setVisible(bool(btn) and not busy)
-        self.glyph_remove.setVisible(plugin and not busy)
 
-    def _css_loader(self, action: str):
+    def _css_loader(self):
         def go(plugins):
             p = next((p for p in plugins if (p.get("name") or "").lower() == "css loader"), None)
             if p:
-                self.on_store_action(p, action)
+                self.on_store_action(p, "install")
             else:
                 self.toast("Couldn't find CSS Loader in the plugin store right now. Try again later.", 7000)
         self.store_page.with_plugins(go)
@@ -6288,11 +6292,8 @@ class Hub(QMainWindow):
             self.on_item_action("decky", "install")
             self.toast("Installing Decky first. CSS Loader follows when it's done.", 7000)
             return
-        self._css_loader("install")
+        self._css_loader()
         self.toast("Getting CSS Loader from the plugin store…")
-
-    def glyphs_remove(self, *_args):
-        self._css_loader("uninstall")
 
     def set_mode(self, i: int):
         update_config(lambda c: c["theme"].__setitem__("advanced", i == 1))
@@ -6432,7 +6433,7 @@ class Hub(QMainWindow):
                 w.setVisible(self.gamepad.enabled)
 
     FOOT_BUTTONS = (("btn_refresh", "refresh-cw", "⟳ Refresh", "Refresh"),
-                    ("btn_log", "terminal", "View log", "View log"),
+                    ("btn_log", "terminal", "Activity log", "Activity log"),
                     ("btn_report", "bug", "Report a problem", "Report a problem"))
 
     def _label_buttons(self, side: bool):

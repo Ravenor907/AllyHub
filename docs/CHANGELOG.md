@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.3.7.9
+
+- **One place for each job:** installed Decky plugins are turned off or removed only under Your plugins. Store
+  cards now just install, or show Update when there's a newer version. HueSync and Controller glyphs no longer
+  repeat install or remove buttons once their plugin is in, and Quick fixes no longer repeats the Checkup's Decky
+  repair.
+- **Controller glyphs has step-by-step instructions**, including how to change the icons or switch them off later.
+- **Clearer names:** "Activity log" everywhere (was also "View log"), "Decky plugins", "Remove unused app runtimes",
+  "Back up on a schedule" and "Settings backup".
+
 ## 1.3.7.8
 
 - **Calmer pages:** the 22 wordiest card and page descriptions are now one short line each, so every screen
