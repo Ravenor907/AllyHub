@@ -264,6 +264,12 @@ writes are required; mode writes are best effort. **Test lights** files a `light
 Installed layout on the device: code in `~/.local/share/allyhub/` (same dir holds data: `allyhub.log`,
 `update_state.json`, `reports/`, `previous/`), config in `~/.config/allyhub/config.json`.
 
+**Branding (1.4.1.3, the owner's call and his own images):** `assets/banner.png` (README top), `assets/poster.jpg`
+(README), `assets/icon.png`; the app icon is `app/allyhub.svg` with icon.png embedded (same file name, so old clients
+get it; `self_icon_png` relies on its `viewBox="0 0 256 256"`); the header wordmark is `gui.BRAND_LOGO_PNG` (top bars;
+sides show the square icon). Theme "Ally Hub" (black and orange, black text on orange) is the default;
+`migrate_brand_theme` moved the old default once. Use the owner's files as they are: never redraw or alter the logo.
+
 ## SteamOS facts that shape the code
 
 - Root filesystem is read-only. Never use pacman or write outside `$HOME`, `/etc` (overlay) or `/sys`.
@@ -395,7 +401,7 @@ Make sure these exist (create them if missing): `auto-report`, `bug`, `suggestio
 ## Keeping the repo sleek
 
 - README stays short and scannable: banner, badges, highlights table, install one-liner, controller
-  table, notes. Update the highlights when features change. Keep `assets/banner.svg` in sync with the
+  table, notes. Update the highlights when features change. Keep `assets/banner.png` in sync with the
   app's look.
 - Issue templates live in `.github/ISSUE_TEMPLATE/`. Keep them short.
 - No clutter in the repo root: README.md, LICENSE, VERSION and the folders only (tested).

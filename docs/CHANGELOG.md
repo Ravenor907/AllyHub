@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.4.1.3
+
+- **New look:** the Ally Hub logo in the header and on the setup welcome, the new app icon (app menu, Game Mode
+  library tile and desktop shortcut), and a black and orange "Ally Hub" theme, now the default. If you never picked
+  a theme, you're switched to it once; any theme you choose later stays.
+- The README has the new banner and poster.
+
 ## 1.4.1.2
 
 - **Much smoother effects:** your video showed the rings only changing about 3 times a second, because every frame
