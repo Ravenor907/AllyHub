@@ -6936,8 +6936,7 @@ class Hub(QMainWindow):
         self.brand_badge.setVisible(getattr(self, "bars", "top") == "sides" or not self._has_logo)
 
     def unlock_extra_theme(self, apply: bool = False):
-        """IconTaps (30 taps) lists the Ally Hub theme under Customize > Theme in Advanced; GamepadNav's scroll gesture
-        also switches to it right away (apply)."""
+        """Turns on the extra theme (IconTaps, GamepadNav._wiggle); apply also switches to it."""
         first = not load_config()["theme"].get("extra_themes")
         core.play_sound(core.theme_sound())          # the user's own sound file, if there is one
         update_config(lambda c: c["theme"].update(extra_themes=True, **(
