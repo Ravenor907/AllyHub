@@ -8,6 +8,7 @@ import colorsys
 import fcntl
 import getpass
 import hashlib
+import io
 import json
 import math
 import os
@@ -1382,17 +1383,16 @@ def theme_sound() -> Optional[Path]:
         p = DATA_DIR / f"theme-sound.{ext}"
         if p.is_file():
             return p
-    places = [CONFIG_DIR] + [HOME / d for d in ("Downloads", "Music", "Desktop", "Documents")] + [HOME]
-    for d in places:
+    for d in (CONFIG_DIR, HOME / "Downloads"):         # nowhere else: the picker covers the rest
         try:
-            files = sorted(f for f in d.iterdir() if f.is_file()) if d.is_dir() else []
+            files = sorted(f for f in d.iterdir() if f.is_file() and not f.is_symlink()) if d.is_dir() else []
         except OSError:
             continue
         for f in files:
             if f.suffix.lower().lstrip(".") in SOUND_EXTS and _looks_like_theme_sound(f.name):
                 got = import_theme_sound(f)
                 if got:
-                    app_log("sound", f"imported {f.name}")
+                    app_log("sound", "imported a sound file")
                     return got
     return None
 
@@ -1966,9 +1966,11 @@ THEMES = {
 
 def theme_palette(theme_cfg: dict) -> dict:
     pal = dict(THEMES.get(theme_cfg.get("preset"), THEMES["ROG Crimson"]))
-    if theme_cfg.get("accent"):
+    # only plain #rrggbb: these go into the stylesheet and the phone remote's page, so anything else could inject
+    # markup (a shared profile could carry it; security review 1.4.1.8)
+    if _valid_hex(theme_cfg.get("accent")):
         pal["accent"] = theme_cfg["accent"]
-    if theme_cfg.get("accent2"):
+    if _valid_hex(theme_cfg.get("accent2")):
         pal["accent2"] = theme_cfg["accent2"]
     pal["light"] = theme_cfg.get("preset") == "Frost Light"
     return pal
@@ -2028,7 +2030,8 @@ def fetch_run(url: str, shell: str = "bash") -> str:
     """Download an installer script, then run it the way `curl url | sh` does on SteamOS (sh is bash there):
     $0 stays the shell and stdin is the script, so Decky's `exec sudo "$0"` still works. The difference: a
     failed or cut-off download is never run (-f, and nothing runs until curl finished)."""
-    return (f"( t=$(mktemp) && trap 'rm -f \"$t\"' EXIT && curl -fsSL {shlex.quote(url)} -o \"$t\" "
+    return (f"( t=$(mktemp) && trap 'rm -f \"$t\"' EXIT && curl -fsSL --proto =https --proto-redir =https "
+            f"{shlex.quote(url)} -o \"$t\" "
             f"&& {shell} < \"$t\" )")
 
 
@@ -2042,7 +2045,7 @@ def github_decky_install_cmd(repo: str, asset: str, plugin_names: tuple) -> str:
     match = shlex.quote(f'"name"[[:space:]]*:[[:space:]]*"({names})"')
     return (
         'tmp=$(mktemp -d) && '
-        f'curl -fL -o "$tmp/p.zip" {url} && '
+        f'curl -fL --proto =https --proto-redir =https -o "$tmp/p.zip" {url} && '
         'python3 -m zipfile -e "$tmp/p.zip" "$tmp/out" && '
         'ls -d "$tmp/out"/*/ >/dev/null && '
         'sudo mkdir -p "$HOME/homebrew/plugins" && '
@@ -2345,8 +2348,8 @@ def cef_eval(js: str, timeout: float = 20, port: int = None):
     if not url:
         return None
     m = re.match(r"ws://([^/:]+):(\d+)(/.*)", url)
-    if not m:
-        return None
+    if not m or m.group(1) not in ("127.0.0.1", "localhost") or int(m.group(2)) != int(port):
+        return None                                     # only Steam's own debugger on this device
     try:
         with socket.create_connection((m.group(1), int(m.group(2))), timeout=timeout) as s:
             key = base64.b64encode(os.urandom(16)).decode()
@@ -4578,11 +4581,13 @@ def decky_remove_cmd(dirs: list) -> str:
 def decky_store_install_cmd(url: str, sha256: str = "") -> str:
     """Install a Decky store plugin. With the store's sha256 the download is checked first, like Decky does."""
     q = shlex.quote(url)
-    check = (f'echo {shlex.quote(sha256.lower() + "  ")}"$tmp/p.zip" | sha256sum -c --quiet - && '
-             if re.fullmatch(r"[0-9a-fA-F]{64}", sha256 or "") else "")
+    if not str(url).startswith("https://") or not re.fullmatch(r"[0-9a-fA-F]{64}", sha256 or ""):
+        # no checksum from the store, or not https: never install unchecked code into Decky (security review)
+        return "echo 'This plugin has no download checksum in the store, so it was not installed.' >&2; exit 1"
+    check = f'echo {shlex.quote(sha256.lower() + "  ")}"$tmp/p.zip" | sha256sum -c --quiet - && '
     return (
         'tmp=$(mktemp -d) && '
-        f'curl -fL -o "$tmp/p.zip" {q} && '
+        f'curl -fL --proto =https --proto-redir =https -o "$tmp/p.zip" {q} && '
         + check +
         'python3 -m zipfile -e "$tmp/p.zip" "$tmp/out" && '
         'sudo mkdir -p "$HOME/homebrew/plugins" && '
@@ -4628,19 +4633,37 @@ def snapshot_settings() -> Path:
     """Tar up settings we can read without root (no password). Keeps the 5 newest. Update Guardian runs this
     daily; Backups > Back up now runs it on demand."""
     SETTINGS_SNAP_DIR.mkdir(parents=True, exist_ok=True)
+    for d in (BACKUP_DIR, SETTINGS_SNAP_DIR):            # plugin settings can hold private data: owner only
+        try:
+            d.chmod(0o700)
+        except OSError:
+            pass
     out = SETTINGS_SNAP_DIR / f"settings-{time.strftime('%Y-%m-%d_%H%M%S')}.tar.gz"
-    with tarfile.open(out, "w:gz") as tar:
-        for rel in ("homebrew/settings", ".config/allyhub", ".config/MangoHud"):
-            base = HOME / rel
-            if not base.exists():
-                continue
-            for root, _dirs, files in os.walk(base):
-                for f in files:
-                    p = Path(root) / f
-                    try:
-                        tar.add(p, arcname=str(p.relative_to(HOME)))
-                    except (OSError, tarfile.TarError):
-                        pass
+    old_umask = os.umask(0o077)
+    try:
+        with tarfile.open(out, "w:gz") as tar:
+            for rel in ("homebrew/settings", ".config/allyhub", ".config/MangoHud"):
+                base = HOME / rel
+                if not base.exists():
+                    continue
+                for root, _dirs, files in os.walk(base):
+                    for f in files:
+                        p = Path(root) / f
+                        try:
+                            if p == CONFIG_FILE:             # the phone remote's PIN never goes into a backup
+                                c = read_json(p, {}) or {}
+                                if isinstance(c.get("agent"), dict):
+                                    c["agent"]["remote_pin"] = ""
+                                data = json.dumps(c, indent=2).encode()
+                                info = tarfile.TarInfo(str(p.relative_to(HOME)))
+                                info.size, info.mtime, info.mode = len(data), int(time.time()), 0o600
+                                tar.addfile(info, io.BytesIO(data))
+                            else:
+                                tar.add(p, arcname=str(p.relative_to(HOME)))
+                        except (OSError, tarfile.TarError, ValueError):
+                            pass
+    finally:
+        os.umask(old_umask)
     snaps = sorted(SETTINGS_SNAP_DIR.glob("settings-*.tar.gz"))
     for old in snaps[:-5]:
         old.unlink(missing_ok=True)
@@ -4650,7 +4673,7 @@ def snapshot_settings() -> Path:
 PROFILE_KEYS = ("theme", "rgb", "agent", "game_colors", "dock", "wol", "performance")
 # Never shared in a profile and never taken from one: a profile can't switch on someone's remote with a PIN the
 # sender knows, and doesn't hand out the PIN or the PC's network address.
-PROFILE_PRIVATE = {"agent": ("remote", "remote_pin", "remote_port"), "wol": ("mac", "broadcast")}
+PROFILE_PRIVATE = {"agent": ("remote", "remote_pin", "remote_port", "save_backup_dir"), "wol": ("mac", "broadcast")}
 FLATPAK_ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*(\.[A-Za-z0-9_-]+){2,}$")
 
 
@@ -4683,7 +4706,7 @@ def build_profile(state: dict) -> dict:
                           if not i.id.count(".") and i.kind == "install" and i.check(state)),
         "decky_plugins": sorted(v["name"] for v in state.get("decky", {}).values()),
         "config": _profile_config(cfg),
-        "system": {"charge_limit": b.get("limit") or "", "ssh": sshd_active()},
+        "system": {"charge_limit": b.get("limit") or ""},     # never SSH: a profile must not open remote logins
     }
 
 
@@ -4705,7 +4728,7 @@ def profile_plan(profile: dict, state: dict) -> dict:
         "flatpaks": [f for f in strings("flatpaks") if FLATPAK_ID_RE.match(f) and f not in state.get("flatpaks", set())],
         "decky_plugins": [p for p in strings("decky_plugins") if p.lower() not in state.get("decky", {})],
         "config": profile.get("config") if isinstance(profile.get("config"), dict) else {},
-        "system": {"charge_limit": charge_limit_ok(system.get("charge_limit")) or "", "ssh": system.get("ssh") is True},
+        "system": {"charge_limit": charge_limit_ok(system.get("charge_limit")) or "", "ssh": False},
     }
 
 
@@ -4718,6 +4741,11 @@ def apply_profile_config(conf: dict) -> None:
             if isinstance(v, dict) and k in PROFILE_PRIVATE:
                 v = {kk: vv for kk, vv in v.items() if kk not in PROFILE_PRIVATE[k]}
                 v.update({kk: cfg[k][kk] for kk in PROFILE_PRIVATE[k] if kk in cfg.get(k, {})})
+            if k == "theme" and isinstance(v, dict):
+                v = dict(v)
+                for kk in ("accent", "accent2"):
+                    if v.get(kk) is not None and not _valid_hex(v.get(kk)):
+                        v[kk] = None
             cfg[k] = v
     update_config(fn)
 
@@ -5306,7 +5334,8 @@ def recent_log(lines: int = 40) -> str:
 
 
 def repo_name() -> str:
-    return load_config()["updates"].get("repo") or REPO_DEFAULT
+    r = load_config()["updates"].get("repo") or REPO_DEFAULT
+    return r if re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9._-]+", str(r)) else REPO_DEFAULT
 
 
 def github_token() -> Optional[str]:
@@ -5385,7 +5414,7 @@ def scrub(text: str) -> str:
         text = re.sub(rf"\b{re.escape(USER)}\b", "<user>", text)
     pin = (load_config()["agent"].get("remote_pin") or "")
     if len(pin) >= 4:
-        text = text.replace(pin, "<pin>")
+        text = re.sub(rf"(?<!\d){re.escape(pin)}(?!\d)", "<pin>", text)
     # Steam account ids point straight at a public Steam profile; hostnames are often a person's name
     text = re.sub(r"\b7656119\d{10}\b", "<steam-id>", text)
     try:
@@ -5511,7 +5540,8 @@ def queue_report(kind: str, title: str, details: str, fingerprint: str = None, a
         LAST_QUEUE = "duplicate"                      # already waiting to be sent
         return None
     today = [p for p in REPORT_DIR.glob("*.json") if now - p.stat().st_mtime < 86400]
-    if len(today) >= MAX_REPORTS_PER_DAY:
+    sent_today = sum(1 for v in sent.values() if isinstance(v, (int, float)) and now - v < 86400)
+    if not force and len(today) + sent_today >= MAX_REPORTS_PER_DAY:
         LAST_QUEUE = "limit"
         return None
     LAST_QUEUE = "queued" if github_token() else "no_key"
@@ -5623,8 +5653,19 @@ def _upload_locked(files: list) -> tuple:
     if not files:
         return 0, 0
     repo = repo_name()
-    status, body = gh_request("GET", f"/repos/{repo}/issues?state=open&per_page=100&labels=auto-report")
-    open_issues = json.loads(body) if status == 200 else []
+    st_me, me_body = gh_request("GET", "/user")
+    try:
+        me = json.loads(me_body).get("login") if st_me == 200 else None
+    except (ValueError, AttributeError):
+        me = None
+    status, body = gh_request("GET", f"/repos/{repo}/issues?state=open&per_page=100")
+    try:
+        open_issues = json.loads(body) if status == 200 else []
+    except ValueError:
+        open_issues = []
+    # only issues this key opened itself (a look-alike title from someone else must not collect our logs)
+    open_issues = [i for i in open_issues if isinstance(i, dict) and me and (i.get("user") or {}).get("login") == me
+                   and str(i.get("title") or "").startswith(("[auto]", "[report]"))]
     sent_ok, failed = 0, 0
     sent = read_json(REPORT_SENT, {}) or {}
     for f in files:
@@ -5657,6 +5698,10 @@ def _upload_locked(files: list) -> tuple:
                 if number:
                     for chunk in _comment_chunks(att.get("name", "Attachment"), att.get("text", "")):
                         gh_request("POST", f"/repos/{repo}/issues/{number}/comments", {"body": chunk})
+            if number and not existing:
+                # only people with write access can comment on a locked issue: nobody else can slip fake logs
+                # or instructions into a report (best effort; the key may not be allowed to lock)
+                gh_request("PUT", f"/repos/{repo}/issues/{number}/lock", {})
             sent[f"{fp}@{rep.get('version', '')}"] = time.time()
             f.unlink(missing_ok=True)
             sent_ok += 1

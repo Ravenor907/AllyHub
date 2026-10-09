@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.4.1.8
+
+Security fixes from a full review:
+- **Phone remote:** opening many connections at once no longer gets extra PIN guesses past the lockout, guesses
+  from all devices together are capped, and a malformed request can no longer use up the handheld's memory.
+- **Shared profiles** can no longer turn on SSH, move your save backups or carry broken theme colors, and the import
+  screen lists every app it would install.
+- **Settings backups** are private to your user and never include the phone remote's PIN.
+- **Downloads** are https only, and Decky store plugins without a store checksum aren't installed.
+- **The password prompt** names the task that's asking for it.
+- **Error reports:** new access keys must be fine-grained (limited to this repo), the daily limit now counts reports
+  already sent, and report issues are locked after upload so nobody else can add to them.
+
 ## 1.4.1.7
 
 - Small fixes.
