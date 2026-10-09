@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.4.1.1
+
+- **True colors on the rings:** colors are now converted for LEDs before they're sent, so presets no longer look
+  washed out toward white. Pure red, green, blue and white are unchanged.
+- **Smoothness works on battery:** "Slow down to save power" used to cap every effect at 15 frames a second, so
+  Smooth and Silky looked the same unplugged. It now runs at two thirds of your choice (Silky 20, Smooth 13), or pick
+  "Keep full speed".
+- **Neon Vortex works again:** it runs in Ally Hub's style, because the chip's own spiral can only show rainbow.
+  Saved copies are fixed automatically.
+- **Pointer clicks:** R3 now left-clicks where the pointer is, like A, and clicks on buttons and lists use the
+  same reliable path as the D-pad.
+
 ## 1.4.1
 
 - **New controls:** the left stick scrolls the page, the right stick moves a pointer and R3 right-clicks. The

@@ -138,7 +138,9 @@ class Animator(threading.Thread):
             fps = 20
         bat = core.battery_info()
         if bat.get("status") == "Discharging" and light.get("on_battery", "slow") == "slow":
-            fps = min(fps, 15)          # was 10, which with send time made streamed effects look choppy
+            # two thirds of the chosen rate (30 -> 20, 20 -> 13, 10 stays 10). It was a flat 15 cap, so on battery
+            # Smooth and Silky looked exactly the same (the owner, 1.4.1)
+            fps = max(10, min(fps, round(fps * 2 / 3)))
         return fps
 
     def run(self):
@@ -210,7 +212,8 @@ class Animator(threading.Thread):
                     zones = [tuple(int(round(p + (c - p) * 0.55)) for p, c in zip(pz, z)) for pz, z in zip(prev, zones)]
             self._zones = zones
             key = ("zones", tuple(zones), brightness)
-            send = lambda: core.hid_zone_frame(zones, brightness, self.agent.leds, light.get("hid_method"))
+            send = lambda: core.hid_zone_frame(zones, brightness, self.agent.leds, light.get("hid_method"),
+                                               light.get("gamma"))
         else:
             frame = core.effect_frame(effect, t if animated else 0.0)
             if not animated and effect["type"] != "static":
@@ -1071,6 +1074,7 @@ class Agent:
             sys.exit(1)
         self.safely("boost", self.recover_boost)
         self.safely("lighting", core.migrate_chip_spiral)
+        self.safely("lighting", core.migrate_color_spirals)
         self.safely("privacy", core.secure_data_dir)
         self.safely("rescue", core.sync_testing_rescue)      # Testing: a way out that works without the app
         self.safely("menu", core.tidy_menu_entry)

@@ -100,7 +100,9 @@ DEFAULT_CONFIG = {
     # controller "huesync": Ally Hub leaves the rings alone and points to the HueSync Decky plugin
     # (the owner's call). "allyhub" turns on the Lighting studio and agent lighting.
     "lighting": {"effect": None, "fps": 20, "on_battery": "slow", "custom": {}, "controller": "huesync",
-                 "chip_spiral": False},     # True once saved spirals were moved to the chip's spiral (1.3.4)
+                 "chip_spiral": False,     # True once saved spirals were moved to the chip's spiral (1.3.4)
+                 "gamma": 2.2,             # LED color correction (1.4.1.1): see led_gamma
+                 "color_spirals_fixed": False},   # True once color spirals left the chip (1.4.1.1)
     # channel "stable" follows main; "testing" also follows the testing branch (the owner's test builds)
     "updates": {"repo": REPO_DEFAULT, "auto_update": True, "reporting": False, "channel": "stable"},
     # Tools > Performance. The tune-up itself lives in /etc, so only Game Boost's switch is here.
@@ -1071,6 +1073,28 @@ def lighting_access_details(leds: list = None) -> str:
     return "\n".join(lines)
 
 
+# LEDs give out light in proportion to the value they get, but colors are picked as screen (sRGB) values, which
+# are gamma-encoded. Sent as-is, a color's weaker channels glow far too bright and every color looks washed out
+# toward white (the owner, 1.4.1). Converting to light first keeps colors true: (255, 0, 0) stays pure red,
+# while #0ea5e9 sends roughly (0, 96, 205) instead of (14, 165, 233).
+LED_GAMMA = 2.2
+_GAMMA_LUT = {}
+
+
+def led_gamma(rgb: tuple, k: float = 1.0, gamma: float = None) -> tuple:
+    """Screen color -> LED drive values, with brightness k (0..1) applied to the light, not the code value."""
+    try:
+        g = float(gamma) if gamma else LED_GAMMA
+    except (TypeError, ValueError):
+        g = LED_GAMMA
+    g = max(1.0, min(3.0, g))
+    lut = _GAMMA_LUT.get(g)
+    if lut is None:
+        lut = _GAMMA_LUT[g] = [(i / 255) ** g for i in range(256)]
+    k = max(0.0, min(1.0, k))
+    return tuple(int(round(255 * lut[max(0, min(255, int(v)))] * k)) for v in rgb)
+
+
 def hid_brightness_level(brightness: int) -> int:
     if brightness <= 0:
         return 0
@@ -1180,7 +1204,7 @@ def _kernel_off_for(m: dict, leds: list, key: str) -> Optional[str]:
 def hid_effect_packets(effect: dict, brightness: int, init: bool = True, each: bool = False) -> list:
     """Map an Ally Hub effect onto the chip's built-in modes."""
     e = normalize_effect(effect)
-    cols = [hex_to_rgb(x) for x in e["colors"]] or [(255, 255, 255)]
+    cols = [led_gamma(hex_to_rgb(x)) for x in e["colors"]] or [(255, 255, 255)]     # true colors on the LEDs
     speed = "slow" if e["speed"] < 0.7 else "medium" if e["speed"] < 1.5 else "fast"
     kind = e["type"]
     kw = {"init": init, "each": each}
@@ -1285,6 +1309,31 @@ def migrate_chip_spiral() -> bool:
     return bool(changed)
 
 
+def migrate_color_spirals() -> bool:
+    """Once (1.4.1.1): a spiral with its own colors can't run on the chip, whose spiral is rainbow only, so saved
+    ones that migrate_chip_spiral moved there (Neon Vortex) go back to Ally Hub's style. True when something changed."""
+    if load_config()["lighting"].get("color_spirals_fixed"):
+        return False
+    changed = []
+
+    def fix(e):
+        if isinstance(e, dict) and e.get("type") == "spiral" and e.get("engine") == "chip" \
+                and not normalize_effect(e).get("rainbow"):
+            e["engine"] = "smooth"
+            changed.append(1)
+
+    def run(c):
+        L = c["lighting"]
+        fix(L.get("effect"))
+        for e in (L.get("custom") or {}).values():
+            fix(e)
+        for e in (c.get("game_colors") or {}).values():
+            fix(e)
+        L["color_spirals_fixed"] = True
+    update_config(run)
+    return bool(changed)
+
+
 def uses_chip_effect(effect: dict) -> bool:
     e = normalize_effect(effect)
     return e["type"] == "spiral" and e.get("engine") == "chip"
@@ -1307,9 +1356,9 @@ def _stream_nodes(leds: list) -> dict:
     return nodes
 
 
-def hid_zone_frame(zones: list, brightness: int, leds: list = None, method: str = None) -> bool:
+def hid_zone_frame(zones: list, brightness: int, leds: list = None, method: str = None, gamma: float = None) -> bool:
     """Send one frame (four zone colors) to the chip. Brightness is folded into the colors, which
-    dims smoothly instead of the chip's four brightness steps."""
+    dims smoothly instead of the chip's four brightness steps; led_gamma keeps the colors true."""
     leds = leds if leds is not None else find_leds()
     m = hid_method(method)
     key = method or DEFAULT_HID_METHOD
@@ -1319,7 +1368,7 @@ def hid_zone_frame(zones: list, brightness: int, leds: list = None, method: str 
     _kernel_off_for(m, leds, key)
     _dynamic_off_for(m, nodes, key)
     k = max(0, min(255, int(brightness))) / 255
-    scaled = [tuple(int(round(c * k)) for c in z) for z in zones]
+    scaled = [led_gamma(z, k, gamma) for z in zones]
     packets = hid_packets("solid", scaled[0], zones=list(zip(ZONE_NAMES, scaled)), init=m["init"])
     packets = _shape_packets(packets, m, "static:255", key)
     gap = m.get("stream_gap", 0.006)
@@ -1330,7 +1379,8 @@ def hid_apply_effect(effect: dict, brightness: int, leds: list = None, method: s
     leds = leds if leds is not None else find_leds()
     if hid_streams(method) and not uses_chip_effect(effect):
         # one still frame; the agent animates it (GUI previews, --apply-rgb, static colors)
-        return hid_zone_frame(zone_frames(effect, 0.0), brightness, leds, method)
+        return hid_zone_frame(zone_frames(effect, 0.0), brightness, leds, method,
+                              (load_config().get("lighting") or {}).get("gamma"))
     m = hid_method(method)
     key = method or DEFAULT_HID_METHOD
     nodes = ally_hid_nodes(leds)
@@ -1460,7 +1510,8 @@ PRESETS = {
     "RGB Spiral": {"type": "spiral", "colors": [], "speed": 1.0, "param": 0.75, "rainbow": True,
                    "direction": "cw", "layout": "linked", "engine": "chip"},
     "Neon Vortex": {"type": "spiral", "colors": ["#ff2a6d", "#05d9e8", "#a855f7"], "speed": 1.4,
-                    "param": 1.0, "rainbow": False, "direction": "ccw", "layout": "mirror", "engine": "chip"},
+                    "param": 1.0, "rainbow": False, "direction": "ccw", "layout": "mirror", "engine": "smooth"},
+    # Neon Vortex is Ally Hub's style (1.4.1.1, the owner): the chip's spiral is rainbow only, so its colors never showed
 }
 
 
