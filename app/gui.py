@@ -6922,6 +6922,34 @@ class Hub(QMainWindow):
         if self.health.isVisible():
             self.health.refresh_chart()
         self.update_brand()
+        pre, was = t.get("preset"), getattr(self, "_preset_on", None)
+        self._preset_on = pre
+        if was is not None and pre != was:              # switched (not the first apply at start-up)
+            if pre in core.EXTRA_THEMES:
+                self.extra_theme_on()
+            elif was in core.EXTRA_THEMES:
+                self.extra_theme_off()
+
+    def extra_theme_on(self):
+        """Every time the extra theme is switched on: the user's own sound file (never shipped) and, with Ally Hub
+        lighting, matching rings. The effect before is kept for extra_theme_off."""
+        core.play_sound(core.theme_sound())
+        if core.lighting_shelved():
+            return
+        cur = load_config()["lighting"].get("effect")
+        if not cur or core.normalize_effect(cur) != core.normalize_effect(core.THEME_LIGHTING):
+            update_config(lambda c: c["lighting"].__setitem__("before_theme", cur))
+        self.lighting.set_effect(core.THEME_LIGHTING)
+
+    def extra_theme_off(self):
+        """Switched to another theme: the rings go back to what they showed before, unless they were changed since."""
+        light = load_config()["lighting"]
+        before = light.get("before_theme")
+        update_config(lambda c: c["lighting"].__setitem__("before_theme", None))
+        if core.lighting_shelved() or not before:
+            return
+        if core.normalize_effect(self.lighting.effect) == core.normalize_effect(core.THEME_LIGHTING):
+            self.lighting.set_effect(before)
 
     def update_brand(self):
         """The Ally Hub theme puts the owner's wordmark in the top bar instead of icon + name."""
@@ -6938,7 +6966,6 @@ class Hub(QMainWindow):
     def unlock_extra_theme(self, apply: bool = False):
         """Turns on the extra theme (IconTaps, GamepadNav._wiggle); apply also switches to it."""
         first = not load_config()["theme"].get("extra_themes")
-        core.play_sound(core.theme_sound())          # the user's own sound file, if there is one
         update_config(lambda c: c["theme"].update(extra_themes=True, **(
             {"preset": core.EXTRA_THEMES[0], "accent": None, "accent2": None} if apply else {})))
         if apply:

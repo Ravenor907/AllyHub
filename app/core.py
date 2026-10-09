@@ -104,7 +104,8 @@ DEFAULT_CONFIG = {
                  "chip_spiral": False,     # True once saved spirals were moved to the chip's spiral (1.3.4)
                  "gamma": 2.2,             # LED color correction (1.4.1.1): see led_gamma
                  "color_spirals_fixed": False,    # True once color spirals left the chip (1.4.1.1)
-                 "stream_all": True},             # one-color frames as one zone-"all" packet (1.4.1.2)
+                 "stream_all": True,
+                 "before_theme": None},           # lighting to restore when the extra theme is switched off             # one-color frames as one zone-"all" packet (1.4.1.2)
     # channel "stable" follows main; "testing" also follows the testing branch (the owner's test builds)
     "updates": {"repo": REPO_DEFAULT, "auto_update": True, "reporting": False, "channel": "stable"},
     # Tools > Performance. The tune-up itself lives in /etc, so only Game Boost's switch is here.
@@ -1344,6 +1345,8 @@ def migrate_color_spirals() -> bool:
 
 
 EXTRA_THEMES = ("Ally Hub",)
+# the rings while the extra theme is on (Ally Hub lighting only); the effect before it comes back when it's switched off
+THEME_LIGHTING = {"type": "breathe", "colors": ["#ff8a00"], "speed": 0.6, "param": 0.45}
 
 
 def theme_sound() -> Optional[Path]:
