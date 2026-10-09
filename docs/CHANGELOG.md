@@ -1,122 +1,41 @@
 # Changelog
 
-## 1.3.7.10
+## 1.4.0
 
-- **Every part of the Store works with the controller:** Essentials, Mods, Apps, Decky plugins, Installed and Launchers
-  are now the Store's sections, picked with LT/RT. The extra row of chips you couldn't reach is gone.
-- **Quick fixes are gone, not lost:** each fix moved to where you'd look for it. Restart Decky is under Your plugins,
-  Update all apps is under Apps, cleanups are in Storage, and the Checkup now checks that Ally Hub is in your Game
-  Mode library.
-- **All cleanup is in one place:** Home > Storage > More cleanup clears the shader cache, unused app runtimes and
-  leftovers from removed launchers.
-- **One Saves card:** snapshots when a game starts and backups on a schedule share the Save time machine card.
-- **Settings is shorter:** Backups moved into General, the full changelog became a "What's new" button, and alerts
-  show once, in the Checkup, instead of twice on Home.
-
-## 1.3.7.9
-
-- **One place for each job:** installed Decky plugins are turned off or removed only under Your plugins. Store
-  cards now just install, or show Update when there's a newer version. HueSync and Controller glyphs no longer
-  repeat install or remove buttons once their plugin is in, and Quick fixes no longer repeats the Checkup's Decky
-  repair.
-- **Controller glyphs has step-by-step instructions**, including how to change the icons or switch them off later.
-- **Clearer names:** "Activity log" everywhere (was also "View log"), "Decky plugins", "Remove unused app runtimes",
-  "Back up on a schedule" and "Settings backup".
-
-## 1.3.7.8
-
-- **Calmer pages:** the 22 wordiest card and page descriptions are now one short line each, so every screen
-  reads at a glance. Nothing moved and no features changed.
-
-## 1.3.7.7
-
-- **Controller glyphs card (Customize > Theme):** installs CSS Loader from the plugin store (and Decky first if
-  needed), then shows the two steps for the Handheld Controller Glyphs theme and a check once it's installed.
-  Remove CSS Loader is one tap.
-
-## 1.3.7.6
-
-- Removed the Xbox Ally X controller layout card that 1.3.7.5 added. It's not coming back.
-
-## 1.3.7.4
-
-- **Failures now say what happened and what to do**, in plain words: a cancelled password, no internet, no space
-  left. No more "exit code 1" with a wall of log.
-- **Each task says when it's done** (with how long it took), and the status shows how many are still waiting.
-- An unexpected error no longer looks like a crash: Ally Hub says it's still running and whether a fix can follow.
-
-## 1.3.7.3
-
-- **Calmer, smoother Ally Hub spiral:** it spins about half as fast, and the colors blend from frame to frame
-  instead of jumping between the rings' four zones.
-- **Quick Access panel:** a speed slider for animated effects, switches for battery rings, low battery flash and
-  the save time machine. Update the panel from Games → Game settings.
-
-## 1.3.7.2
-
-- The info line at the bottom of Home is no longer cut off, and it shows a short device name ("ROG Xbox Ally X")
-  instead of the vendor and model codes.
-- **Smoother Ally Hub lighting:** frames are now timed so the time spent sending each one counts toward the frame
-  rate, and on battery it runs at up to 15 frames a second instead of 10.
-- **A better-looking Quick Access panel:** a battery card with a level bar and CPU, GPU and power at a glance, and a
-  "Now playing" header for the game's switches. Update it from Games → Game settings.
-
-## 1.3.7.1
-
-First test build under the new numbering: Stable 1.3.7 plus test revision 1 (at most 10 before Stable). On top of
-1.3.7 it has, all still being tested:
-- The new layout (1.4.0, still being fixed: it didn't open on a real Ally).
-- RGB Spiral and Neon Vortex on the chip's own spiral by default.
-- Ally Hub Testing Rescue and the test-build warnings.
+**A cleaner, simpler Ally Hub.** Everything you had is still here, in fewer places:
+- **New layout, made for the controller:** Home, Store, Games, Customize and Settings. LB/RB switch tabs and LT/RT
+  switch sections, and every section is reachable with the buttons. No more rows of chips you can't get to.
+- **Simple by default:** expert controls (tune-up, Proton per game, wake blockers, SSH, the activity log) wait under
+  Settings → General → Advanced.
+- **Home shows what needs you:** a Checkup that lists only problems, each with its fix, plus battery, temps and
+  history. Battery & sleep and Storage sit next to it, and every cleanup is in one Storage card.
+- **One store:** Essentials, Mods, Apps, Decky plugins, Installed and Launchers. Installed plugins are turned off or
+  removed in one place (Your plugins).
+- **Games:** per-game settings with the Quick Access panel, Performance, and one Save time machine card for
+  snapshots and scheduled backups.
+- **Clearer feedback:** failures say what happened and what to do, each task says when it's done, and an unexpected
+  error no longer looks like a crash.
+- **Lighting:** RGB Spiral and Neon Vortex use the chip's own smooth spiral by default, and Ally Hub's own spiral is
+  calmer and blends between frames.
+- **Quick Access panel:** a nicer look, a lighting speed slider, and switches for battery rings, low battery flash
+  and the save time machine. Update it from Games → Game settings.
+- **Controller glyphs (Customize → Theme):** installs CSS Loader and walks you through the Handheld Controller
+  Glyphs theme.
+- **Shorter Settings:** backups live in General, and release notes open from a "What's new" button.
 
 ## 1.3.7
 
 - Ally Hub now understands test build numbers like 1.3.7.1, so the Testing channel can deliver test builds again.
   Nothing else changes on Stable.
 
-## 1.4.3
+## 1.3.6
 
+- **Automatic rollback now covers the app window, not just the background helper.** After an update, each part has
+  to prove itself. If Ally Hub's window fails to start 3 times (or crashes in its first two minutes), the update rolls
+  back on its own and the helper restarts on the old version.
+- Opening Ally Hub again while it's already open, or closing it quickly, no longer counts as a failed start.
 - **Ally Hub shows up once in the app menu**, under Utilities, instead of under Games, Utilities and System. Existing
   installs are fixed automatically.
-
-## 1.4.2
-
-- **Ally Hub Testing Rescue:** on the Testing channel there's now an entry in the app menu (and on the desktop,
-  next to Ally Hub) that can roll back the test build, go back to Stable or uninstall, even when Ally Hub won't open.
-  It goes away when you switch back to Stable.
-- **Clear warning before switching to Testing**, and a reminder on Settings → General while you're on it: test
-  builds can break, here's the way out, and if all else fails, uninstall and reinstall.
-- From now on only the developer decides when something goes to Stable.
-
-## 1.4.1
-
-- **Automatic rollback now covers the app window, not just the background helper.** Each part has to prove itself
-  after an update. If Ally Hub's window fails to start 3 times (or crashes in its first two minutes), the update rolls
-  back on its own and the helper restarts on the old version. Before, a working helper ended the check early, which
-  is why 1.4.0 didn't roll back for you.
-- Opening Ally Hub again while it's already open, or closing it quickly, no longer counts as a failed start.
-
-## 1.4.0
-
-A new, simpler layout: everything is where you'd look for it, and the expert controls stay out of the way until you
-want them.
-- **Five tabs, fewer sections:** Home (Overview, Battery & sleep, Storage), Store (Browse, Launchers), Games (Game
-  settings, Performance, Saves), Customize (Lighting, Theme) and Settings (General, Connections, Backups, Activity).
-  20 sections became 15 (13 in Simple once setup is done).
-- **Home at a glance:** the Overview now has a Checkup that only shows what needs you, with the fix, plus Quick fixes.
-  Ally Doctor and Tweaks moved in here.
-- **One store:** Mods, Apps and Decky plugins are in Store → Browse, with Essentials and Installed views. One list of
-  essentials, the same one setup offers.
-- **Simple / Advanced** (Settings → General). Simple is the default and tucks away the system tune-up, Proton per game,
-  wake blockers, SSH and the activity log. Advanced shows everything.
-- **Things that lived in two places now live in one:** battery care sits with sleep, SD card and shader cache tools
-  with Storage, scheduled save backups with Saves, battery/per-game/dock lighting with Lighting, the boot video with
-  Theme, SSH with Connections.
-- **Back up settings no longer asks for your password.**
-- Pages like Saves, Sleep, Storage, Game settings and Setup no longer open blank.
-- The "agent" is now called the **background helper** everywhere, and any feature that needs it simply turns it on.
-- Importing a profile is a list you can pick from with the controller.
-- With the tabs on the sides, messages like "Saved" now pop up instead of disappearing.
 
 ## 1.3.5
 
@@ -134,12 +53,6 @@ Safety and privacy fixes from a security review:
 - Ally Hub's logs and settings are now private to your user, and the access key is private from the moment it's
   saved.
 - Uninstalling also removes the Quick Access panel and the Game Mode library tile.
-
-## 1.3.4
-
-- **RGB Spiral and Neon Vortex now use the lighting chip's built-in spiral by default.** It's smooth and uses no
-  battery; Ally Hub's own spiral looked choppy. Your saved spirals switch over once. Ally Hub's style is still under
-  Style if you want your own colors (the chip's spiral is rainbow only).
 
 ## 1.3.3
 
