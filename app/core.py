@@ -1902,7 +1902,7 @@ THEMES = {
                         border="#d5d9e5", text="#151826", muted="#5d6479",
                         accent="#6366f1", accent2="#ec4899",
                         hero=("#e0e3ff", "#f3e1f5", "#dff1ff"), on_accent="#ffffff"),
-    # extra theme (EXTRA_THEMES): black and orange, black text on orange; with it on, the top bar shows the wordmark
+    # extra theme (EXTRA_THEMES)
     "Ally Hub": dict(bg="#050505", side="#0b0b0b", surface="#121212", surface2="#1c1c1c",
                      border="#2e2418", text="#f5f5f5", muted="#a39a90",
                      accent="#ff8a00", accent2="#ffa31a",
