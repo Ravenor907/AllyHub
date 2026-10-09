@@ -5382,7 +5382,7 @@ def _comment_chunks(name: str, text: str) -> list:
 def report_hint() -> str:
     """Plain-language reason the last report wasn't sent, for messages to the user."""
     return {
-        "off": "Turn on error reports (Settings → General) to have problems like this fixed automatically.",
+        "off": "Turn on error reports (Settings → General) so problems like this get reported.",
         "no_key": "Error reports are on, but there's no GitHub access key yet. Add one on Settings → General.",
         "duplicate": "This exact problem was already reported in the last day, so it wasn't sent again. "
                      "A fix may already be out: Settings → General → Check now.",
