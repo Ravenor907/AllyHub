@@ -5308,7 +5308,7 @@ class _PerformanceRefresh:
     """The experimental higher-refresh card's actions (mixed into PerformancePage)."""
 
     def refresh_try(self, *_args):
-        hz = core.REFRESH_STEPS[self.refresh_pick.currentIndex()]
+        hz = core.REFRESH_MAX
         if not GAMEMODE:
             msg_info(self, APP_NAME, "Try this in Game Mode: it restarts Game Mode to load the new rates.")
             return
@@ -5316,9 +5316,9 @@ class _PerformanceRefresh:
             msg_warn(self, APP_NAME, "The background helper has to be on (Settings → General): it's what undoes "
                                      "this if the screen goes black.")
             return
-        if not ask(self, f"Try up to {hz} Hz?\n\nExperimental: the screen is made for 120 Hz, so it may flicker or "
-                         "go black. Game Mode restarts now. Then open Steam's ••• menu, set the refresh slider, and "
-                         "if the picture is good tap Keep it in Ally Hub's ••• panel within 90 seconds.\n\n"
+        if not ask(self, f"Turn on {hz} Hz?\n\nExperimental: the screen is made for 120 Hz, so it may flicker or "
+                         "go black. Game Mode restarts now and Ally Hub opens again with a countdown. Set Steam's "
+                         "refresh slider to the top, and if the picture is good, tap Keep.\n\n"
                          "Do nothing and it goes back by itself, even on a black screen."):
             return
         core.refresh_request(hz)
@@ -5340,15 +5340,15 @@ class _PerformanceRefresh:
         self.btn_refresh_keep.setVisible(trial)
         self.btn_refresh_off.setVisible(bool(have) and not trial)
         self.btn_refresh_try.setEnabled(not trial and st.get("status") != "pending")
+        self.btn_refresh_try.setVisible(not have or trial)
         if trial:
-            text = f"Trying up to {st.get('max')} Hz: {core.refresh_left()} s left to keep it."
+            text = f"Testing {st.get('max')} Hz: going back in {core.refresh_left()} s unless you keep it."
         elif st.get("status") == "reverted":
-            text = (f"Up to {st.get('tried')} Hz wasn't kept, so it went back"
-                    + (f" to up to {have} Hz." if have else " to 120 Hz.") + " Try a lower step.")
+            text = "144 Hz wasn't kept, so the screen went back to 120 Hz."
         elif have:
-            text = f"On: Steam's refresh slider goes up to {have} Hz."
+            text = f"On: the screen runs from 48 up to {have} Hz (Steam's refresh slider goes to {have})."
         else:
-            text = "Off: the screen's normal 120 Hz."
+            text = "Off: the screen's normal 48 to 120 Hz."
         self.refresh_status.setText(text)
 
 
@@ -5375,18 +5375,15 @@ class PerformancePage(QWidget, _PerformanceRefresh):
         cv.addLayout(row)
         v.addWidget(card)
 
-        # experimental (1.4.1.9, the owner's call): the panel above 120 Hz, with an undo that works on a black screen
+        # experimental (the owner's call): the panel at up to 144 Hz (range 48-144), with an undo that works on a
+        # black screen. All in Game Mode: Ally Hub reopens after the restart with a live countdown (Hub.check_refresh)
         rcard, rv = titled_card(
-            "monitor-play", "#a855f7", "Higher refresh rate (experimental)",
-            "Pushes the screen past 120 Hz. Game Mode restarts, then you pick the rate with Steam's refresh slider "
-            "and tap Keep in the ••• panel within 90 seconds, or it goes back by itself.")
+            "monitor-play", "#a855f7", "144 Hz (experimental)",
+            "Lets the screen run from 48 up to 144 Hz instead of 120. Game Mode restarts, Ally Hub comes back with a "
+            "countdown: keep it, or it undoes itself.")
         rr = QHBoxLayout()
-        self.refresh_pick = QComboBox()
-        self.refresh_pick.addItems([f"Up to {hz} Hz" for hz in core.REFRESH_STEPS])
-        self.refresh_pick.setCurrentIndex(1)
-        rr.addWidget(self.refresh_pick)
-        self.btn_refresh_try = button("Try it", self.refresh_try, "primary")
-        self.btn_refresh_keep = button("Keep it", self.refresh_keep, "primary")
+        self.btn_refresh_try = button("Turn on 144 Hz", self.refresh_try, "primary")
+        self.btn_refresh_keep = button("Keep 144 Hz", self.refresh_keep, "primary")
         self.btn_refresh_off = button("Back to 120 Hz", self.refresh_off)
         for b in (self.btn_refresh_try, self.btn_refresh_keep, self.btn_refresh_off):
             rr.addWidget(b)
@@ -6743,6 +6740,10 @@ class Hub(QMainWindow):
         QTimer.singleShot(800, self.show_whats_new)
         QTimer.singleShot(3000, self.maybe_check_updates)
         QTimer.singleShot(core.HEALTHY_AFTER_S * 1000, lambda: core.mark_healthy("gui"))
+        self._refresh_timer = QTimer(self)             # the 144 Hz test's countdown, wherever you are in the app
+        self._refresh_timer.timeout.connect(self.check_refresh)
+        self._refresh_timer.start(1000)
+        self._refresh_sheet = False
 
     # ---- sections built from blocks (1.4.0) ----
     def compose_sections(self):
@@ -7052,6 +7053,44 @@ class Hub(QMainWindow):
             return
         if core.normalize_effect(self.lighting.effect) == core.normalize_effect(core.THEME_LIGHTING):
             self.lighting.set_effect(before)
+
+    def check_refresh(self):
+        """While a 144 Hz test runs: a panel with a live countdown, Keep and Undo now (in Game Mode, right after the
+        restart: the agent reopens Ally Hub)."""
+        if self._refresh_sheet or core.refresh_state().get("status") != "trial" or self._sheet is not None:
+            return
+        self._refresh_sheet = True
+        try:
+            dlg = QDialog(self)
+            dlg.setWindowTitle("Testing 144 Hz")
+            dv = QVBoxLayout(dlg)
+            dv.setContentsMargins(28, 24, 28, 24)
+            dv.addWidget(label("Testing 144 Hz", "pageTitle"))
+            count = label("", "bigValue")
+            dv.addWidget(count)
+            dv.addWidget(label("Press ••• → Performance and move the refresh slider to the top. If the picture looks "
+                               "right, keep it. Do nothing and it goes back to 120 Hz by itself.", "cardDesc", wrap=True))
+            row = QHBoxLayout()
+            row.addWidget(button("Keep 144 Hz", lambda: (core.refresh_keep(), dlg.accept()), "primary"))
+            row.addWidget(button("Undo now", lambda: (core.refresh_request_off(), dlg.reject())))
+            row.addStretch()
+            dv.addLayout(row)
+            tick = QTimer(dlg)
+
+            def update():
+                left = core.refresh_left()
+                if left is None:                       # kept elsewhere, undone, or ran out
+                    dlg.reject()
+                    return
+                count.setText(f"Going back to 120 Hz in {left} s")
+            tick.timeout.connect(update)
+            tick.start(500)
+            update()
+            run_dialog(dlg)
+        finally:
+            self._refresh_sheet = False
+            if getattr(self, "performance", None) is not None:
+                self.performance.refresh_update()
 
     def update_brand(self):
         """The Ally Hub theme puts the owner's wordmark in the top bar instead of icon + name."""

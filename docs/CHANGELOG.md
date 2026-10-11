@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.4.1.10
+
+- **144 Hz is one switch now** (Games → Performance, Advanced): "Turn on 144 Hz" lets the screen run from 48 up to
+  144 Hz. Game Mode restarts and Ally Hub opens again by itself with a live countdown, Keep 144 Hz and Undo now. Do
+  nothing and it goes back to 120 Hz, even on a black screen.
+- "Back to 120 Hz" is on the card and in the ••• panel whenever 144 Hz is on. Update the ••• panel from
+  Games → Game settings.
+
 ## 1.4.1.9
 
 - **Experimental: higher refresh rate** (Games → Performance, Advanced). Lets the screen go past 120 Hz in steps up

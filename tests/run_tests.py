@@ -1867,6 +1867,10 @@ gui.ask_item, hub.import_profile = _ai3, _ip
 check(_picked and _picked[0].get("allyhub_profile") and "remote_pin" not in _picked[0]["config"]["agent"],
       "profiles are picked with the controller, and never carry the remote PIN")
 tryit("restart decky (was a quick fix)", hub.restart_decky)
+core.write_json(core.REFRESH_STATE, {"status": "trial", "max": 144, "started": time.time(), "back": time.time()})
+tryit("144 Hz countdown panel", hub.check_refresh)
+tryit("144 Hz card", hub.performance.refresh_update)
+core.REFRESH_STATE.unlink(missing_ok=True)
 import base64 as _b64g
 check(_b64g.b64decode(gui.BRAND_LOGO_PNG)[:8] == b"\x89PNG\r\n\x1a\n", "the Ally Hub theme's wordmark is a real PNG")
 tryit("header logo", lambda: (gui.brand_logo(36), hub.update_brand()))
