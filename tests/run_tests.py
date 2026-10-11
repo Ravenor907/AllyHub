@@ -1196,9 +1196,10 @@ core.REFRESH_STATE.unlink(missing_ok=True)
 core.EDID_FLAG.parent.mkdir(parents=True, exist_ok=True); core.EDID_FLAG.write_text("on")
 core.refresh_step(_t0)
 check(not core.EDID_FLAG.exists(), "the Desktop Mode 144 Hz switch from 1.4.1.12 is turned off")
-check("VRR" in core.REFRESH_DISCLAIMER and "Game Mode only" in core.REFRESH_DISCLAIMER
-      and "REFRESH_NOTE" in core.QAM_INDEX_JS and "skipped frames" in core.QAM_INDEX_JS,
-      "the experimental note (VRR skips frames, Game Mode only) is in the app and the ••• panel")
+check("VRR" in core.REFRESH_DISCLAIMER and "touch" in core.REFRESH_DISCLAIMER and "keep VRR off" not in core.REFRESH_DISCLAIMER
+      and "Game Mode only" in core.REFRESH_DISCLAIMER and "REFRESH_NOTE" in core.QAM_INDEX_JS
+      and "touch screen" in core.QAM_INDEX_JS,
+      "the experimental note (issues possible: VRR skipped frames, touch screen; Game Mode only) is in the app and panel")
 _sp = {"type": "spiral", "engine": "chip", "rainbow": True}
 check(core.chip_runs(_sp, 255) and not core.chip_runs(_sp, 128) and not core.chip_runs({"type": "static"}, 255),
       "the chip's spiral runs at full brightness; dimmer, Ally Hub draws it so it really dims")

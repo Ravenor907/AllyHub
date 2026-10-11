@@ -277,9 +277,11 @@ Keep: the ••• panel (`refresh_keep`) or the Performance card. Never let th
 **144 Hz is Game Mode only (1.4.1.13, the owner's call, "for sake of simplicity").** 1.4.1.12's Desktop Mode EDID
 override was removed; `clear_desktop_144` deletes its flag so the leftover boot service does nothing (the uninstaller
 still removes `allyhub-edid.service`). Don't bring Desktop Mode 144 Hz back unless the owner asks. `REFRESH_DISCLAIMER`
-(experimental, VRR causes skipped frames at 144 Hz so keep it off, Game Mode only) shows on the card, the confirm,
+(you may experience issues: VRR skipped frames, touch screen may not respond; Game Mode only. The owner: don't tell
+people to turn VRR off) shows on the card, the confirm,
 the countdown sheet and the ••• panel. Owner's Monitor OC test: VRR on skipped frames, VRR off was clean (the
-panel's VRR range stays 48-120).
+panel's VRR range stays 48-120). Touch stops working at 144 Hz (owner, 1.4.1.13): suspected the panel's
+touch controller timing its scans to the display's blanking, which the faster clock shortens; unconfirmed.
 The brightness slider goes through `led_dim` (`LED_DIM_CURVE`) for streamed frames: linear drive barely dimmed.
 The chip's own spiral has only 3 brightness steps, so `chip_runs` hands it to the chip only at `CHIP_SPIRAL_FULL`;
 below that the agent streams the same rainbow spiral (owner: 1.4.1.12 still didn't dim it).

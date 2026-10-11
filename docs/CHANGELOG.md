@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.4.1.14
+
+- **144 Hz note reworded**: it no longer tells you to turn adaptive sync (VRR) off. It says you may experience
+  issues: skipped frames with VRR on, and the touch screen may not respond at 144 Hz. Update the ••• panel from
+  Games → Game settings to see it there too.
+
 ## 1.4.1.13
 
 - **144 Hz is Game Mode only.** The Desktop Mode part from 1.4.1.12 is gone; if you set it up, it switches itself
