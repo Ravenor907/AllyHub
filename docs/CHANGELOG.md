@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.4.1.13
+
+- **144 Hz is Game Mode only.** The Desktop Mode part from 1.4.1.12 is gone; if you set it up, it switches itself
+  off and Desktop Mode is back to normal after the next restart.
+- **144 Hz now says up front that it's experimental**: it may have issues, adaptive sync (VRR) causes skipped frames
+  at 144 Hz so keep VRR off, and it's made for Game Mode only for now. Shown on the card, the countdown and the
+  ••• panel (update the panel from Games → Game settings).
+- **The rainbow spiral really dims now.** The chip's own spiral only has three brightness steps, so below full
+  brightness Ally Hub draws the same rainbow spiral itself and it dims smoothly with the slider.
+
 ## 1.4.1.12
 
 - **144 Hz in Desktop Mode too.** Turning on 144 Hz now also adds it to System Settings → Display Configuration →

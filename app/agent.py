@@ -193,7 +193,7 @@ class Animator(threading.Thread):
             self.agent.leds = core.find_leds() or self.agent.leds
         self.clock_offset = offset
         streaming = (light.get("encoding") == "hid" and core.hid_streams(light.get("hid_method"))
-                     and not core.uses_chip_effect(effect))
+                     and not core.chip_runs(effect, brightness))
         if light.get("encoding") == "hid" and not streaming:
             # Direct HID: the chip runs the effect itself. Send once per change, never per frame.
             key = ("hid", json.dumps(effect, sort_keys=True), brightness, light.get("hid_method"))

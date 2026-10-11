@@ -1192,70 +1192,18 @@ core.refresh_request_off()
 check(core.refresh_step(_t0) == "removed" and core.refresh_installed() is None and _rs[-1] == 1, "back to 120 Hz removes it and restarts")
 core.game_mode_active, core.reboot_device, core.boot_id, core.launch_self = _g
 core.REFRESH_STATE.unlink(missing_ok=True)
-# ---- 144 Hz in Desktop Mode: the edited screen description (1.4.1.12) ----
-def _dtd(c10, ha, hb, va, vb):
-    d = bytearray(18); d[0:2] = c10.to_bytes(2, "little"); d[2], d[3], d[4] = ha & 255, hb & 255, (ha >> 8) << 4 | hb >> 8
-    d[5], d[6], d[7] = va & 255, vb & 255, (va >> 8) << 4 | vb >> 8; d[8], d[9], d[10], d[17] = 48, 32, 0x35, 0x1A
-    return d
-_e = bytearray(128); _e[0:8] = b"\x00\xff\xff\xff\xff\xff\xff\x00"; _e[18], _e[19] = 1, 4
-_e[54:72] = _dtd(27120, 1920, 80, 1080, 50)
-_e[72:90] = bytes([0, 0, 0, 0xFD, 0, 48, 120, 1, 140, 28, 0, 0x0A] + [0x20] * 6)
-_e[90:108] = bytes([0, 0, 0, 0xFC, 0]) + b"TL070FVXS01-0"
-_e[108:126] = bytes([0, 0, 0, 0x10] + [0] * 14)
-core._edid_sum(_e)
-_e = bytes(_e)
-_o = core.edid_with_rate(_e, 144)
-check(core.edid_valid(_e) and core.edid_valid(_o) and len(_o) == 256 and core.edid_modes(_o) == [(1920, 1080, 120), (1920, 1080, 144)],
-      "the edited description keeps 120 Hz and adds 144 Hz, checksums right")
-check(_o[54:72] == _e[54:72] and _o[90:108] == _e[90:108] and _o[8:18] == _e[8:18],
-      "the panel's own mode, name and maker stay as they are (gamescope matches on them)")
-check(_o[72 + 5] == 48 and _o[72 + 6] == 144 and _o[72 + 9] * 10 >= 326, "adaptive sync covers 48 to 144 Hz")
-_t144 = [t for t in core.edid_timings(_o) if round(t["hz"]) == 144][0]
-check(144 <= _t144["hz"] < 144.1 and (_t144["htotal"], _t144["vtotal"]) == (2000, 1130),
-      "144 Hz uses the 120 Hz timing with a faster clock, like the Game Mode profile")
-_r = []
-for _bad in (_e[:100], _o, bytes(_e[:54]) + bytes(_dtd(13560, 1920, 80, 1080, 50)) + _e[72:]):
-    try:
-        core.edid_with_rate(_bad if _bad is not _e else _e)
-        _r.append(False)
-    except ValueError:
-        _r.append(True)
-check(all(_r), "it refuses unreadable, already edited or 60 Hz-only descriptions")
-_drm = Path(HOME) / "drm/card1-eDP-1"; _drm.mkdir(parents=True); (_drm / "edid").write_bytes(_e)
-core.DRM_ROOT = _drm.parent
-check(core.panel_edid() == _e and core.edid_build() == _o and core.EDID_ORIGINAL.read_bytes() == _e
-      and core.edid_setup_needed(), "builds from the panel's own copy; setup is needed once")
-(_drm / "edid").write_bytes(_o)
-check(core.edid_live() and core.edid_build() == _o and core.EDID_ORIGINAL.read_bytes() == _e,
-      "a rebuild while the edited copy is in use still starts from the panel's own copy")
-_cmd = core.edid_setup_cmd()
-check(_cmd.count("sudo ") == 1 and core.EDID_BIN in _cmd and core.EDID_SERVICE in _cmd and "enable" in _cmd
-      and "Before=display-manager.service" in core.EDID_UNIT, "one password installs the copy and its boot service")
-_sh = Path(HOME) / "edid.sh"; _sh.write_text(core.edid_override_sh())
-check(subprocess.run(["sh", "-n", str(_sh)]).returncode == 0 and str(core.EDID_FLAG) in core.edid_override_sh()
-      and '[ -f "$FLAG" ]' in core.edid_override_sh(), "the boot script is valid and only acts while 144 Hz is on")
-_g2 = (core.edid_ready, core.edid_live, core.queue_report, core.game_mode_active, core.reboot_device, core.boot_id, core.launch_self)
-_qr = []
-core.edid_ready = lambda: True
-core.edid_live = lambda: False
-core.queue_report = lambda *a, **k: _qr.append(a[1])
-core.game_mode_active = lambda: True
-core.reboot_device = lambda delay=3.0: None
-core.launch_self = lambda: True
-_boot = ["d1"]
-core.boot_id = lambda: _boot[0]
-core.refresh_request(144); core.refresh_step(_t0)
-check(core.EDID_FLAG.exists(), "a 144 Hz try switches Desktop Mode's copy on with it")
-_boot[0] = "d2"
-core.refresh_step(_t0 + 10)
-check(_qr and "Desktop Mode" in _qr[0], "a copy that didn't load is reported")
-core.refresh_step(_t0 + 10 + core.REFRESH_CONFIRM_S + 5)
-check(not core.EDID_FLAG.exists() and core.refresh_state()["status"] == "reverted", "no Keep: Desktop Mode's copy goes too")
-core.refresh_request(144); core.refresh_step(_t0); _boot[0] = "d3"; core.refresh_step(_t0 + 1); core.refresh_keep()
-core.refresh_request_off(); core.refresh_step(_t0 + 2)
-check(not core.EDID_FLAG.exists(), "Back to 120 Hz switches it off")
-core.edid_ready, core.edid_live, core.queue_report, core.game_mode_active, core.reboot_device, core.boot_id, core.launch_self = _g2
-core.REFRESH_STATE.unlink(missing_ok=True)
+# ---- 144 Hz is Game Mode only (1.4.1.13): 1.4.1.12's Desktop Mode switch is retired ----
+core.EDID_FLAG.parent.mkdir(parents=True, exist_ok=True); core.EDID_FLAG.write_text("on")
+core.refresh_step(_t0)
+check(not core.EDID_FLAG.exists(), "the Desktop Mode 144 Hz switch from 1.4.1.12 is turned off")
+check("VRR" in core.REFRESH_DISCLAIMER and "Game Mode only" in core.REFRESH_DISCLAIMER
+      and "REFRESH_NOTE" in core.QAM_INDEX_JS and "skipped frames" in core.QAM_INDEX_JS,
+      "the experimental note (VRR skips frames, Game Mode only) is in the app and the ••• panel")
+_sp = {"type": "spiral", "engine": "chip", "rainbow": True}
+check(core.chip_runs(_sp, 255) and not core.chip_runs(_sp, 128) and not core.chip_runs({"type": "static"}, 255),
+      "the chip's spiral runs at full brightness; dimmer, Ally Hub draws it so it really dims")
+_z = core.zone_frames(_sp, 1.0)
+check(len(set(_z)) > 1, "Ally Hub's copy of the chip spiral is still a rainbow across the zones")
 check(core.led_dim(255) == 1.0 and core.led_dim(0) == 0 and core.led_dim(128) < 0.25 and core.led_dim("x") == 1.0
       and core.led_gamma((255, 0, 0), core.led_dim(3)) == (1, 0, 0),
       "the brightness slider follows the eye (half = much dimmer), and very low stays on")
