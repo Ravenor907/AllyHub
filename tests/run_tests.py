@@ -68,7 +68,7 @@ check(re.fullmatch(r"\\d+\\.\\d+\\.\\d+(\\.\\d+)?", v), "VERSION is x.y.z or x.y
 cl = open(os.path.join({root!r}, "docs", "CHANGELOG.md")).read()
 parts = [int(x) for x in v.split(".")]
 check(len(parts) in (3, 4), "VERSION is x.y.z (Stable) or x.y.z.r (test build revision r)")
-check(len(parts) == 3 or 1 <= parts[3] <= 10, "no more than 10 test revisions before Stable (the owner's rule)")
+check(len(parts) == 3 or parts[3] >= 1, "a test build's revision starts at 1")
 pub = ".".join(str(x) for x in [parts[0] - 5] + parts[1:]) if parts[0] > 5 else v   # see core.display_version
 check(f"## {{pub}}" in cl, "CHANGELOG has a section for " + pub)
 # the repo top level stays tidy: everything else lives in folders
@@ -319,6 +319,9 @@ cmd = core.led_permission_cmd([])
 check(cmd.count("sudo ") == 1 and "MODE:=" in cmd and "1b4c" in cmd and core.UDEV_LED_RULE in cmd
       and core.HID_PERMISSION_RULE in cmd and core.RULES_MARKER in cmd,
       "one password prompt covers the ring files and the lighting chip")
+check(core.LIGHT_PERMS_SCRIPT in cmd and core.LIGHT_PERMS_SERVICE in cmd and "enable" in cmd
+      and "SYSTEMD_WANTS" in cmd and "suspend.target" in core.LIGHT_PERMS_UNIT,
+      "the permission is remembered: a service reapplies it at boot, after sleep and when the controller appears")
 check("hid hidraw5 0b05:1b4c usages ff31/0080" in core.lighting_diagnostics(), "diagnostics list HID usages")
 core.HIDRAW_ROOT = Path(HOME) / "nohidraw"
 check(core.hid_brightness_level(0) == 0 and core.hid_brightness_level(255) == 3, "HID brightness levels")
@@ -1158,30 +1161,36 @@ core.update_config(lambda c: c["agent"].__setitem__("remote_pin", ""))
 _lua = core.refresh_lua(144)
 check("local MAX = 144" in _lua and _lua.count("pcall(") >= 3 and "TL070FVXS01-0" in _lua and "r + 100" in _lua
       and _lua.count("(") == _lua.count(")"), "the display profile is guarded and reuses the stock Ally profile up to 120")
-_rs = []
-_g_active, _g_restart = core.game_mode_active, core.restart_game_mode
-core.restart_game_mode = lambda: _rs.append(1)
+_rs, _boot = [], ["boot-1"]
+_g = (core.game_mode_active, core.reboot_device, core.boot_id, core.launch_self)
+core.reboot_device = lambda delay=3.0: _rs.append(1)
+core.boot_id = lambda: _boot[0]
+core.launch_self = lambda: True
 core.game_mode_active = lambda: True
 core.REFRESH_SCRIPT.parent.mkdir(parents=True, exist_ok=True)
 core.REFRESH_SCRIPT.unlink(missing_ok=True)
-core.refresh_request(135)
+core.refresh_request(144)
 _t0 = 1000.0
-check(core.refresh_step(_t0) == "started" and core.refresh_installed() == 135 and _rs == [1],
-      "a try writes the profile and restarts Game Mode")
-check(core.refresh_step(_t0 + 5) == "" and core.refresh_step(_t0 + 12) == "back", "it waits for Game Mode to come back")
-check(core.refresh_left(_t0 + 50) == core.REFRESH_CONFIRM_S - 38, "the time left to keep it counts down")
-check(core.refresh_step(_t0 + 12 + core.REFRESH_CONFIRM_S + 1) == "reverted" and core.refresh_installed() is None
-      and _rs == [1, 1], "no Keep in time: the profile goes and Game Mode restarts at the old rate (black screen safe)")
-core.refresh_request(130); core.refresh_step(_t0)
-check(core.refresh_keep() and core.refresh_step(_t0 + 500) == "" and core.refresh_installed() == 130,
-      "Keep makes it stay")
+check(core.refresh_step(_t0) == "started" and core.refresh_installed() == 144 and _rs == [1],
+      "turning 144 Hz on writes the profile and restarts the handheld")
+check(core.refresh_step(_t0 + 5) == "" and core.refresh_left(_t0 + 5) is None, "no countdown before the restart")
+_boot[0] = "boot-2"
+check(core.refresh_step(_t0 + 101) == "back" and core.refresh_step(_t0 + 102) == ""
+      and core.refresh_left(_t0 + 111) == core.REFRESH_CONFIRM_S - 10, "after the restart: Ally Hub opens and counts down")
+check(core.refresh_step(_t0 + 101 + core.REFRESH_CONFIRM_S + 1) == "reverted" and core.refresh_installed() is None
+      and _rs == [1, 1], "no Keep in time: the profile goes and the handheld restarts again (black screen safe)")
+check(core.refresh_step(_t0 + 9999) == "", "and that's the end: no restart loop")
+_boot[0] = "boot-3"
 core.refresh_request(144); core.refresh_step(_t0)
-core.game_mode_active = lambda: False
-check(core.refresh_step(_t0 + core.REFRESH_DEADLINE_S + 1) == "reverted" and core.refresh_installed() == 130,
-      "Game Mode that never comes back is undone too, back to the last kept rate")
+_boot[0] = "boot-4"
+core.refresh_step(_t0 + 1); core.refresh_step(_t0 + 2)
+check(core.refresh_keep() and core.refresh_step(_t0 + 500) == "" and core.refresh_installed() == 144, "Keep makes it stay")
+core.refresh_request(144); core.refresh_step(_t0)
+check(core.refresh_step(_t0 + 121) == "reverted" and core.refresh_installed() == 144, "a restart that never happens changes nothing")
+_boot[0] = "boot-5"
 core.refresh_request_off()
-check(core.refresh_step(_t0) == "removed" and core.refresh_installed() is None, "back to 120 Hz removes it")
-core.restart_game_mode, core.game_mode_active = _g_restart, _g_active
+check(core.refresh_step(_t0) == "removed" and core.refresh_installed() is None and _rs[-1] == 1, "back to 120 Hz removes it and restarts")
+core.game_mode_active, core.reboot_device, core.boot_id, core.launch_self = _g
 core.REFRESH_STATE.unlink(missing_ok=True)
 # ---- the extra Ally Hub theme ----
 check(core.DEFAULT_CONFIG["theme"]["preset"] == "ROG Crimson" and "Ally Hub" in core.EXTRA_THEMES

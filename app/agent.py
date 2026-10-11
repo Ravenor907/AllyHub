@@ -806,7 +806,7 @@ class Agent:
             return {"ok": ok, "message": "Kept. Steam's slider now goes up to 144 Hz." if ok else "Nothing to keep"}
         if name == "refresh_off":
             core.refresh_request_off()
-            return {"ok": True, "message": "Going back to 120 Hz: Game Mode restarts."}
+            return {"ok": True, "message": "Going back to 120 Hz: your handheld restarts."}
         if name == "speed":
             try:
                 v = max(0.1, min(4.0, float(data.get("value", 1.0))))

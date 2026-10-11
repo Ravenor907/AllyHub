@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.4.1.11
+
+- **Lighting stops asking for your password.** The permission is now remembered: a small system service puts it
+  back at every boot, after sleep and whenever the controller reappears. Run the lighting permission once more
+  (Checkup → Fix or Test lights) to set it up.
+- **144 Hz now restarts the handheld**, because the screen only picks it up on a fresh start. After the restart
+  Ally Hub opens by itself with the countdown. No Keep in time and it goes back to 120 Hz with one more restart.
+
 ## 1.4.1.10
 
 - **144 Hz is one switch now** (Games → Performance, Advanced): "Turn on 144 Hz" lets the screen run from 48 up to
