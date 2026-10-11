@@ -274,6 +274,16 @@ writes the file and REBOOTS (restarting gamescope-session didn't load it: the ow
 comes within `REFRESH_CONFIRM_S`, or `REFRESH_DEADLINE_S` overall. One revert per trial: no reboot loops.
 Keep: the ••• panel (`refresh_keep`) or the Performance card. Never let the GUI restart Game Mode itself.
 
+**144 Hz in Desktop Mode (1.4.1.12, the owner's call):** KDE lists only the rates in the panel's EDID. `edid_with_rate`
+copies the panel's EDID (`EDID_ORIGINAL`, never an edited one), adds the 120 Hz timing with a 144 Hz clock in a new
+CTA block, and widens the range descriptor (and DisplayID range blocks) to 48-144, so VRR covers it in both modes.
+Never touch name/maker/product: gamescope matches profiles on them. `edid_setup_cmd` (key `edid-setup`, one
+password) installs `EDID_BIN` + `allyhub-edid.service`, which writes it to debugfs `edid_override` +
+`trigger_hotplug` at boot ONLY while `EDID_FLAG` (user's config dir) exists; the trial sets/clears the flag, so undo
+is the same reboot. `edid_live` checks sysfs after boot; a miss files a report. Owner's Monitor OC test on 1.4.1.11:
+144 Hz with VRR on skipped frames, VRR off was clean (range still 48-120 then).
+The brightness slider goes through `led_dim` (`LED_DIM_CURVE`) for streamed frames: linear drive barely dimmed.
+
 **Lighting permission is remembered (1.4.1.11, the owner's call: no repeat password prompts).** `led_permission_cmd`
 also installs `allyhub-lighting-perms.service` (`LIGHT_PERMS_SCRIPT`/`LIGHT_PERMS_UNIT`), run at boot, after sleep and
 by the leds udev rule (`SYSTEMD_WANTS`). The uninstaller removes it.

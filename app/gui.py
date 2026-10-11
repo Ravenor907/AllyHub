@@ -5309,9 +5309,6 @@ class _PerformanceRefresh:
 
     def refresh_try(self, *_args):
         hz = core.REFRESH_MAX
-        if not GAMEMODE:
-            msg_info(self, APP_NAME, "Try this in Game Mode: the handheld restarts and the test runs in Game Mode.")
-            return
         if not core.agent_running():
             msg_warn(self, APP_NAME, "The background helper has to be on (Settings → General): it's what undoes "
                                      "this if the screen goes black.")
@@ -5322,8 +5319,27 @@ class _PerformanceRefresh:
                          "Do nothing and it goes back by itself with another restart, even on a black screen.\n\n"
                          "Save your game first."):
             return
-        core.refresh_request(hz)
+        # Desktop Mode needs a small boot service (one password, the first time only)
+        if core.edid_setup_needed():
+            if self.hub.needs_password():
+                return
+            cmd = core.edid_setup_cmd()
+            if cmd:
+                self.hub.runner.submit("Set up 144 Hz for Desktop Mode", cmd, "edid-setup")
+                return                                   # job_done starts the restart
+        self._refresh_go()
+
+    def _refresh_go(self):
+        core.refresh_request(core.REFRESH_MAX)
         self.hub.toast("Restarting your handheld…", 5000)
+
+    def refresh_desktop_done(self, ok: bool):
+        if ok and core.edid_ready():
+            self._refresh_go()
+        else:
+            msg_warn(self, APP_NAME, "Desktop Mode couldn't be set up, so 144 Hz stays Game Mode only for now. "
+                                     "Tap Turn on 144 Hz again to try it without Desktop Mode.")
+            self.refresh_update()
 
     def refresh_keep(self, *_args):
         self.hub.toast("Kept." if core.refresh_keep() else "Nothing to keep right now.")
@@ -5341,7 +5357,9 @@ class _PerformanceRefresh:
         self.btn_refresh_keep.setVisible(trial)
         self.btn_refresh_off.setVisible(bool(have) and not trial)
         self.btn_refresh_try.setEnabled(not trial and st.get("status") != "pending")
-        self.btn_refresh_try.setVisible(not have or trial)
+        desk = bool(have) and not trial and not core.EDID_FLAG.exists() and core.edid_setup_needed()
+        self.btn_refresh_try.setText("Add 144 Hz to Desktop Mode" if desk else "Turn on 144 Hz")
+        self.btn_refresh_try.setVisible(not have or trial or desk)
         if trial and core.refresh_left() is None:
             text = "Restarting to load 144 Hz…"
         elif trial:
@@ -5350,6 +5368,9 @@ class _PerformanceRefresh:
             text = "144 Hz wasn't kept, so the screen went back to 120 Hz."
         elif have:
             text = f"On: the screen runs from 48 up to {have} Hz (Steam's refresh slider goes to {have})."
+            if core.EDID_FLAG.exists():
+                text += (" Desktop Mode: pick it under System Settings → Display Configuration → Refresh rate."
+                         if core.edid_live() else " Desktop Mode didn't pick it up yet (reported automatically).")
         else:
             text = "Off: the screen's normal 48 to 120 Hz."
         self.refresh_status.setText(text)
@@ -5382,8 +5403,9 @@ class PerformancePage(QWidget, _PerformanceRefresh):
         # black screen. All in Game Mode: Ally Hub reopens after the restart with a live countdown (Hub.check_refresh)
         rcard, rv = titled_card(
             "monitor-play", "#a855f7", "144 Hz (experimental)",
-            "Lets the screen run from 48 up to 144 Hz instead of 120. Your handheld restarts, Ally Hub opens with a "
-            "countdown: keep it, or it undoes itself with another restart.")
+            "Lets the screen run from 48 up to 144 Hz instead of 120, in Game Mode and Desktop Mode, with adaptive sync "
+            "across the whole range. Your handheld restarts, Ally Hub opens with a countdown: keep it, or it undoes "
+            "itself with another restart.")
         rr = QHBoxLayout()
         self.btn_refresh_try = button("Turn on 144 Hz", self.refresh_try, "primary")
         self.btn_refresh_keep = button("Keep 144 Hz", self.refresh_keep, "primary")
@@ -7370,6 +7392,8 @@ class Hub(QMainWindow):
             self.lighting.access_job_done(code == 0)
         if key in ("boost-perms", "tuneup", "tuneup-undo"):
             self.performance.job_done(key, code == 0)
+        elif key == "edid-setup":
+            self.performance.refresh_desktop_done(code == 0)
         if key == "nonsteamlaunchers":
             self.launchers.job_done(code == 0)
         elif key == "nsl-uninstall":

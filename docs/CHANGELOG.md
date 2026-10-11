@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.4.1.12
+
+- **144 Hz in Desktop Mode too.** Turning on 144 Hz now also adds it to System Settings → Display Configuration →
+  Refresh rate, and adaptive sync covers the whole 48 to 144 Hz range in both modes. The first time it asks for your
+  password once. Already on 144 Hz? Tap "Add 144 Hz to Desktop Mode" on the card. Same restart, countdown and
+  automatic undo as before.
+- **Ring brightness dims for real.** The brightness slider now follows how your eyes see the lights, so lower
+  settings get much dimmer (the spiral and every other moving effect).
+
 ## 1.4.1.11
 
 - **Lighting stops asking for your password.** The permission is now remembered: a small system service puts it
