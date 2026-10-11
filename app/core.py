@@ -325,7 +325,8 @@ def service_active(name: str, user: bool = False) -> bool:
 # everything back if the owner doesn't press Keep in time: a black screen or a Game Mode that won't start undoes itself.
 REFRESH_SCRIPT = HOME / ".config/gamescope/scripts/90-allyhub-refresh.lua"
 REFRESH_STATE = DATA_DIR / "refresh_trial.json"
-REFRESH_STEPS = (125, 130, 135, 140, 144)
+REFRESH_MAX = 144            # one setting (the owner): the panel's range becomes 48-144 Hz
+REFRESH_STEPS = (REFRESH_MAX,)
 REFRESH_CONFIRM_S = 90        # after Game Mode is back: time to pick the rate in Steam and press Keep
 REFRESH_DEADLINE_S = 240      # from the start, whatever happens (Game Mode stuck or crashing)
 GAME_MODE_UNIT = "gamescope-session.service"
@@ -423,6 +424,20 @@ def restart_game_mode() -> None:
         pass
 
 
+def launch_self() -> bool:
+    """Open Ally Hub from the Game Mode library (so the 144 Hz countdown shows right after Game Mode restarts)."""
+    me = next((s for s in steam_shortcuts() if is_self_shortcut(s)), None)
+    if not me or not shutil.which("steam"):
+        return False
+    gameid = (int(me["appid"]) << 32) | 0x02000000
+    try:
+        subprocess.Popen(["steam", f"steam://rungameid/{gameid}"], stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+        return True
+    except OSError:
+        return False
+
+
 def refresh_step(now: float = None) -> str:
     """One look by the agent (every second). Returns what it did: "", "started", "back", "kept", "reverted",
     "removed"."""
@@ -447,6 +462,8 @@ def refresh_step(now: float = None) -> str:
     if not st.get("back") and now - st.get("started", now) > 10 and game_mode_active():
         st["back"] = now
         write_json(REFRESH_STATE, st)
+        if now - st.get("started", now) < 60:
+            threading.Timer(8.0, launch_self).start()      # Steam needs a moment before it takes a launch
         return "back"
     expired = (st.get("back") and now - st["back"] > REFRESH_CONFIRM_S) or now - st.get("started", now) > REFRESH_DEADLINE_S
     if expired:
@@ -3770,7 +3787,7 @@ def proton_log(appid) -> str:
 # only talks to the agent's local socket (CONTROL_SOCK, this user only). Bump QAM_VERSION when they change.
 # ==========================================================================
 
-QAM_VERSION = "1.0.4"
+QAM_VERSION = "1.0.5"
 QAM_DIR = HOME / "homebrew/plugins/AllyHub"
 QAM_STAGE = DATA_DIR / "qam-plugin"
 QAM_PLUGIN_JSON = r'''{
@@ -3939,10 +3956,14 @@ function Content() {
 
   const sections = [];
   if (s.refresh && s.refresh.status === "trial") {
-    sections.push(h(PanelSection, { title: "Higher refresh rate", key: "refresh" },
-      h(PanelSectionRow, null, h(Field, { focusable: true, label: `Up to ${s.refresh.max} Hz`,
-        description: `Pick the rate with Steam's refresh slider. If the picture is good, tap Keep. Going back to the old rate in ${s.refresh.left} s.` })),
-      h(PanelSectionRow, null, h(ButtonItem, { layout: "below", onClick: () => act("refresh_keep") }, "Keep it"))));
+    sections.push(h(PanelSection, { title: `Testing ${s.refresh.max} Hz`, key: "refresh" },
+      h(PanelSectionRow, null, h(Field, { focusable: true, label: `Going back to 120 Hz in ${s.refresh.left} s`,
+        description: "Set Steam's refresh slider (Performance tab) to the top. Picture good? Keep it." })),
+      h(PanelSectionRow, null, h(ButtonItem, { layout: "below", onClick: () => act("refresh_keep") }, "Keep 144 Hz")),
+      h(PanelSectionRow, null, h(ButtonItem, { layout: "below", onClick: () => act("refresh_off") }, "Undo now"))));
+  } else if (s.refresh && s.refresh.on) {
+    sections.push(h(PanelSection, { title: "Refresh rate", key: "refresh" },
+      h(PanelSectionRow, null, h(ButtonItem, { layout: "below", onClick: () => act("refresh_off") }, "Back to 120 Hz"))));
   }
   sections.push(h(PanelSection, { key: "status" }, h(PanelSectionRow, null, Hero(s))));
 

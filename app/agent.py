@@ -787,7 +787,7 @@ class Agent:
             "backup": self.ludusavi_ready(),
             "backup_running": self.save_proc is not None,
             "refresh": {"status": core.refresh_state().get("status"), "max": core.refresh_state().get("max"),
-                        "left": core.refresh_left()},
+                        "left": core.refresh_left(), "on": bool(core.refresh_installed())},
         }
 
     def ludusavi_ready(self) -> bool:
@@ -803,7 +803,10 @@ class Agent:
     def qam_action(self, name: str, data: dict) -> dict:
         if name == "refresh_keep":
             ok = core.refresh_keep()
-            return {"ok": ok, "message": "Kept. Steam's slider now goes up to this rate." if ok else "Nothing to keep"}
+            return {"ok": ok, "message": "Kept. Steam's slider now goes up to 144 Hz." if ok else "Nothing to keep"}
+        if name == "refresh_off":
+            core.refresh_request_off()
+            return {"ok": True, "message": "Going back to 120 Hz: Game Mode restarts."}
         if name == "speed":
             try:
                 v = max(0.1, min(4.0, float(data.get("value", 1.0))))
