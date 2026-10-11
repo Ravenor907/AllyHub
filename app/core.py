@@ -328,8 +328,8 @@ REFRESH_SCRIPT = HOME / ".config/gamescope/scripts/90-allyhub-refresh.lua"
 REFRESH_STATE = DATA_DIR / "refresh_trial.json"
 REFRESH_MAX = 144            # one setting (the owner): the panel's range becomes 48-144 Hz
 REFRESH_STEPS = (REFRESH_MAX,)
-REFRESH_DISCLAIMER = ("Experimental: 144 Hz may have issues. Adaptive sync (VRR) causes skipped frames at 144 Hz, so "
-                      "keep VRR off. Made for Game Mode only for now.")
+REFRESH_DISCLAIMER = ("Experimental: you may experience issues at 144 Hz. With adaptive sync (VRR) on you may see "
+                      "skipped frames, and the touch screen may not respond. Made for Game Mode only for now.")
 REFRESH_CONFIRM_S = 90        # after Game Mode is back: time to pick the rate in Steam and press Keep
 REFRESH_DEADLINE_S = 240      # from the start, whatever happens (Game Mode stuck or crashing)
 GAME_MODE_UNIT = "gamescope-session.service"
@@ -3886,7 +3886,7 @@ def proton_log(appid) -> str:
 # only talks to the agent's local socket (CONTROL_SOCK, this user only). Bump QAM_VERSION when they change.
 # ==========================================================================
 
-QAM_VERSION = "1.0.6"
+QAM_VERSION = "1.0.7"
 QAM_DIR = HOME / "homebrew/plugins/AllyHub"
 QAM_STAGE = DATA_DIR / "qam-plugin"
 QAM_PLUGIN_JSON = r'''{
@@ -4054,7 +4054,7 @@ function Content() {
   }
 
   const sections = [];
-  const REFRESH_NOTE = "Experimental, may have issues. VRR causes skipped frames at 144 Hz: keep it off. Game Mode only for now.";
+  const REFRESH_NOTE = "You may experience issues: skipped frames with VRR on, and the touch screen may not respond. Game Mode only for now.";
   if (s.refresh && s.refresh.status === "trial" && s.refresh.left !== null) {
     sections.push(h(PanelSection, { title: `Testing ${s.refresh.max} Hz`, key: "refresh" },
       h(PanelSectionRow, null, h(Field, { focusable: true, label: `Going back to 120 Hz in ${s.refresh.left} s`,
