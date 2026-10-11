@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.4.1.9
+
+- **Experimental: higher refresh rate** (Games → Performance, Advanced). Lets the screen go past 120 Hz in steps up
+  to 144 Hz. Game Mode restarts, you pick the rate with Steam's refresh slider and tap Keep in Ally Hub's ••• panel
+  within 90 seconds. Do nothing and it goes back by itself, even on a black screen. Update the ••• panel from
+  Games → Game settings first.
+
 ## 1.4.1.8
 
 Security fixes from a full review:

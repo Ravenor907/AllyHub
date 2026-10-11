@@ -5304,7 +5304,55 @@ BOOST_WORDS = {"performance": "full performance", "balance_performance": "perfor
 TUNE_PILLS = {"on": ("On", "on"), "off": ("Off", "off"), "na": ("Skip", "off")}
 
 
-class PerformancePage(QWidget):
+class _PerformanceRefresh:
+    """The experimental higher-refresh card's actions (mixed into PerformancePage)."""
+
+    def refresh_try(self, *_args):
+        hz = core.REFRESH_STEPS[self.refresh_pick.currentIndex()]
+        if not GAMEMODE:
+            msg_info(self, APP_NAME, "Try this in Game Mode: it restarts Game Mode to load the new rates.")
+            return
+        if not core.agent_running():
+            msg_warn(self, APP_NAME, "The background helper has to be on (Settings → General): it's what undoes "
+                                     "this if the screen goes black.")
+            return
+        if not ask(self, f"Try up to {hz} Hz?\n\nExperimental: the screen is made for 120 Hz, so it may flicker or "
+                         "go black. Game Mode restarts now. Then open Steam's ••• menu, set the refresh slider, and "
+                         "if the picture is good tap Keep it in Ally Hub's ••• panel within 90 seconds.\n\n"
+                         "Do nothing and it goes back by itself, even on a black screen."):
+            return
+        core.refresh_request(hz)
+        self.hub.toast("Restarting Game Mode…", 5000)
+
+    def refresh_keep(self, *_args):
+        self.hub.toast("Kept." if core.refresh_keep() else "Nothing to keep right now.")
+        self.refresh_update()
+
+    def refresh_off(self, *_args):
+        if not ask(self, "Go back to the normal 120 Hz? Game Mode restarts."):
+            return
+        core.refresh_request_off()
+        self.hub.toast("Restarting Game Mode…", 5000)
+
+    def refresh_update(self):
+        st, have = core.refresh_state(), core.refresh_installed()
+        trial = st.get("status") == "trial"
+        self.btn_refresh_keep.setVisible(trial)
+        self.btn_refresh_off.setVisible(bool(have) and not trial)
+        self.btn_refresh_try.setEnabled(not trial and st.get("status") != "pending")
+        if trial:
+            text = f"Trying up to {st.get('max')} Hz: {core.refresh_left()} s left to keep it."
+        elif st.get("status") == "reverted":
+            text = (f"Up to {st.get('tried')} Hz wasn't kept, so it went back"
+                    + (f" to up to {have} Hz." if have else " to 120 Hz.") + " Try a lower step.")
+        elif have:
+            text = f"On: Steam's refresh slider goes up to {have} Hz."
+        else:
+            text = "Off: the screen's normal 120 Hz."
+        self.refresh_status.setText(text)
+
+
+class PerformancePage(QWidget, _PerformanceRefresh):
     def __init__(self, hub):
         super().__init__()
         self.hub = hub
@@ -5326,6 +5374,27 @@ class PerformancePage(QWidget):
         row.addStretch()
         cv.addLayout(row)
         v.addWidget(card)
+
+        # experimental (1.4.1.9, the owner's call): the panel above 120 Hz, with an undo that works on a black screen
+        rcard, rv = titled_card(
+            "monitor-play", "#a855f7", "Higher refresh rate (experimental)",
+            "Pushes the screen past 120 Hz. Game Mode restarts, then you pick the rate with Steam's refresh slider "
+            "and tap Keep in the ••• panel within 90 seconds, or it goes back by itself.")
+        rr = QHBoxLayout()
+        self.refresh_pick = QComboBox()
+        self.refresh_pick.addItems([f"Up to {hz} Hz" for hz in core.REFRESH_STEPS])
+        self.refresh_pick.setCurrentIndex(1)
+        rr.addWidget(self.refresh_pick)
+        self.btn_refresh_try = button("Try it", self.refresh_try, "primary")
+        self.btn_refresh_keep = button("Keep it", self.refresh_keep, "primary")
+        self.btn_refresh_off = button("Back to 120 Hz", self.refresh_off)
+        for b in (self.btn_refresh_try, self.btn_refresh_keep, self.btn_refresh_off):
+            rr.addWidget(b)
+        rr.addStretch()
+        rv.addLayout(rr)
+        self.refresh_status = label("", "cardMeta", wrap=True)
+        rv.addWidget(self.refresh_status)
+        v.addWidget(adv(rcard))
 
         tune_head = label("TUNE-UP", "section")
         tcard, tv = titled_card(
@@ -5373,6 +5442,7 @@ class PerformancePage(QWidget):
             self._timer.stop()
 
     def refresh(self):
+        self.refresh_update()
         self.refresh_boost()
         self.refresh_tuneup()
         self.refresh_game_env()

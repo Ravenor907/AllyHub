@@ -1154,6 +1154,35 @@ check(_cfgm and _cj["agent"]["remote_pin"] == "" and _stt.S_IMODE(_snap.stat().s
       and _stt.S_IMODE(core.SETTINGS_SNAP_DIR.stat().st_mode) == 0o700,
       "settings backups are private and never hold the phone remote's PIN")
 core.update_config(lambda c: c["agent"].__setitem__("remote_pin", ""))
+# ---- higher refresh rate (experimental, 1.4.1.9) ----
+_lua = core.refresh_lua(144)
+check("local MAX = 144" in _lua and _lua.count("pcall(") >= 3 and "TL070FVXS01-0" in _lua and "r + 100" in _lua
+      and _lua.count("(") == _lua.count(")"), "the display profile is guarded and reuses the stock Ally profile up to 120")
+_rs = []
+_g_active, _g_restart = core.game_mode_active, core.restart_game_mode
+core.restart_game_mode = lambda: _rs.append(1)
+core.game_mode_active = lambda: True
+core.REFRESH_SCRIPT.parent.mkdir(parents=True, exist_ok=True)
+core.REFRESH_SCRIPT.unlink(missing_ok=True)
+core.refresh_request(135)
+_t0 = 1000.0
+check(core.refresh_step(_t0) == "started" and core.refresh_installed() == 135 and _rs == [1],
+      "a try writes the profile and restarts Game Mode")
+check(core.refresh_step(_t0 + 5) == "" and core.refresh_step(_t0 + 12) == "back", "it waits for Game Mode to come back")
+check(core.refresh_left(_t0 + 50) == core.REFRESH_CONFIRM_S - 38, "the time left to keep it counts down")
+check(core.refresh_step(_t0 + 12 + core.REFRESH_CONFIRM_S + 1) == "reverted" and core.refresh_installed() is None
+      and _rs == [1, 1], "no Keep in time: the profile goes and Game Mode restarts at the old rate (black screen safe)")
+core.refresh_request(130); core.refresh_step(_t0)
+check(core.refresh_keep() and core.refresh_step(_t0 + 500) == "" and core.refresh_installed() == 130,
+      "Keep makes it stay")
+core.refresh_request(144); core.refresh_step(_t0)
+core.game_mode_active = lambda: False
+check(core.refresh_step(_t0 + core.REFRESH_DEADLINE_S + 1) == "reverted" and core.refresh_installed() == 130,
+      "Game Mode that never comes back is undone too, back to the last kept rate")
+core.refresh_request_off()
+check(core.refresh_step(_t0) == "removed" and core.refresh_installed() is None, "back to 120 Hz removes it")
+core.restart_game_mode, core.game_mode_active = _g_restart, _g_active
+core.REFRESH_STATE.unlink(missing_ok=True)
 # ---- the extra Ally Hub theme ----
 check(core.DEFAULT_CONFIG["theme"]["preset"] == "ROG Crimson" and "Ally Hub" in core.EXTRA_THEMES
       and list(core.THEMES)[-1] == "Ally Hub" and core.theme_palette({"preset": "nope"})["accent"] == "#e11d48",
