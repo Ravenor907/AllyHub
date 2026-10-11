@@ -328,6 +328,8 @@ REFRESH_SCRIPT = HOME / ".config/gamescope/scripts/90-allyhub-refresh.lua"
 REFRESH_STATE = DATA_DIR / "refresh_trial.json"
 REFRESH_MAX = 144            # one setting (the owner): the panel's range becomes 48-144 Hz
 REFRESH_STEPS = (REFRESH_MAX,)
+REFRESH_DISCLAIMER = ("Experimental: 144 Hz may have issues. Adaptive sync (VRR) causes skipped frames at 144 Hz, so "
+                      "keep VRR off. Made for Game Mode only for now.")
 REFRESH_CONFIRM_S = 90        # after Game Mode is back: time to pick the rate in Steam and press Keep
 REFRESH_DEADLINE_S = 240      # from the start, whatever happens (Game Mode stuck or crashing)
 GAME_MODE_UNIT = "gamescope-session.service"
@@ -388,7 +390,7 @@ def refresh_request(max_hz: int) -> None:
     """Ask the agent to try a new top rate: it keeps the current file to fall back to, writes the new one and
     restarts Game Mode (the agent does it, so the restart doesn't cut off the one asking)."""
     write_json(REFRESH_STATE, {"status": "pending", "max": int(max_hz), "asked": time.time(),
-                               "prev_lua": read_text(REFRESH_SCRIPT) or "", "prev_edid": EDID_FLAG.exists()})
+                               "prev_lua": read_text(REFRESH_SCRIPT) or ""})
 
 
 def refresh_keep() -> bool:
@@ -455,19 +457,18 @@ def refresh_step(now: float = None) -> str:
     so a try restarts the handheld; after the restart Ally Hub opens with a countdown, and without Keep the old
     profile comes back with another restart. Returns what it did: "", "started", "back", "reverted", "removed"."""
     now = now or time.time()
+    clear_desktop_144()
     st = refresh_state()
     status = st.get("status")
     if status == "pending":
         _write_refresh_lua(refresh_lua(st.get("max", REFRESH_MAX)))
-        set_edid_flag(edid_ready())                      # Desktop Mode too, when its boot service is set up
-        st.update(status="trial", started=now, boot=boot_id(), back=None, seen=None, edid=EDID_FLAG.exists())
+        st.update(status="trial", started=now, boot=boot_id(), back=None, seen=None)
         write_json(REFRESH_STATE, st)
         app_log("refresh", f"trying {st.get('max')} Hz: restarting")
         reboot_device()
         return "started"
     if status == "remove":
         _write_refresh_lua("")
-        set_edid_flag(False)
         write_json(REFRESH_STATE, {"status": "off"})
         app_log("refresh", "back to 120 Hz: restarting")
         reboot_device()
@@ -477,19 +478,11 @@ def refresh_step(now: float = None) -> str:
     if st.get("boot") == boot_id():                      # still before the restart
         if now - st.get("started", now) > 120:           # the restart never happened: nothing was applied
             _write_refresh_lua(st.get("prev_lua") or "")
-            set_edid_flag(bool(st.get("prev_edid")))
             write_json(REFRESH_STATE, {"status": "reverted", "tried": st.get("max"), "at": now})
             return "reverted"
         return ""
     if not st.get("seen"):
         st["seen"] = now
-        st["desktop"] = edid_live() if st.get("edid") else None
-        write_json(REFRESH_STATE, st)
-        if st.get("edid") and not st["desktop"]:
-            _, journal = run_quiet(["journalctl", "-b", "-u", EDID_SERVICE.rsplit("/", 1)[-1], "--no-pager"], timeout=8)
-            queue_report("refresh", "144 Hz screen description didn't load (Desktop Mode stays at 120)",
-                         f"Screen: {edid_summary()}", _fingerprint("refresh", "edid-not-live"),
-                         attachments=[("Boot service log", journal or "(empty)")])
     if not st.get("back") and (game_mode_active() or now - st["seen"] > 60):
         st["back"] = now
         write_json(REFRESH_STATE, st)
@@ -498,7 +491,6 @@ def refresh_step(now: float = None) -> str:
     expired = (st.get("back") and now - st["back"] > REFRESH_CONFIRM_S) or now - st["seen"] > REFRESH_DEADLINE_S
     if expired:
         _write_refresh_lua(st.get("prev_lua") or "")
-        set_edid_flag(bool(st.get("prev_edid")))
         write_json(REFRESH_STATE, {"status": "reverted", "tried": st.get("max"), "at": now})
         app_log("refresh", f"no Keep in time: {st.get('max')} Hz undone, restarting")
         reboot_device()
@@ -518,322 +510,18 @@ def refresh_left(now: float = None) -> Optional[int]:
     return max(0, int(left))
 
 
-# --------------------------------------------------------------------------
-# 144 Hz in Desktop Mode (1.4.1.12, the owner's call): KDE lists the rates the screen's own description (EDID) offers,
-# which stop at 120. While 144 Hz is on, a boot service hands the kernel an edited copy: the panel's 120 Hz timing
-# with the pixel clock raised to 144 Hz (the same math as the Game Mode profile's calc_max_clock), added as an extra
-# mode, and the adaptive sync range widened to 48-144. It only applies while EDID_FLAG exists (the agent sets and
-# clears it with the trial), so undo is the same restart as the Game Mode part. Never edit the panel's name, maker
-# or product: gamescope matches its display profiles on them.
-# --------------------------------------------------------------------------
-DRM_ROOT = Path("/sys/class/drm")
-EDID_BIN = "/etc/allyhub/edid-144.bin"
-EDID_SCRIPT = "/etc/allyhub/edid-override.sh"
-EDID_SERVICE = "/etc/systemd/system/allyhub-edid.service"
+
+# 1.4.1.12 briefly tried 144 Hz in Desktop Mode through an edited screen description; the owner chose Game Mode only
+# (1.4.1.13). Its boot service only acts while EDID_FLAG exists, so clearing the flag switches it off for good.
 EDID_FLAG = CONFIG_DIR / "edid-144"
-EDID_STAGED = DATA_DIR / "edid-144.bin"
-EDID_ORIGINAL = DATA_DIR / "edid-panel.bin"     # the panel's own copy, kept so a rebuild never edits an edited one
-EDID_VRR_MIN = 48
 
 
-def _edid_sum(block: bytearray) -> None:
-    block[127] = (-sum(block[:127])) & 0xFF
-
-
-def _dtd_decode(d: bytes) -> Optional[dict]:
-    clk = int.from_bytes(d[0:2], "little") * 10_000
-    if not clk:
-        return None
-    ha, hb = d[2] | (d[4] & 0xF0) << 4, d[3] | (d[4] & 0x0F) << 8
-    va, vb = d[5] | (d[7] & 0xF0) << 4, d[6] | (d[7] & 0x0F) << 8
-    if not (ha and va and hb and vb):
-        return None
-    return {"clock": clk, "w": ha, "h": va, "htotal": ha + hb, "vtotal": va + vb,
-            "hz": clk / ((ha + hb) * (va + vb)), "raw": bytes(d)}
-
-
-def _displayid_timing(p: bytes, khz: bool) -> Optional[dict]:
-    """DisplayID type I (1.3) / type VII (2.0) timing: 20 bytes, every size stored minus one."""
-    if len(p) < 20:
-        return None
-    clk = (int.from_bytes(p[0:3], "little") + 1) * (1000 if khz else 10_000)
-    v = lambda o: int.from_bytes(p[o:o + 2], "little") & 0x7FFF
-    ha, hb, hso, hsw = v(4) + 1, v(6) + 1, v(8) + 1, v(10) + 1
-    va, vb, vso, vsw = v(12) + 1, v(14) + 1, v(16) + 1, v(18) + 1
-    d = bytearray(18)
-    c10 = clk // 10_000
-    d[0:2] = c10.to_bytes(2, "little")
-    d[2], d[3], d[4] = ha & 0xFF, hb & 0xFF, (ha >> 8) << 4 | (hb >> 8)
-    d[5], d[6], d[7] = va & 0xFF, vb & 0xFF, (va >> 8) << 4 | (vb >> 8)
-    d[8], d[9] = hso & 0xFF, hsw & 0xFF
-    d[10] = (vso & 0x0F) << 4 | (vsw & 0x0F)
-    d[11] = (hso >> 8 & 3) << 6 | (hsw >> 8 & 3) << 4 | (vso >> 4 & 3) << 2 | (vsw >> 4 & 3)
-    hpos, vpos = p[9] & 0x80, p[17] & 0x80
-    d[17] = 0x18 | (0x04 if vpos else 0) | (0x02 if hpos else 0)     # digital separate sync
-    t = _dtd_decode(bytes(d))
-    if t:
-        t["clock"] = clk
-        t["hz"] = clk / (t["htotal"] * t["vtotal"])
-    return t
-
-
-def _displayid_blocks(block: bytes):
-    """Yield (offset of the payload, tag, payload length) for each data block of a DisplayID extension."""
-    n = block[2]
-    i, end = 5, min(5 + n, 127)
-    while i + 3 <= end:
-        tag, ln = block[i], block[i + 2]
-        if tag == 0 and ln == 0:
-            break
-        yield i + 3, tag, ln
-        i += 3 + ln
-
-
-def edid_timings(edid: bytes) -> list:
-    """Every detailed timing in the description (base block, CTA-861 and DisplayID extensions)."""
-    out = []
-    for off in (54, 72, 90, 108):
-        t = _dtd_decode(edid[off:off + 18])
-        if t:
-            out.append(t)
-    for b in range(1, len(edid) // 128):
-        blk = edid[b * 128:(b + 1) * 128]
-        if blk[0] == 0x02 and 4 <= blk[2] < 127:
-            off = blk[2]
-            while off + 18 <= 127:
-                t = _dtd_decode(blk[off:off + 18])
-                if not t:
-                    break
-                out.append(t)
-                off += 18
-        elif blk[0] == 0x70:
-            for p, tag, ln in _displayid_blocks(blk):
-                if tag in (0x03, 0x22):
-                    for k in range(0, ln - ln % 20, 20):
-                        t = _displayid_timing(blk[p + k:p + k + 20], khz=(tag == 0x22))
-                        if t:
-                            out.append(t)
-    return out
-
-
-def edid_modes(edid: bytes) -> list:
-    return sorted({(t["w"], t["h"], round(t["hz"])) for t in edid_timings(edid)})
-
-
-def edid_valid(edid: bytes) -> bool:
-    return (len(edid) >= 128 and len(edid) % 128 == 0 and edid[:8] == b"\x00\xff\xff\xff\xff\xff\xff\x00"
-            and all(sum(edid[i:i + 128]) % 256 == 0 for i in range(0, len(edid), 128))
-            and len(edid) == 128 * (1 + edid[126]))
-
-
-def edid_with_rate(edid: bytes, hz: int = REFRESH_MAX) -> bytes:
-    """The panel's description plus a {hz} Hz mode and a 48-{hz} Hz adaptive sync range. Raises ValueError when
-    it can't be done safely (then Desktop Mode just stays at 120)."""
-    if not edid_valid(edid):
-        raise ValueError("the screen's description is unreadable")
-    timings = [t for t in edid_timings(edid) if 110 <= t["hz"] < hz - 1]
-    if not timings:
-        raise ValueError(f"no 120 Hz timing to build on (modes: {edid_modes(edid)})")
-    if any(round(t["hz"]) >= hz for t in edid_timings(edid)):
-        raise ValueError(f"it already lists {hz} Hz")
-    base = max(timings, key=lambda t: (t["w"] * t["h"], t["hz"]))
-    old_hz = round(base["hz"])
-    c10 = -(-hz * base["htotal"] * base["vtotal"] // 10_000)          # round up: never below the target rate
-    if c10 > 0xFFFF:
-        raise ValueError("the pixel clock would be too high")
-    dtd = bytearray(base["raw"])
-    dtd[0:2] = c10.to_bytes(2, "little")
-    out = bytearray(edid)
-    blk0 = out[:128]
-    # adaptive sync range (base block range descriptor), or a new one in an unused slot
-    rng = next((o for o in (54, 72, 90, 108) if blk0[o:o + 3] == b"\0\0\0" and blk0[o + 3] == 0xFD), None)
-    if rng is None:
-        rng = next((o for o in (54, 72, 90, 108) if blk0[o:o + 3] == b"\0\0\0" and blk0[o + 3] == 0x10), None)
-        if rng is not None:
-            hk = -(-c10 * 10 // base["htotal"])                         # line rate in kHz at the top rate
-            blk0[rng:rng + 18] = bytes([0, 0, 0, 0xFD, 0, EDID_VRR_MIN, hz, 1, min(255, hk + 1),
-                                        min(255, -(-c10 // 1000)), 0x00, 0x0A] + [0x20] * 6)
-            blk0[24] |= 0x01                                                # continuous frequency (EDID 1.4)
-    elif blk0[rng + 4] & 0x03 == 0:                                         # rates stored as plain 0-255
-        old_max = blk0[rng + 6]
-        blk0[rng + 5] = min(blk0[rng + 5], EDID_VRR_MIN) if blk0[rng + 5] else EDID_VRR_MIN
-        blk0[rng + 6] = max(old_max, hz)
-        if blk0[rng + 4] & 0x0C == 0:
-            hk = -(-c10 * 10 // base["htotal"])                             # kHz
-            blk0[rng + 8] = min(255, max(blk0[rng + 8], hk))
-        blk0[rng + 9] = min(255, max(blk0[rng + 9], -(-c10 // 1000)))
-    # DisplayID range blocks (1.3 tag 0x09, 2.0 tag 0x25): raise the top rate where it matches the old top
-    for b in range(1, len(out) // 128):
-        blk = out[b * 128:(b + 1) * 128]
-        if blk[0] != 0x70:
-            continue
-        changed = False
-        for p, tag, ln in _displayid_blocks(blk):
-            if tag in (0x09, 0x25) and ln >= 8 and blk[p + 7] in (old_hz, old_hz - 1, old_hz + 1):
-                if tag == 0x25 and ln >= 9 and blk[p + 8] & 0x03:
-                    continue
-                old = blk[p + 7]
-                mx = int.from_bytes(blk[p + 3:p + 6], "little")
-                blk[p + 3:p + 6] = min(0xFFFFFF, -(-mx * hz // old)).to_bytes(3, "little")
-                blk[p + 6] = min(blk[p + 6], EDID_VRR_MIN) or EDID_VRR_MIN
-                blk[p + 7] = hz
-                changed = True
-        if changed:
-            n = blk[2]
-            blk[5 + n] = (-sum(blk[1:5 + n])) & 0xFF                       # DisplayID section checksum
-            _edid_sum(blk)
-            out[b * 128:(b + 1) * 128] = blk
-    # the new mode goes in its own CTA-861 block, so nothing the panel already says is moved or lost
-    cta = bytearray(128)
-    cta[0:4] = bytes([0x02, 0x03, 0x04, 0x00])
-    cta[4:22] = dtd
-    _edid_sum(cta)
-    if blk0[126] >= 254:
-        raise ValueError("too many extension blocks")
-    blk0[126] += 1
-    _edid_sum(blk0)
-    out[:128] = blk0
-    out += cta
-    if not edid_valid(bytes(out)) or (base["w"], base["h"], hz) not in edid_modes(bytes(out)):
-        raise ValueError("the edited description didn't check out")
-    return bytes(out)
-
-
-def panel_edid_file() -> Optional[Path]:
-    for p in sorted(DRM_ROOT.glob("card*-eDP-*")):
-        f = p / "edid"
-        try:
-            if f.stat().st_size >= 128:
-                return f
-        except OSError:
-            continue
-    return None
-
-
-def panel_edid() -> bytes:
-    f = panel_edid_file()
-    try:
-        return f.read_bytes() if f else b""
-    except OSError:
-        return b""
-
-
-def edid_live() -> bool:
-    """The edited description is what the kernel uses right now."""
-    staged = EDID_STAGED.read_bytes() if EDID_STAGED.exists() else b""
-    return bool(staged) and panel_edid() == staged
-
-
-def edid_build() -> bytes:
-    """Builds (and stages) the edited description from the panel's own copy. Raises ValueError."""
-    now = panel_edid()
-    if now and not any(round(t["hz"]) >= REFRESH_MAX for t in edid_timings(now)):
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        EDID_ORIGINAL.write_bytes(now)                 # only ever the panel's own copy
-    src = EDID_ORIGINAL.read_bytes() if EDID_ORIGINAL.exists() else now
-    if not src:
-        raise ValueError("couldn't read the screen's description")
-    blob = edid_with_rate(src, REFRESH_MAX)
-    EDID_STAGED.write_bytes(blob)
-    return blob
-
-
-def edid_ready() -> bool:
-    """The boot service is installed with the copy built from this panel."""
-    try:
-        return (Path(EDID_SERVICE).exists() and EDID_STAGED.exists()
-                and Path(EDID_BIN).read_bytes() == EDID_STAGED.read_bytes())
-    except OSError:
-        return False
-
-
-_EDID_PROBLEM = {}
-
-
-def edid_setup_needed() -> bool:
-    """True when Desktop Mode can get 144 Hz but its boot service isn't set up yet (cheap: the GUI asks often)."""
-    if edid_ready():
-        return False
-    if not EDID_STAGED.exists():
-        if "why" in _EDID_PROBLEM:
-            return False                               # this panel can't be done: 144 Hz stays Game Mode only
-        try:
-            edid_build()
-        except (ValueError, OSError) as e:
-            _EDID_PROBLEM["why"] = str(e)
-            app_log("refresh", f"Desktop Mode 144 Hz not possible: {e}")
-            return False
-    return not edid_ready()
-
-
-def edid_override_sh() -> str:
-    return f"""#!/bin/sh
-# Ally Hub: the screen's description with 144 Hz added, only while 144 Hz is on ({EDID_FLAG} exists).
-# Undo: delete that file and restart (Ally Hub does it by itself when 144 Hz isn't kept).
-FLAG={shlex.quote(str(EDID_FLAG))}
-BIN={EDID_BIN}
-[ -f "$FLAG" ] && [ -s "$BIN" ] || exit 0
-i=0
-while [ $i -lt 20 ] && ! ls -d /sys/kernel/debug/dri/*/eDP-* >/dev/null 2>&1; do sleep 0.5; i=$((i+1)); done
-seen=""
-for c in /sys/kernel/debug/dri/*/eDP-*; do
-  [ -e "$c/edid_override" ] || continue
-  r=$(readlink -f "$c"); case " $seen " in *" $r "*) continue;; esac; seen="$seen $r"
-  if cat "$BIN" > "$c/edid_override"; then
-    [ -e "$c/trigger_hotplug" ] && echo 1 > "$c/trigger_hotplug"
-    echo "Ally Hub: 144 Hz screen description loaded on $c"
-  else
-    echo "Ally Hub: couldn't load the screen description on $c"
-  fi
-done
-exit 0"""
-
-
-EDID_UNIT = """[Unit]
-Description=Ally Hub 144 Hz screen description (only while 144 Hz is on)
-Wants=sys-kernel-debug.mount
-After=sys-kernel-debug.mount systemd-udev-settle.service local-fs.target
-Before=display-manager.service
-
-[Service]
-Type=oneshot
-ExecStart=/etc/allyhub/edid-override.sh
-
-[Install]
-WantedBy=multi-user.target"""
-
-
-def edid_setup_cmd() -> Optional[str]:
-    """One password prompt: puts the edited description and its boot service in /etc. Nothing changes until
-    the 144 Hz trial sets the flag and restarts."""
-    try:
-        edid_build()
-    except (ValueError, OSError):
-        return None
-    name = EDID_SERVICE.rsplit("/", 1)[-1]
-    parts = ["mkdir -p /etc/allyhub",
-             f"install -m 0644 {shlex.quote(str(EDID_STAGED))} {EDID_BIN}",
-             f"printf '%s\\n' {shlex.quote(edid_override_sh())} > {EDID_SCRIPT} && chmod 755 {EDID_SCRIPT}",
-             f"printf '%s\\n' {shlex.quote(EDID_UNIT)} > {EDID_SERVICE}",
-             "systemctl daemon-reload", f"systemctl enable {name} >/dev/null 2>&1; true"]
-    return "sudo sh -c " + shlex.quote(" && ".join(parts)) + " && echo '144 Hz is ready for Desktop Mode too.'"
-
-
-def set_edid_flag(on: bool) -> None:
-    if on:
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        EDID_FLAG.write_text("on\n")
-    else:
+def clear_desktop_144() -> bool:
+    if EDID_FLAG.exists():
         EDID_FLAG.unlink(missing_ok=True)
-
-
-def edid_summary() -> str:
-    f = panel_edid_file()
-    modes = ", ".join(f"{w}x{h}@{hz}" for w, h, hz in edid_modes(panel_edid())) or "unreadable"
-    return (f"panel {f.parent.name if f else 'not found'}; modes {modes}; 144 Hz copy "
-            f"{'installed' if edid_ready() else 'not installed'}, flag {'on' if EDID_FLAG.exists() else 'off'}, "
-            f"{'in use' if edid_live() else 'not in use'}")
-
+        app_log("refresh", "Desktop Mode 144 Hz retired: back to the screen's own description after the next restart")
+        return True
+    return False
 
 def sshd_active() -> bool:
     return service_active("sshd")
@@ -1985,6 +1673,19 @@ def uses_chip_effect(effect: dict) -> bool:
     return e["type"] == "spiral" and e.get("engine") == "chip"
 
 
+CHIP_SPIRAL_FULL = 250    # the chip's spiral has only 3 brightness steps (the owner: it barely dimmed), so below this
+                          # Ally Hub draws the same rainbow spiral itself, which dims smoothly with led_dim
+
+
+def chip_runs(effect: dict, brightness) -> bool:
+    """The chip runs this effect itself (a built-in spiral at full brightness); otherwise frames are streamed."""
+    try:
+        b = int(brightness)
+    except (TypeError, ValueError):
+        b = 255
+    return uses_chip_effect(effect) and b >= CHIP_SPIRAL_FULL
+
+
 STREAM_FPS_MAX = 30          # HueSync's rate for HID devices like the Ally
 _STREAM_CACHE = {}
 
@@ -2045,7 +1746,7 @@ def hid_zone_frame(zones: list, brightness: int, leds: list = None, method: str 
 
 def hid_apply_effect(effect: dict, brightness: int, leds: list = None, method: str = None) -> bool:
     leds = leds if leds is not None else find_leds()
-    if hid_streams(method) and not uses_chip_effect(effect):
+    if hid_streams(method) and not chip_runs(effect, brightness):
         # one still frame; the agent animates it (GUI previews, --apply-rgb, static colors)
         return hid_zone_frame(zone_frames(effect, 0.0), brightness, leds, method,
                               (load_config().get("lighting") or {}).get("gamma"))
@@ -4185,7 +3886,7 @@ def proton_log(appid) -> str:
 # only talks to the agent's local socket (CONTROL_SOCK, this user only). Bump QAM_VERSION when they change.
 # ==========================================================================
 
-QAM_VERSION = "1.0.5"
+QAM_VERSION = "1.0.6"
 QAM_DIR = HOME / "homebrew/plugins/AllyHub"
 QAM_STAGE = DATA_DIR / "qam-plugin"
 QAM_PLUGIN_JSON = r'''{
@@ -4353,14 +4054,17 @@ function Content() {
   }
 
   const sections = [];
+  const REFRESH_NOTE = "Experimental, may have issues. VRR causes skipped frames at 144 Hz: keep it off. Game Mode only for now.";
   if (s.refresh && s.refresh.status === "trial" && s.refresh.left !== null) {
     sections.push(h(PanelSection, { title: `Testing ${s.refresh.max} Hz`, key: "refresh" },
       h(PanelSectionRow, null, h(Field, { focusable: true, label: `Going back to 120 Hz in ${s.refresh.left} s`,
         description: "Set Steam's refresh slider (Performance tab) to the top. Picture good? Keep it." })),
+      h(PanelSectionRow, null, h(Field, { focusable: true, label: "⚠ Experimental", description: REFRESH_NOTE })),
       h(PanelSectionRow, null, h(ButtonItem, { layout: "below", onClick: () => act("refresh_keep") }, "Keep 144 Hz")),
       h(PanelSectionRow, null, h(ButtonItem, { layout: "below", onClick: () => act("refresh_off") }, "Undo now"))));
   } else if (s.refresh && s.refresh.on) {
     sections.push(h(PanelSection, { title: "Refresh rate", key: "refresh" },
+      h(PanelSectionRow, null, h(Field, { focusable: true, label: "⚠ 144 Hz is experimental", description: REFRESH_NOTE })),
       h(PanelSectionRow, null, h(ButtonItem, { layout: "below", onClick: () => act("refresh_off") }, "Back to 120 Hz"))));
   }
   sections.push(h(PanelSection, { key: "status" }, h(PanelSectionRow, null, Hero(s))));
@@ -6062,7 +5766,6 @@ def diagnostics_snapshot() -> str:
         probe("Steam debugger (Decky/CEF)", lambda: "on" if cef_eval("1+1", timeout=3) == 2 else "off"),
         probe("Proton builds", lambda: ", ".join(custom_protons()) or "only Valve's"),
         probe("Performance", performance_summary),
-        probe("Screen", edid_summary),
         probe("Lighting", lambda: {k: v for k, v in (load_config().get("lighting") or {}).items()
                                    if k in ("controller", "encoding", "hid_method", "effect")}),
         probe("NonSteamLaunchers", lambda: "installed: " + (", ".join(n for n in NSL_STORES if nsl_installed(n))

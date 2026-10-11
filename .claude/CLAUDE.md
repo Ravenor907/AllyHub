@@ -274,15 +274,15 @@ writes the file and REBOOTS (restarting gamescope-session didn't load it: the ow
 comes within `REFRESH_CONFIRM_S`, or `REFRESH_DEADLINE_S` overall. One revert per trial: no reboot loops.
 Keep: the ••• panel (`refresh_keep`) or the Performance card. Never let the GUI restart Game Mode itself.
 
-**144 Hz in Desktop Mode (1.4.1.12, the owner's call):** KDE lists only the rates in the panel's EDID. `edid_with_rate`
-copies the panel's EDID (`EDID_ORIGINAL`, never an edited one), adds the 120 Hz timing with a 144 Hz clock in a new
-CTA block, and widens the range descriptor (and DisplayID range blocks) to 48-144, so VRR covers it in both modes.
-Never touch name/maker/product: gamescope matches profiles on them. `edid_setup_cmd` (key `edid-setup`, one
-password) installs `EDID_BIN` + `allyhub-edid.service`, which writes it to debugfs `edid_override` +
-`trigger_hotplug` at boot ONLY while `EDID_FLAG` (user's config dir) exists; the trial sets/clears the flag, so undo
-is the same reboot. `edid_live` checks sysfs after boot; a miss files a report. Owner's Monitor OC test on 1.4.1.11:
-144 Hz with VRR on skipped frames, VRR off was clean (range still 48-120 then).
+**144 Hz is Game Mode only (1.4.1.13, the owner's call, "for sake of simplicity").** 1.4.1.12's Desktop Mode EDID
+override was removed; `clear_desktop_144` deletes its flag so the leftover boot service does nothing (the uninstaller
+still removes `allyhub-edid.service`). Don't bring Desktop Mode 144 Hz back unless the owner asks. `REFRESH_DISCLAIMER`
+(experimental, VRR causes skipped frames at 144 Hz so keep it off, Game Mode only) shows on the card, the confirm,
+the countdown sheet and the ••• panel. Owner's Monitor OC test: VRR on skipped frames, VRR off was clean (the
+panel's VRR range stays 48-120).
 The brightness slider goes through `led_dim` (`LED_DIM_CURVE`) for streamed frames: linear drive barely dimmed.
+The chip's own spiral has only 3 brightness steps, so `chip_runs` hands it to the chip only at `CHIP_SPIRAL_FULL`;
+below that the agent streams the same rainbow spiral (owner: 1.4.1.12 still didn't dim it).
 
 **Lighting permission is remembered (1.4.1.11, the owner's call: no repeat password prompts).** `led_permission_cmd`
 also installs `allyhub-lighting-perms.service` (`LIGHT_PERMS_SCRIPT`/`LIGHT_PERMS_UNIT`), run at boot, after sleep and
