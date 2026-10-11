@@ -265,6 +265,14 @@ Installed layout on the device: code in `~/.local/share/allyhub/` (same dir hold
 `update_state.json`, `reports/`, `previous/`), config in `~/.config/allyhub/config.json`.
 
 
+**Higher refresh rate (experimental, 1.4.1.9, the owner's call):** `core.refresh_lua` writes
+`~/.config/gamescope/scripts/90-allyhub-refresh.lua`: a higher-priority copy of the stock Ally panel profile
+(TMX TL070FVXS01-0, 48-120 Hz) whose rates go up to the chosen step; above 120 it raises the pixel clock
+(`calc_max_clock`/`calc_vrefresh`), all inside pcall. The AGENT runs the trial (`refresh_step`, every second): it
+writes the file, restarts `gamescope-session.service` (a user unit; the agent is not part of it, so it survives) and
+undoes it unless Keep comes within `REFRESH_CONFIRM_S` of Game Mode coming back, or `REFRESH_DEADLINE_S` overall.
+Keep: the ••• panel (`refresh_keep`) or the Performance card. Never let the GUI restart Game Mode itself.
+
 ## SteamOS facts that shape the code
 
 - Root filesystem is read-only. Never use pacman or write outside `$HOME`, `/etc` (overlay) or `/sys`.

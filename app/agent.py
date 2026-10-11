@@ -786,6 +786,8 @@ class Agent:
             "time_machine": bool((self.cfg.get("saves") or {}).get("time_machine")),
             "backup": self.ludusavi_ready(),
             "backup_running": self.save_proc is not None,
+            "refresh": {"status": core.refresh_state().get("status"), "max": core.refresh_state().get("max"),
+                        "left": core.refresh_left()},
         }
 
     def ludusavi_ready(self) -> bool:
@@ -799,6 +801,9 @@ class Agent:
     QAM_TOGGLES = ("battery_rings", "low_battery_flash")      # agent switches the panel may flip (no password)
 
     def qam_action(self, name: str, data: dict) -> dict:
+        if name == "refresh_keep":
+            ok = core.refresh_keep()
+            return {"ok": ok, "message": "Kept. Steam's slider now goes up to this rate." if ok else "Nothing to keep"}
         if name == "speed":
             try:
                 v = max(0.1, min(4.0, float(data.get("value", 1.0))))
@@ -1134,6 +1139,7 @@ class Agent:
             self.safely("saves", self.save_backups, battery)
             self.safely("sleep", self.update_sleep, battery)
             self.safely("lighting", self.update_lighting, battery)
+            self.safely("refresh", core.refresh_step)          # the higher-refresh trial and its undo
             self.safely("state", self.write_state)
             if not self.healthy and time.time() - self.started > core.HEALTHY_AFTER_S:
                 self.healthy = True

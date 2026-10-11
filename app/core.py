@@ -316,6 +316,161 @@ def service_active(name: str, user: bool = False) -> bool:
     return run_quiet(cmd)[1] == "active"
 
 
+# ---------- Higher refresh rate (experimental, 1.4.1.9, the owner's call) ----------
+# Game Mode's display manager (gamescope) only offers the rates its profile for a panel allows; SteamOS's profile for
+# the ROG Ally / Ally X panel (scripts/00-gamescope/displays/asus.rogally.lcd.lua, TMX TL070FVXS01-0) stops at 120.
+# A user script (loaded after the system ones) adds a higher-priority profile that reuses the stock one up to 120 and
+# only raises the pixel clock above it. Everything is wrapped in pcall, so a gamescope without these helpers just
+# ignores the file. The agent (its own user service, not part of Game Mode) restarts Game Mode to load it and puts
+# everything back if the owner doesn't press Keep in time: a black screen or a Game Mode that won't start undoes itself.
+REFRESH_SCRIPT = HOME / ".config/gamescope/scripts/90-allyhub-refresh.lua"
+REFRESH_STATE = DATA_DIR / "refresh_trial.json"
+REFRESH_STEPS = (125, 130, 135, 140, 144)
+REFRESH_CONFIRM_S = 90        # after Game Mode is back: time to pick the rate in Steam and press Keep
+REFRESH_DEADLINE_S = 240      # from the start, whatever happens (Game Mode stuck or crashing)
+GAME_MODE_UNIT = "gamescope-session.service"
+
+
+def refresh_lua(max_hz: int) -> str:
+    max_hz = max(121, min(165, int(max_hz)))
+    return f"""-- Ally Hub (experimental): lets the ROG Ally panel run above 120 Hz, up to {max_hz} Hz.
+-- Delete this file and restart Game Mode to undo. Written by Ally Hub; it removes it again by itself.
+local MAX = {max_hz}
+pcall(function()
+  local base
+  local probe = {{ vendor = "TMX", model = "TL070FVXS01-0", product = 0x0002 }}
+  for name, d in pairs(gamescope.config.known_displays) do
+    if name ~= "allyhub_rogally_oc" and type(d) == "table" and type(d.matches) == "function"
+        and type(d.dynamic_modegen) == "function" then
+      local ok, r = pcall(d.matches, probe)
+      if ok and type(r) == "number" and r > 0 then base = d end
+    end
+  end
+  if not base then return end
+  local oc = {{}}
+  for k, v in pairs(base) do oc[k] = v end
+  local rates = {{}}
+  for hz = 48, MAX do rates[#rates + 1] = hz end
+  oc.dynamic_refresh_rates = rates
+  oc.dynamic_modegen = function(base_mode, refresh)
+    if refresh <= 120 then return base.dynamic_modegen(base_mode, refresh) end
+    local mode = base.dynamic_modegen(base_mode, 120)
+    local ok = pcall(function()
+      mode.clock = gamescope.modegen.calc_max_clock(mode, refresh)
+      mode.vrefresh = gamescope.modegen.calc_vrefresh(mode)
+    end)
+    if not ok then return base.dynamic_modegen(base_mode, 120) end
+    return mode
+  end
+  oc.matches = function(display)
+    local ok, r = pcall(base.matches, display)
+    if ok and type(r) == "number" and r > 0 then return r + 100 end
+    return -1
+  end
+  gamescope.config.known_displays.allyhub_rogally_oc = oc
+end)
+"""
+
+
+def refresh_installed() -> Optional[int]:
+    m = re.search(r"^local MAX = (\d+)$", read_text(REFRESH_SCRIPT), re.M)
+    return int(m.group(1)) if m else None
+
+
+def refresh_state() -> dict:
+    st = read_json(REFRESH_STATE, {}) or {}
+    return st if isinstance(st, dict) else {}
+
+
+def refresh_request(max_hz: int) -> None:
+    """Ask the agent to try a new top rate: it keeps the current file to fall back to, writes the new one and
+    restarts Game Mode (the agent does it, so the restart doesn't cut off the one asking)."""
+    write_json(REFRESH_STATE, {"status": "pending", "max": int(max_hz), "asked": time.time(),
+                               "prev_lua": read_text(REFRESH_SCRIPT) or ""})
+
+
+def refresh_keep() -> bool:
+    st = refresh_state()
+    if st.get("status") != "trial":
+        return False
+    st.update(status="kept", kept=time.time())
+    write_json(REFRESH_STATE, st)
+    return True
+
+
+def refresh_request_off() -> None:
+    write_json(REFRESH_STATE, {"status": "remove", "asked": time.time(), "prev_lua": ""})
+
+
+def _write_refresh_lua(text: str) -> None:
+    if text:
+        REFRESH_SCRIPT.parent.mkdir(parents=True, exist_ok=True)
+        REFRESH_SCRIPT.write_text(text)
+    else:
+        REFRESH_SCRIPT.unlink(missing_ok=True)
+
+
+def game_mode_active() -> bool:
+    return service_active(GAME_MODE_UNIT.removesuffix(".service"), user=True)
+
+
+def restart_game_mode() -> None:
+    run_quiet(["systemctl", "--user", "reset-failed", GAME_MODE_UNIT])
+    try:
+        subprocess.Popen(["systemctl", "--user", "restart", GAME_MODE_UNIT], stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+    except OSError:
+        pass
+
+
+def refresh_step(now: float = None) -> str:
+    """One look by the agent (every second). Returns what it did: "", "started", "back", "kept", "reverted",
+    "removed"."""
+    now = now or time.time()
+    st = refresh_state()
+    status = st.get("status")
+    if status == "pending":
+        _write_refresh_lua(refresh_lua(st.get("max", 130)))
+        st.update(status="trial", started=now, back=None)
+        write_json(REFRESH_STATE, st)
+        app_log("refresh", f"trying up to {st.get('max')} Hz")
+        restart_game_mode()
+        return "started"
+    if status == "remove":
+        _write_refresh_lua("")
+        write_json(REFRESH_STATE, {"status": "off"})
+        app_log("refresh", "back to 120 Hz")
+        restart_game_mode()
+        return "removed"
+    if status != "trial":
+        return ""
+    if not st.get("back") and now - st.get("started", now) > 10 and game_mode_active():
+        st["back"] = now
+        write_json(REFRESH_STATE, st)
+        return "back"
+    expired = (st.get("back") and now - st["back"] > REFRESH_CONFIRM_S) or now - st.get("started", now) > REFRESH_DEADLINE_S
+    if expired:
+        _write_refresh_lua(st.get("prev_lua") or "")
+        write_json(REFRESH_STATE, {"status": "reverted", "max": refresh_installed(), "tried": st.get("max"),
+                                   "at": now})
+        app_log("refresh", f"no Keep within the time: {st.get('max')} Hz undone")
+        restart_game_mode()
+        return "reverted"
+    return ""
+
+
+def refresh_left(now: float = None) -> Optional[int]:
+    """Seconds left to press Keep (None when no trial is running)."""
+    now = now or time.time()
+    st = refresh_state()
+    if st.get("status") != "trial":
+        return None
+    left = REFRESH_DEADLINE_S - (now - st.get("started", now))
+    if st.get("back"):
+        left = min(left, REFRESH_CONFIRM_S - (now - st["back"]))
+    return max(0, int(left))
+
+
 def sshd_active() -> bool:
     return service_active("sshd")
 
@@ -3615,7 +3770,7 @@ def proton_log(appid) -> str:
 # only talks to the agent's local socket (CONTROL_SOCK, this user only). Bump QAM_VERSION when they change.
 # ==========================================================================
 
-QAM_VERSION = "1.0.3"
+QAM_VERSION = "1.0.4"
 QAM_DIR = HOME / "homebrew/plugins/AllyHub"
 QAM_STAGE = DATA_DIR / "qam-plugin"
 QAM_PLUGIN_JSON = r'''{
@@ -3783,6 +3938,12 @@ function Content() {
   }
 
   const sections = [];
+  if (s.refresh && s.refresh.status === "trial") {
+    sections.push(h(PanelSection, { title: "Higher refresh rate", key: "refresh" },
+      h(PanelSectionRow, null, h(Field, { focusable: true, label: `Up to ${s.refresh.max} Hz`,
+        description: `Pick the rate with Steam's refresh slider. If the picture is good, tap Keep. Going back to the old rate in ${s.refresh.left} s.` })),
+      h(PanelSectionRow, null, h(ButtonItem, { layout: "below", onClick: () => act("refresh_keep") }, "Keep it"))));
+  }
   sections.push(h(PanelSection, { key: "status" }, h(PanelSectionRow, null, Hero(s))));
 
   if (s.game) {
