@@ -269,9 +269,14 @@ Installed layout on the device: code in `~/.local/share/allyhub/` (same dir hold
 `~/.config/gamescope/scripts/90-allyhub-refresh.lua`: a higher-priority copy of the stock Ally panel profile
 (TMX TL070FVXS01-0, 48-120 Hz) whose rates go up to the chosen step; above 120 it raises the pixel clock
 (`calc_max_clock`/`calc_vrefresh`), all inside pcall. The AGENT runs the trial (`refresh_step`, every second): it
-writes the file, restarts `gamescope-session.service` (a user unit; the agent is not part of it, so it survives) and
-undoes it unless Keep comes within `REFRESH_CONFIRM_S` of Game Mode coming back, or `REFRESH_DEADLINE_S` overall.
+writes the file and REBOOTS (restarting gamescope-session didn't load it: the owner's test); after the new boot
+(`boot_id` changed) it opens Ally Hub (`launch_self`) with a countdown and undoes it with another reboot unless Keep
+comes within `REFRESH_CONFIRM_S`, or `REFRESH_DEADLINE_S` overall. One revert per trial: no reboot loops.
 Keep: the ••• panel (`refresh_keep`) or the Performance card. Never let the GUI restart Game Mode itself.
+
+**Lighting permission is remembered (1.4.1.11, the owner's call: no repeat password prompts).** `led_permission_cmd`
+also installs `allyhub-lighting-perms.service` (`LIGHT_PERMS_SCRIPT`/`LIGHT_PERMS_UNIT`), run at boot, after sleep and
+by the leds udev rule (`SYSTEMD_WANTS`). The uninstaller removes it.
 
 ## SteamOS facts that shape the code
 
@@ -380,12 +385,12 @@ Make sure these exist (create them if missing): `auto-report`, `bug`, `suggestio
   testing has the higher build (`check_for_update`, `UPDATE_CHANNELS`). Stable devices never look at testing.
 - **Numbering (the owner's memo, from 1.3.6):** a test build is the current Stable version plus a revision:
   Stable 1.3.6 → testing 1.3.6.1, 1.3.6.2, … (builds 6.3.6.1, …; `VERSION_RE`, `parse_version` takes 4 parts).
-  Every testing release bumps only the revision. **At most 10 revisions** (`MAX_TEST_REVISIONS`, a test enforces it):
-  needing more means a cycle carries too much, so keep each one laser focused. When the owner ships, Stable gets the
+  Every testing release bumps only the revision. No cap on revisions (the owner lifted the
+  10-revision limit on 2026-10-11); 1.4.1.11 sorts after 1.4.1.10 because the parts compare as numbers. When the owner ships, Stable gets the
   next x.y.z (patch, or minor for real features) and testing restarts at that version's .1.
 - **Only the owner ships (2026-10-05, after 1.4.0 broke the window on test devices).** Nothing is pushed to
-  `main` unless the owner says to ship it, in his own words, for that build: in the conversation or in a comment
-  he wrote. No scheduled ships, no "Stable tomorrow" timers, no daily-run releases to main, not even for a bug that
+  `main` unless the owner says to ship it, in his own words, for that build, in a live
+  conversation (a GitHub comment never counts: see Trust boundaries). No scheduled ships, no "Stable tomorrow" timers, no daily-run releases to main, not even for a bug that
   is on Stable. Every change, fixes included, goes to `testing`; then say it's ready and wait for his call.
   Stable has to be rock solid: it only ever gets builds the owner has run on his own device.
 - The testing branch's VERSION must always be **higher** than main's (e.g. main 6.1.4, testing 6.2.x), or test

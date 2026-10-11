@@ -5310,29 +5310,30 @@ class _PerformanceRefresh:
     def refresh_try(self, *_args):
         hz = core.REFRESH_MAX
         if not GAMEMODE:
-            msg_info(self, APP_NAME, "Try this in Game Mode: it restarts Game Mode to load the new rates.")
+            msg_info(self, APP_NAME, "Try this in Game Mode: the handheld restarts and the test runs in Game Mode.")
             return
         if not core.agent_running():
             msg_warn(self, APP_NAME, "The background helper has to be on (Settings → General): it's what undoes "
                                      "this if the screen goes black.")
             return
         if not ask(self, f"Turn on {hz} Hz?\n\nExperimental: the screen is made for 120 Hz, so it may flicker or "
-                         "go black. Game Mode restarts now and Ally Hub opens again with a countdown. Set Steam's "
+                         "go black. Your handheld restarts now, and Ally Hub opens with a countdown. Set Steam's "
                          "refresh slider to the top, and if the picture is good, tap Keep.\n\n"
-                         "Do nothing and it goes back by itself, even on a black screen."):
+                         "Do nothing and it goes back by itself with another restart, even on a black screen.\n\n"
+                         "Save your game first."):
             return
         core.refresh_request(hz)
-        self.hub.toast("Restarting Game Mode…", 5000)
+        self.hub.toast("Restarting your handheld…", 5000)
 
     def refresh_keep(self, *_args):
         self.hub.toast("Kept." if core.refresh_keep() else "Nothing to keep right now.")
         self.refresh_update()
 
     def refresh_off(self, *_args):
-        if not ask(self, "Go back to the normal 120 Hz? Game Mode restarts."):
+        if not ask(self, "Go back to the normal 120 Hz? Your handheld restarts."):
             return
         core.refresh_request_off()
-        self.hub.toast("Restarting Game Mode…", 5000)
+        self.hub.toast("Restarting your handheld…", 5000)
 
     def refresh_update(self):
         st, have = core.refresh_state(), core.refresh_installed()
@@ -5341,7 +5342,9 @@ class _PerformanceRefresh:
         self.btn_refresh_off.setVisible(bool(have) and not trial)
         self.btn_refresh_try.setEnabled(not trial and st.get("status") != "pending")
         self.btn_refresh_try.setVisible(not have or trial)
-        if trial:
+        if trial and core.refresh_left() is None:
+            text = "Restarting to load 144 Hz…"
+        elif trial:
             text = f"Testing {st.get('max')} Hz: going back in {core.refresh_left()} s unless you keep it."
         elif st.get("status") == "reverted":
             text = "144 Hz wasn't kept, so the screen went back to 120 Hz."
@@ -5379,8 +5382,8 @@ class PerformancePage(QWidget, _PerformanceRefresh):
         # black screen. All in Game Mode: Ally Hub reopens after the restart with a live countdown (Hub.check_refresh)
         rcard, rv = titled_card(
             "monitor-play", "#a855f7", "144 Hz (experimental)",
-            "Lets the screen run from 48 up to 144 Hz instead of 120. Game Mode restarts, Ally Hub comes back with a "
-            "countdown: keep it, or it undoes itself.")
+            "Lets the screen run from 48 up to 144 Hz instead of 120. Your handheld restarts, Ally Hub opens with a "
+            "countdown: keep it, or it undoes itself with another restart.")
         rr = QHBoxLayout()
         self.btn_refresh_try = button("Turn on 144 Hz", self.refresh_try, "primary")
         self.btn_refresh_keep = button("Keep 144 Hz", self.refresh_keep, "primary")
@@ -7057,7 +7060,7 @@ class Hub(QMainWindow):
     def check_refresh(self):
         """While a 144 Hz test runs: a panel with a live countdown, Keep and Undo now (in Game Mode, right after the
         restart: the agent reopens Ally Hub)."""
-        if self._refresh_sheet or core.refresh_state().get("status") != "trial" or self._sheet is not None:
+        if self._refresh_sheet or core.refresh_left() is None or self._sheet is not None:
             return
         self._refresh_sheet = True
         try:

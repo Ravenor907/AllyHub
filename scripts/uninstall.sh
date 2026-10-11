@@ -27,12 +27,14 @@ for r in /etc/udev/rules.d/99-allyhub-leds.rules /etc/udev/rules.d/99-allyhub-ch
          /etc/udev/rules.d/71-allyhub-nowake.rules \
          /etc/udev/rules.d/70-allyhub-ntsync.rules /etc/tmpfiles.d/allyhub-boost.conf /etc/tmpfiles.d/allyhub-tuneup.conf \
          /etc/sysctl.d/99-zz-allyhub.conf /etc/sysctl.d/99-zz-allyhub-zram.conf /etc/modules-load.d/allyhub-ntsync.conf \
-         /etc/systemd/system/allyhub-zram.service /etc/allyhub/zram.sh; do
+         /etc/systemd/system/allyhub-zram.service /etc/allyhub/zram.sh \
+         /etc/systemd/system/allyhub-lighting-perms.service /etc/allyhub/lighting-perms.sh; do
     [ -f "$r" ] && RULES="$RULES $r"
 done
 QAM="$HOME/homebrew/plugins/AllyHub"          # Ally Hub's Quick Access panel (a Decky plugin, owned by root)
 if [ -n "$RULES" ] || [ -d "$QAM" ]; then
     echo "Removing Ally Hub's system settings and Quick Access panel (needs your password)"
+    [ -f /etc/systemd/system/allyhub-lighting-perms.service ] && sudo systemctl disable allyhub-lighting-perms.service 2>/dev/null
     if [ -f /etc/systemd/system/allyhub-zram.service ]; then
         sudo systemctl disable --now allyhub-zram.service 2>/dev/null
     fi

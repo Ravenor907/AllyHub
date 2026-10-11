@@ -322,7 +322,8 @@ def service_active(name: str, user: bool = False) -> bool:
 # A user script (loaded after the system ones) adds a higher-priority profile that reuses the stock one up to 120 and
 # only raises the pixel clock above it. Everything is wrapped in pcall, so a gamescope without these helpers just
 # ignores the file. The agent (its own user service, not part of Game Mode) restarts Game Mode to load it and puts
-# everything back if the owner doesn't press Keep in time: a black screen or a Game Mode that won't start undoes itself.
+# everything back if the owner doesn't press Keep in time. It only loads on a full restart (the owner's test), so a
+# try restarts the handheld, and a black screen undoes itself with another restart.
 REFRESH_SCRIPT = HOME / ".config/gamescope/scripts/90-allyhub-refresh.lua"
 REFRESH_STATE = DATA_DIR / "refresh_trial.json"
 REFRESH_MAX = 144            # one setting (the owner): the panel's range becomes 48-144 Hz
@@ -392,7 +393,7 @@ def refresh_request(max_hz: int) -> None:
 
 def refresh_keep() -> bool:
     st = refresh_state()
-    if st.get("status") != "trial":
+    if st.get("status") != "trial" or not st.get("seen"):
         return False
     st.update(status="kept", kept=time.time())
     write_json(REFRESH_STATE, st)
@@ -438,51 +439,70 @@ def launch_self() -> bool:
         return False
 
 
+def boot_id() -> str:
+    return read_text("/proc/sys/kernel/random/boot_id").strip()
+
+
+def reboot_device(delay: float = 3.0) -> None:
+    """Restart the handheld (logind lets the signed-in user do this without a password)."""
+    def go():
+        run_quiet(["systemctl", "reboot"])
+    threading.Timer(delay, go).start()
+
+
 def refresh_step(now: float = None) -> str:
-    """One look by the agent (every second). Returns what it did: "", "started", "back", "kept", "reverted",
-    "removed"."""
+    """One look by the agent (every second). The profile only takes effect after a full restart (the owner's test),
+    so a try restarts the handheld; after the restart Ally Hub opens with a countdown, and without Keep the old
+    profile comes back with another restart. Returns what it did: "", "started", "back", "reverted", "removed"."""
     now = now or time.time()
     st = refresh_state()
     status = st.get("status")
     if status == "pending":
-        _write_refresh_lua(refresh_lua(st.get("max", 130)))
-        st.update(status="trial", started=now, back=None)
+        _write_refresh_lua(refresh_lua(st.get("max", REFRESH_MAX)))
+        st.update(status="trial", started=now, boot=boot_id(), back=None, seen=None)
         write_json(REFRESH_STATE, st)
-        app_log("refresh", f"trying up to {st.get('max')} Hz")
-        restart_game_mode()
+        app_log("refresh", f"trying {st.get('max')} Hz: restarting")
+        reboot_device()
         return "started"
     if status == "remove":
         _write_refresh_lua("")
         write_json(REFRESH_STATE, {"status": "off"})
-        app_log("refresh", "back to 120 Hz")
-        restart_game_mode()
+        app_log("refresh", "back to 120 Hz: restarting")
+        reboot_device()
         return "removed"
     if status != "trial":
         return ""
-    if not st.get("back") and now - st.get("started", now) > 10 and game_mode_active():
+    if st.get("boot") == boot_id():                      # still before the restart
+        if now - st.get("started", now) > 120:           # the restart never happened: nothing was applied
+            _write_refresh_lua(st.get("prev_lua") or "")
+            write_json(REFRESH_STATE, {"status": "reverted", "tried": st.get("max"), "at": now})
+            return "reverted"
+        return ""
+    if not st.get("seen"):
+        st["seen"] = now
+        write_json(REFRESH_STATE, st)
+    if not st.get("back") and (game_mode_active() or now - st["seen"] > 60):
         st["back"] = now
         write_json(REFRESH_STATE, st)
-        if now - st.get("started", now) < 60:
-            threading.Timer(8.0, launch_self).start()      # Steam needs a moment before it takes a launch
+        threading.Timer(8.0, launch_self).start()          # the countdown opens by itself
         return "back"
-    expired = (st.get("back") and now - st["back"] > REFRESH_CONFIRM_S) or now - st.get("started", now) > REFRESH_DEADLINE_S
+    expired = (st.get("back") and now - st["back"] > REFRESH_CONFIRM_S) or now - st["seen"] > REFRESH_DEADLINE_S
     if expired:
         _write_refresh_lua(st.get("prev_lua") or "")
-        write_json(REFRESH_STATE, {"status": "reverted", "max": refresh_installed(), "tried": st.get("max"),
-                                   "at": now})
-        app_log("refresh", f"no Keep within the time: {st.get('max')} Hz undone")
-        restart_game_mode()
+        write_json(REFRESH_STATE, {"status": "reverted", "tried": st.get("max"), "at": now})
+        app_log("refresh", f"no Keep in time: {st.get('max')} Hz undone, restarting")
+        reboot_device()
         return "reverted"
     return ""
 
 
 def refresh_left(now: float = None) -> Optional[int]:
-    """Seconds left to press Keep (None when no trial is running)."""
+    """Seconds left to press Keep (None when no countdown is running, also before the restart)."""
     now = now or time.time()
     st = refresh_state()
-    if st.get("status") != "trial":
+    if st.get("status") != "trial" or not st.get("seen"):
         return None
-    left = REFRESH_DEADLINE_S - (now - st.get("started", now))
+    left = REFRESH_DEADLINE_S - (now - st["seen"])
     if st.get("back"):
         left = min(left, REFRESH_CONFIRM_S - (now - st["back"]))
     return max(0, int(left))
@@ -1996,17 +2016,52 @@ def lighting_shelved(cfg: dict = None) -> bool:
     return ((cfg or load_config()).get("lighting") or {}).get("controller", "huesync") != "allyhub"
 
 
+LIGHT_PERMS_SCRIPT = "/etc/allyhub/lighting-perms.sh"
+LIGHT_PERMS_SERVICE = "/etc/systemd/system/allyhub-lighting-perms.service"
+LIGHT_PERMS_SH = """#!/bin/sh
+# Ally Hub: let the user change the ring lights without a password (sysfs ring files + ASUS lighting chip).
+for d in /sys/class/leds/*:rgb:*; do
+  [ -d "$d" ] || continue
+  for f in brightness multi_intensity effect mode direction speed; do
+    [ -e "$d/$f" ] && chmod a+w "$d/$f" 2>/dev/null
+  done
+done
+for h in /sys/class/hidraw/hidraw*; do
+  grep -qi ':00000B05:' "$h/device/uevent" 2>/dev/null && chmod 0666 "/dev/${h##*/}" 2>/dev/null
+done
+exit 0"""
+LIGHT_PERMS_UNIT = """[Unit]
+Description=Ally Hub lighting permission (no password for ring colors)
+After=systemd-udev-settle.service suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
+
+[Service]
+Type=oneshot
+ExecStart=/etc/allyhub/lighting-perms.sh
+
+[Install]
+WantedBy=multi-user.target suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target"""
+
+
 def led_permission_cmd(leds: list = None) -> str:
     """One password prompt that covers everything lighting needs: the sysfs ring files and,
     when the controller has one, the lighting chip's hidraw interfaces."""
     rule = ('ACTION=="add|change", SUBSYSTEM=="leds", KERNEL=="*:rgb:*", '
             'RUN+="/bin/sh -c \'chmod a+w /sys%p/brightness /sys%p/multi_intensity '
-            '/sys%p/effect /sys%p/direction /sys%p/speed 2>/dev/null; true\'"')
+            '/sys%p/effect /sys%p/direction /sys%p/speed 2>/dev/null; true\'", '
+            'TAG+="systemd", ENV{SYSTEMD_WANTS}+="allyhub-lighting-perms.service"')
     parts = [f"echo {shlex.quote(rule)} | tee {UDEV_LED_RULE} >/dev/null"]
     hid = hid_rules(leds) if leds is not None else []
     if hid:
         body = "\n".join([RULES_MARKER] + hid)
         parts.append(f"printf '%s\\n' {shlex.quote(body)} | tee {HID_PERMISSION_RULE} >/dev/null")
+    # 1.4.1.11 (the owner: it kept asking): the permission was lost at boot or after sleep, so a system service puts
+    # it back at every boot, after every wake and whenever the lights reappear. Same single password, once.
+    parts += [f"mkdir -p /etc/allyhub && printf '%s\\n' {shlex.quote(LIGHT_PERMS_SH)} > {LIGHT_PERMS_SCRIPT} && "
+              f"chmod 755 {LIGHT_PERMS_SCRIPT}",
+              f"printf '%s\\n' {shlex.quote(LIGHT_PERMS_UNIT)} > {LIGHT_PERMS_SERVICE}",
+              "systemctl daemon-reload",
+              f"systemctl enable {LIGHT_PERMS_SERVICE.rsplit('/', 1)[-1]} >/dev/null 2>&1; true",
+              f"{LIGHT_PERMS_SCRIPT}; true"]
     parts += ["udevadm control --reload",
               "udevadm trigger --subsystem-match=leds --action=change",
               "udevadm trigger --subsystem-match=hidraw --action=change", "sleep 1"]
@@ -3955,7 +4010,7 @@ function Content() {
   }
 
   const sections = [];
-  if (s.refresh && s.refresh.status === "trial") {
+  if (s.refresh && s.refresh.status === "trial" && s.refresh.left !== null) {
     sections.push(h(PanelSection, { title: `Testing ${s.refresh.max} Hz`, key: "refresh" },
       h(PanelSectionRow, null, h(Field, { focusable: true, label: `Going back to 120 Hz in ${s.refresh.left} s`,
         description: "Set Steam's refresh slider (Performance tab) to the top. Picture good? Keep it." })),
@@ -5905,7 +5960,6 @@ def parse_version(v: str) -> tuple:
 
 
 VERSION_RE = r"\d+\.\d+\.\d+(?:\.\d+)?"      # 6.3.6 (Stable) or 6.3.6.4 (test build, revision 4)
-MAX_TEST_REVISIONS = 10                         # the owner: more than that before Stable means it's not focused
 
 
 def plugin_newer(latest: str, installed: str) -> bool:
