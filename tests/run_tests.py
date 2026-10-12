@@ -1326,6 +1326,12 @@ check("software" in _v and "VRR" in _v and "smooth" in _v, "a step explains touc
 check("hardware" in " ".join(core.lab_verdict(dict(_r, irq=0))), "no touch signals at all reads as a hardware limit")
 _c = " ".join(core.lab_conclusion([dict(_r, touch="works"), dict(_r, method="b", irq=0)]))
 check("Closest: 144 Hz with method A" in _c and "VRR range" in _c, "the overall finding names the best method and the next step")
+check(core._frames_word({"x_stats": core.frame_stats([6.944] * 4305 + [13.9], 144)}, "x") == "smooth",
+      "1 skip in a 30 s run is smooth (reports #13, #17 called it 'a few' and failed every method)")
+_c13 = " ".join(core.lab_conclusion([dict(_r, touch="works", irq=60, frames_on_stats=_fs),
+                                      dict(_r, method="b", touch="none", irq=0), dict(_r, method="c", touch="works", irq=80)]))
+check("method B" in _c13 and "worked with method A, C" in _c13 and "every method" not in _c13,
+      "the summary names the method where touch went silent (report #13 said 'every method')")
 check(core.refresh_lua(144) == core.refresh_lua(144, core.REFRESH_BASELINE) and core.REFRESH_BASELINE == "a",
       "Turn on 144 Hz uses the lab-verified baseline (method A)")
 # ---- Decky leftovers and the launch watch (1.5.0.1) ----
@@ -1412,7 +1418,17 @@ check(len(rep["body"]) < 40000 and "x" * 100 in rep["body"], "issue body keeps t
 sent, failed = core.upload_reports()
 issue = [x for x in posts if x[0] == "POST" and x[1].endswith("/issues")]
 comments = [x for x in posts if x[0] == "POST" and "/issues/77/comments" in x[1]]
-check(sent == 1 and issue and len(comments) >= 3, f"uploads the issue, then attachments as comments ({len(comments)})")
+_ib = issue[0][2]["body"] if issue and len(issue[0]) > 2 and isinstance(issue[0][2], dict) else ""
+_posted = " ".join(c[2]["body"] for c in comments if len(c) > 2 and isinstance(c[2], dict))
+check(sent == 1 and issue and len(_ib) <= 65536 and "<details>" in _ib
+      and all(n in _ib or n in _posted for n in names),
+      f"logs go in the issue itself as far as they fit, the rest as comments ({len(comments)} comments)")
+core.gh_request = lambda method, path, data=None, **kw: (200, b"[]") if method == "GET" else (500, b"{}")
+_pf = core.queue_report("crash", "never-sends", "x", "fp-stuck", upload=False)
+for _k in range(core.REPORT_MAX_TRIES + 2):
+    core.upload_reports()
+check(not _pf.exists(), "a report that keeps failing is dropped, never retried forever (it did every minute)")
+core.gh_request = _fake_gh
 check(all(len(c[2]["body"]) <= 65536 for c in comments), "every comment fits GitHub's size limit")
 check(core.queue_report("crash", "boom2", "again", "fp-new") is None and core.LAST_QUEUE == "duplicate",
       "same problem on the same version waits a while")

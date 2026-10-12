@@ -7946,7 +7946,11 @@ class Hub(QMainWindow):
         item = CATALOG_BY_ID.get(key)
         name = item.name if item else ("Decky plugins" if key == "decky-safe" else key.split(":", 1)[-1])
         failed_msg = None
-        if code != 0 and key != "nonsteamlaunchers":     # the Launchers page checks and reports that one
+        installed_anyway = (code != 0 and item is not None and item.kind == "install" and key in self.installing
+                            and item.check(self.state))
+        if installed_anyway:   # the installer complained but the app is there (Decky on the owner's Ally Z1E)
+            core.app_log("gui", f"job {key} exited {code}, but {name} is installed: counting it as done")
+        if code != 0 and key != "nonsteamlaunchers" and not installed_anyway:   # Launchers page reports its own
             failed_msg = f"“{name}” failed (exit code {code})."
         elif item and item.kind == "install" and key in self.installing and not item.check(self.state):
             failed_msg = f"The {name} installer finished, but {name} isn't installed."
@@ -8422,6 +8426,13 @@ _SCALE_SET_BY_US = False
 
 
 def _excepthook(etype, evalue, tb):
+    if issubclass(etype, (KeyboardInterrupt, SystemExit)):
+        # a stop signal (the handheld restarting, Game Mode closing the app), not a crash: never report it or roll an
+        # update back for it (#14: the 144 Hz test's restart right after an update rolled 1.4.1.17 back)
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
+        return
     sys.__excepthook__(etype, evalue, tb)
     reported = core.report_exception("gui", (etype, evalue, tb))
     hint = core.report_hint()
@@ -8475,6 +8486,12 @@ def single_instance(app) -> bool:
 
 def main():
     sys.excepthook = _excepthook
+    import signal as _signal
+    for _sig in (_signal.SIGINT, _signal.SIGTERM):       # stop signals end the app cleanly (never a "crash")
+        try:
+            _signal.signal(_sig, lambda *_a: QApplication.instance() and QApplication.instance().quit())
+        except (ValueError, OSError):
+            pass
     core.app_log("gui", f"start {VERSION} ({'game mode' if GAMEMODE else 'desktop'})")
     for fix in (core.sync_testing_rescue, core.tidy_menu_entry):
         try:

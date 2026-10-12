@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.5.0.2
+
+From the latest error reports:
+- Fixed: an update could be rolled back when the handheld restarted right after it (the 144 Hz test's restart
+  looked like a crash). Being closed or restarted is never counted as a crash now.
+- Fixed: reports arrived without their logs, because the access key can't add comments. The logs now go into the
+  report itself; a repeat of a known problem opens a new report instead of failing; and a report that keeps failing
+  stops retrying after a while instead of trying every minute forever.
+- Fixed: an installer that complains even though the app installed fine (Decky on an Ally Z1E) no longer shows
+  "didn't finish". Ally Hub checks whether the app is there.
+- 144 Hz test: one or two skipped frames in a 30 second run counts as smooth, and the summary names the screen
+  setting where touch stopped instead of saying "every method".
+
 ## 1.5.0.1
 
 - **After a 144 Hz or test restart, Ally Hub opens the way the Play button does**, so it shouldn't get stuck at

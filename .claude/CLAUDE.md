@@ -311,6 +311,13 @@ stuck at "Launching"); countdowns run from `gui_opened_at()` (GUI writes `GUI_OP
 deadline; `_launch_watch` reports a stuck launch once with `steam_launch_log()`. Decky counts as installed only with
 its service unit (`decky_service_exists`); files alone = Repair. Jobs run without LD_PRELOAD (Steam overlay noise).
 Controller: Y = Steam keyboard, Menu = refresh (the owner).
+1.5.0.2 (reports #9-#18): the report key gets HTTP 403 on comments, so attachments go into the issue body
+(`_body_with_attachments`, up to `ISSUE_BODY_MAX`), a failed "happened again" comment opens a new issue, and a
+report is dropped after `REPORT_MAX_TRIES`. The GUI's excepthook ignores KeyboardInterrupt/SystemExit and SIGINT/
+SIGTERM quit cleanly (#14: a reboot right after an update rolled it back). An install job that exits non-zero but
+whose item `check()` passes counts as done. Lab: 1-2 skips per 30 s = smooth (`_frames_word`); the conclusion names
+methods. Second test device: the owner's wife's ROG Ally (RC71L, Z1E, SteamOS 3.9.2): all three 144 Hz methods
+passed touch and frames there, VRR on included (#17).
 Report attachments (comments) were missing on #9/#10: the uploader now logs the HTTP status; check the log.
 Password-free panel updates (polkit rule for plugin_loader + user-owned panel parts) were blocked by the session's
 safety check in 1.4.1.16: needs the owner's explicit decision before building.
