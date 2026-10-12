@@ -1296,6 +1296,24 @@ check(core.lab_state()["status"] == "done", "finishing twice never starts a seco
 core._mono = _g_mono
 core.reboot_device, core.boot_id, core.launch_self, core.game_mode_active, core.queue_report, core.lab_logs = _g3
 core.REFRESH_SCRIPT.unlink(missing_ok=True); core.REFRESH_STATE.unlink(missing_ok=True); core.LAB_STATE.unlink(missing_ok=True)
+# ---- frame meter math and the lab's plain-language findings (1.4.1.16) ----
+_fs = core.frame_stats([6.94] * 400, 144)
+check(_fs["ok"] and _fs["skipped"] == 0 and 143.5 < _fs["hz"] < 144.5 and _fs["jitter_ms"] < 0.01, "smooth 144 Hz measures as smooth")
+_fs2 = core.frame_stats([6.94] * 380 + [13.88] * 20, 144)
+check(_fs2["skipped"] == 20 and core._frames_word({"x_stats": _fs2}, "x") == "many", "doubled frames count as skipped")
+check(core._frames_word({"x_stats": core.frame_stats([8.33] * 400, 144)}, "x") == "not at the target rate",
+      "a screen still at 120 Hz never counts as smooth 144 Hz")
+check(not core.frame_stats([0.5] * 50)["ok"] and not core.frame_stats([])["ok"],
+      "swaps that don't wait for the screen can't be measured (no fake numbers)")
+_r = {"hz": 144, "method": "a", "picture": "good", "touch": "none", "irq": 40, "taps": 0,
+      "frames_off_stats": _fs, "frames_on_stats": _fs2}
+_v = " ".join(core.lab_verdict(_r))
+check("software" in _v and "VRR" in _v and "smooth" in _v, "a step explains touch signals without taps and VRR-only skips")
+check("hardware" in " ".join(core.lab_verdict(dict(_r, irq=0))), "no touch signals at all reads as a hardware limit")
+_c = " ".join(core.lab_conclusion([dict(_r, touch="works"), dict(_r, method="b", irq=0)]))
+check("Closest: 144 Hz with method A" in _c and "VRR range" in _c, "the overall finding names the best method and the next step")
+check(core.refresh_lua(144) == core.refresh_lua(144, core.REFRESH_BASELINE) and core.REFRESH_BASELINE == "a",
+      "Turn on 144 Hz uses the lab-verified baseline (method A)")
 # ---- the extra Ally Hub theme ----
 check(core.DEFAULT_CONFIG["theme"]["preset"] == "ROG Crimson" and "Ally Hub" in core.EXTRA_THEMES
       and list(core.THEMES)[-1] == "Ally Hub" and core.theme_palette({"preset": "nope"})["accent"] == "#e11d48",

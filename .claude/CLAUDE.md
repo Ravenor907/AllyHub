@@ -293,6 +293,15 @@ touch. Touch = `TouchPad` taps + `touch_irq_count` delta (rises with no taps = s
 (`lab_logs`: kernel filtered, bracketed device names stripped; gamescope-session unit only) and sends the report at
 every ending (`lab_send_report`, kind `refresh-lab`). The lab and the older trial never run together (`refresh_busy`).
 Read the lab report's table before changing 144 Hz code.
+Owner's lab (issues #9, #10, 1.4.1.15): a = picture + touch OK (taps and signals arrive), b = touch chip silent,
+c = touch off target. `REFRESH_BASELINE = "a"` is what "Turn on 144 Hz" uses (the owner: baseline, keep the lab for
+other handhelds). Frame checks use the built-in `FrameMeter` (gui: `FrameProbe` QWindow with swap interval 1 in a
+createWindowContainer; it draws over sheets, so the box is only visible while running and the page meter stops
+when a sheet opens; interval backs off when not exposed or swaps don't block). `frame_stats` flags `off_target`
+(>5% from target). Button handlers get clicked(bool): lambdas with defaults need `*_` (1.4.1.15 saved "False").
+Report attachments (comments) were missing on #9/#10: the uploader now logs the HTTP status; check the log.
+Password-free panel updates (polkit rule for plugin_loader + user-owned panel parts) were blocked by the session's
+safety check in 1.4.1.16: needs the owner's explicit decision before building.
 The brightness slider goes through `led_dim` (`LED_DIM_CURVE`) for streamed frames: linear drive barely dimmed.
 The chip's own spiral has only 3 brightness steps, so `chip_runs` hands it to the chip only at `CHIP_SPIRAL_FULL`;
 below that the agent streams the same rainbow spiral (owner: 1.4.1.12 still didn't dim it).

@@ -22,7 +22,8 @@ from core import (APP_NAME, CATALOG, CATALOG_BY_ID, HOME, USER, VERSION, Item, l
 from PySide6.QtCore import (QBuffer, QByteArray, QEvent, QIODevice, QObject, QPoint, QPointF, QProcess, QProcessEnvironment, QRectF, QSize,
                             QSocketNotifier, Qt, QTimer, QUrl, Signal)
 from PySide6.QtGui import (QColor, QDesktopServices, QFont, QIcon, QImage, QImageReader,
-                           QKeyEvent, QMouseEvent, QPainter, QPainterPath, QPen, QPixmap, QTextCursor)
+                           QKeyEvent, QMouseEvent, QOpenGLContext, QPainter, QPainterPath, QPen, QPixmap, QSurface,
+                           QSurfaceFormat, QTextCursor, QWindow)
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
     QAbstractButton, QAbstractItemView, QAbstractScrollArea, QApplication, QCheckBox, QColorDialog, QComboBox,
@@ -2294,6 +2295,212 @@ class RingPreview(QWidget):
                 p.drawArc(rect, start * 16, 180 * 16)
                 p.setPen(QPen(color, pen_w))
                 p.drawArc(rect, start * 16, 180 * 16)
+
+
+class FrameProbe(QWindow):
+    """A tiny OpenGL surface whose buffer swaps wait for the screen (swap interval 1), so the time between swaps is
+    the real frame time: the same idea as a browser's requestAnimationFrame, which Monitor OC measures. Embedded with
+    createWindowContainer (no separate window). Under 2 ms between swaps = the swaps don't wait: can't measure."""
+
+    def __init__(self, on_frame):
+        super().__init__()
+        self.setSurfaceType(QSurface.SurfaceType.OpenGLSurface)
+        fmt = QSurfaceFormat()
+        fmt.setSwapInterval(1)
+        fmt.setSwapBehavior(QSurfaceFormat.SwapBehavior.DoubleBuffer)
+        self.setFormat(fmt)
+        self.ctx = None
+        self.failed = False
+        self.on_frame = on_frame
+        self.flip = False
+        self.timer = QTimer()
+        self.timer.setInterval(0)
+        self.timer.timeout.connect(self.frame)
+
+    def start(self):
+        self.timer.setInterval(0)
+        self.timer.start()
+
+    def stop(self):
+        self.timer.stop()
+
+    def frame(self):
+        if self.failed:
+            self.timer.stop()
+            return
+        if not self.isExposed():
+            self.timer.setInterval(50)                   # hidden: look again later, never spin
+            return
+        try:
+            if self.ctx is None:
+                ctx = QOpenGLContext()
+                ctx.setFormat(self.requestedFormat())
+                if not ctx.create():
+                    self.failed = True
+                    self.timer.stop()
+                    return
+                self.ctx = ctx
+            if not self.ctx.makeCurrent(self):
+                self.timer.setInterval(50)
+                return
+            t0 = time.perf_counter()
+            f = self.ctx.functions()
+            self.flip = not self.flip
+            c = 0.18 if self.flip else 0.24                  # a faint flicker shows it's running
+            f.glClearColor(c, c, c, 1.0)
+            f.glClear(0x4000)                                # GL_COLOR_BUFFER_BIT
+            self.ctx.swapBuffers(self)                       # waits for the screen's next refresh
+            now = time.perf_counter()
+            # swaps that don't wait (under 2 ms) would spin the CPU: then pace at about 250 a second instead
+            self.timer.setInterval(4 if now - t0 < 0.002 else 0)
+            self.on_frame(now)
+        except Exception:
+            self.failed = True
+            self.timer.stop()
+            core.report_exception("frame-meter")
+
+
+class FrameGraph(QWidget):
+    """Frame times as a line (like Monitor OC's): dashed target, red dots on skipped frames."""
+
+    def __init__(self):
+        super().__init__()
+        self.values, self.target_ms = [], None
+        self.setMinimumHeight(110)
+
+    def set_data(self, values: list, target_ms: float):
+        self.values, self.target_ms = list(values)[-150:], target_ms
+        self.update()
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        w, h = self.width(), self.height()
+        p.fillRect(self.rect(), QColor(0, 0, 0, 60))
+        tgt = self.target_ms or (sorted(self.values)[len(self.values) // 2] if self.values else 8.3)
+        top = tgt * 2.5                                      # the graph shows 0 to 2.5x the target frame time
+        y = lambda v: h - 6 - min(v, top) / top * (h - 12)
+        pen = QPen(QColor(255, 255, 255, 110), 1, Qt.DashLine)
+        p.setPen(pen)
+        p.drawLine(0, int(y(tgt)), w, int(y(tgt)))
+        if len(self.values) >= 2:
+            step = w / (len(self.values) - 1)
+            path = QPainterPath()
+            for i, v in enumerate(self.values):
+                pt = QPointF(i * step, y(v))
+                path.moveTo(pt) if i == 0 else path.lineTo(pt)
+            p.setPen(QPen(self.palette().highlight().color(), 2))
+            p.drawPath(path)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor("#ef4444"))
+            for i, v in enumerate(self.values):
+                if v > 1.5 * tgt:
+                    p.drawEllipse(QPointF(i * step, y(v)), 3.5, 3.5)
+        p.end()
+
+
+class FrameMeter(QWidget):
+    """Measured Hz, frame time, jitter, fastest/slowest, skipped frames and the graph. `run(seconds)` measures for a
+    while and calls `done(stats)`; `start()` runs until `stop()`."""
+
+    def __init__(self, target_hz: float = None, in_sheet: bool = False):
+        super().__init__()
+        self.target_hz = target_hz
+        self.in_sheet = in_sheet          # the lab's meters live inside a sheet; the page meter yields to sheets
+        self.times, self.intervals = [], []
+        self.done = None
+        self.until = None
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        top = QHBoxLayout()
+        self.probe = FrameProbe(self._frame)
+        box = QWidget.createWindowContainer(self.probe, self)
+        box.setFixedSize(28, 28)                             # it has to be on screen for the swaps to wait for it
+        box.setFocusPolicy(Qt.NoFocus)
+        box.setVisible(False)            # a native GL box draws over everything (sheets, toasts): only while running
+        self.box = box
+        top.addWidget(box)
+        self.big = label("–", "bigValue")
+        top.addWidget(self.big)
+        self.nums = label("Not running", "cardMeta", wrap=True)
+        top.addWidget(self.nums, 1)
+        v.addLayout(top)
+        self.graph = FrameGraph()
+        v.addWidget(self.graph)
+        self.legend = label("The line should stay flat on the dashed target. Red dots are skipped frames "
+                            "(more than 1.5x the usual frame time).", "cardMeta", wrap=True)
+        v.addWidget(self.legend)
+        self.ui = QTimer(self)
+        self.ui.setInterval(250)
+        self.ui.timeout.connect(self.refresh)
+
+    def running(self) -> bool:
+        return self.ui.isActive()
+
+    def start(self, seconds: float = None, done=None):
+        self.times, self.intervals = [], []
+        self.done = done
+        self.until = time.perf_counter() + seconds if seconds else None
+        self.box.setVisible(True)
+        self.probe.start()
+        self.ui.start()
+
+    def stop(self):
+        self.probe.stop()
+        self.ui.stop()
+        self.box.setVisible(False)
+        self.refresh()
+
+    def _finish(self):
+        """A timed run is over (or can't run): stop and report, exactly once."""
+        self.until = None
+        self.stop()
+        if self.done:
+            cb, self.done = self.done, None
+            cb(self.stats())
+
+    def stats(self) -> dict:
+        return core.frame_stats(self.intervals[2:], self.target_hz)  # the first swaps can be slow while starting
+
+    def _frame(self, t: float):
+        if self.times:
+            self.intervals.append((t - self.times[-1]) * 1000.0)
+        self.times.append(t)
+        if len(self.times) > 64:
+            self.times = self.times[-2:]
+        if self.until is None and len(self.intervals) > 6000:
+            self.intervals = self.intervals[-5000:]      # an open-ended run keeps the last ~35 s at 144 Hz
+        if self.until and t >= self.until:
+            self._finish()
+
+    def refresh(self):
+        if self.running():
+            if not self.in_sheet and _HUB is not None and getattr(_HUB, "_sheet", None) is not None:
+                self.stop()                              # a sheet opened over the page meter: it yields
+                return
+            if self.until and (time.perf_counter() > self.until + 2 or self.probe.failed):
+                self._finish()                           # no frames are coming (hidden, failed): end the run anyway
+                return
+        st = self.stats()
+        if self.probe.failed:
+            self.big.setText("–")
+            self.nums.setText("This screen setup can't be measured (no OpenGL here).")
+            return
+        if st.get("count", 0) < 2:
+            self.nums.setText("Measuring…" if self.probe.timer.isActive() else "Not running")
+            return
+        if not st["ok"]:
+            self.big.setText("–")
+            self.nums.setText("Frames aren't waiting for the screen here, so they can't be measured.")
+            return
+        self.big.setText(f"{st['hz']:.1f} Hz")
+        left = f" · {max(0, int(self.until - time.perf_counter()))} s left" if self.until else ""
+        self.nums.setText(f"Frame time {st['avg_ms']:.2f} ms · jitter ±{st['jitter_ms']:.2f} ms · fastest/slowest "
+                          f"{st['fastest_ms']:.2f}/{st['slowest_ms']:.2f} ms · skipped {st['skipped']} of "
+                          f"{st['count']}{left}")
+        if st.get("off_target"):
+            self.nums.setText(self.nums.text() + f" · not at {self.target_hz:g} Hz: set Steam's refresh slider to it")
+        self.graph.set_data(self.intervals[-150:], st["target_ms"])
 
 
 class TouchPad(QFrame):
@@ -5357,6 +5564,14 @@ class _PerformanceRefresh:
         core.refresh_request(hz)
         self.hub.toast("Restarting your handheld…", 5000)
 
+    def toggle_meter(self, *_args):
+        if self.meter.running():
+            self.meter.stop()
+            self.btn_meter.setText("Start")
+        else:
+            self.meter.start()
+            self.btn_meter.setText("Stop")
+
     def lab_start(self, *_args):
         if not GAMEMODE:
             msg_info(self, APP_NAME, "The 144 Hz lab runs in Game Mode. Switch to Game Mode and start it there.")
@@ -5368,12 +5583,20 @@ class _PerformanceRefresh:
         if core.refresh_busy():
             msg_info(self, APP_NAME, "A 144 Hz test is already running. Finish it first.")
             return
-        if not ask(self, "Run the 144 Hz lab?\n\nIt tries three ways of driving the screen at 144 Hz, one per restart "
-                         "(and lower rates if none keeps touch working). After each restart Ally Hub opens and walks "
-                         "you through four quick checks: the picture, touch, and Monitor OC's skipped frames with VRR "
-                         "off and on.\n\nPlan about 10 to 15 minutes, have Monitor OC installed, and save your game. "
-                         "If the screen goes black, that step undoes itself.\n\nAt the end you can keep the best one "
-                         "or go back to before, and the results are sent as a report."):
+        if not ask(self, "Run the 144 Hz lab?\n\n"
+                         "How it works: there are several ways to build a 144 Hz signal for this screen. The lab loads "
+                         "one per restart (A: the 120 Hz timing sped up, B: a longer pause between frames, C: shorter "
+                         "lines), then checks each one:\n"
+                         "• Picture: you say if it looks right.\n"
+                         "• Touch: you tap a box. Ally Hub counts the taps it receives AND the signals the touch chip "
+                         "sends. Signals with no taps = the screen feels you but Game Mode loses it (fixable). No "
+                         "signals = the chip can't keep up with that timing (hardware).\n"
+                         "• Frames: Ally Hub's frame meter counts every refresh for 30 seconds, with VRR off and then "
+                         "on. Smooth with VRR off but not on = VRR is the problem, not the timing.\n\n"
+                         "If no 144 Hz way keeps touch working, it tries 138, 132 and 126 Hz. After each step it shows "
+                         "what it found, and at the end what it all means. Keep the best one or go back to before; the "
+                         "results are sent as a report.\n\nAbout 10 to 15 minutes. Save your game first. If the "
+                         "screen goes black, that step undoes itself."):
             return
         if core.lab_start():
             self.hub.toast("Restarting into step 1…", 5000)
@@ -5473,6 +5696,19 @@ class PerformancePage(QWidget, _PerformanceRefresh):
         rv.addWidget(label("⚠ " + core.REFRESH_DISCLAIMER, "cardWarn", wrap=True))   # shown in both modes
         v.addWidget(adv(rcard))
 
+        # the owner (1.4.1.16): a frame time counter and graph like Monitor OC's, built in
+        mcard, mv = titled_card("activity", "#22c55e", "Frame meter",
+                                "Counts every screen refresh: measured Hz, frame time, jitter and skipped frames, with "
+                                "a live graph. Leave it running while you change Steam's refresh rate or VRR.")
+        self.meter = FrameMeter()
+        mv.addWidget(self.meter)
+        mr = QHBoxLayout()
+        self.btn_meter = button("Start", self.toggle_meter, "primary")
+        mr.addWidget(self.btn_meter)
+        mr.addStretch()
+        mv.addLayout(mr)
+        v.addWidget(mcard)
+
         tune_head = label("TUNE-UP", "section")
         tcard, tv = titled_card(
             "memory-stick", "#22c55e", "System tune-up",
@@ -5517,6 +5753,9 @@ class PerformancePage(QWidget, _PerformanceRefresh):
         super().hideEvent(ev)
         if hasattr(self, "_timer"):
             self._timer.stop()
+        if getattr(self, "meter", None) is not None and self.meter.running():
+            self.meter.stop()                            # never keep swapping frames on a page nobody sees
+            self.btn_meter.setText("Start")
 
     def refresh(self):
         self.refresh_update()
@@ -7155,6 +7394,7 @@ class Hub(QMainWindow):
         st = core.lab_state()
         n, total = int(st.get("i", 0)) + 1, len(st.get("plan") or [])
         res = {"picture": "-", "touch": "-", "taps": 0, "irq": "n/a", "frames_off": "-", "frames_on": "-"}
+        meters = {}
         dev = core.touch_device()
         dlg = QDialog(self)
         dlg.setWindowTitle("144 Hz lab")
@@ -7175,6 +7415,9 @@ class Hub(QMainWindow):
             return v
 
         def go(key):
+            for k, m in meters.items():                 # a meter only runs on its own page
+                if k != key:
+                    m.stop()
             stack.setCurrentIndex(pages[key][0])
             # the controller's focus must follow the page (the old page's buttons are hidden now)
             QTimer.singleShot(0, lambda: next((b.setFocus() for b in stack.currentWidget().findChildren(QPushButton)
@@ -7233,15 +7476,39 @@ class Hub(QMainWindow):
         row(v, ("Touch does nothing", lambda: touch_answer("none"), ""),
             ("Touch lands in the wrong spot", lambda: touch_answer("off target"), ""))
 
-        frames = (("0 skipped", "0"), ("A few", "a few"), ("Many or a pattern", "many"), ("Didn't check", "-"))
-        v = page("off", f"Frames with VRR OFF: in ••• → Performance turn VRR off. Open Monitor OC → Verify, set the "
-                        f"target to {hz} Hz, let it run 30 seconds, then come back here. Skipped frames?")
-        row(v, *[(t, (lambda val=val: pick("frames_off", val, "on")), "primary" if i == 0 else "")
-                 for i, (t, val) in enumerate(frames)])
-        v = page("on", f"Frames with VRR ON: turn VRR on, run Monitor OC → Verify at {hz} Hz for 30 seconds again. "
-                       "Skipped frames?")
-        row(v, *[(t, (lambda val=val: pick("frames_on", val, "end")), "primary" if i == 0 else "")
-                 for i, (t, val) in enumerate(frames)])
+        # Frames: Ally Hub's own frame meter measures 30 s (the owner: built in, like Monitor OC). Monitor OC answers
+        # still work as a fallback. Buttons get clicked(bool): every lambda takes *_ so `checked` never lands in a value.
+        frames = (("0 skipped", "0"), ("A few", "a few"), ("Many or a pattern", "many"))
+
+        def frame_page(key, vrr, nxt):
+            v = page(key, f"Frames with VRR {vrr.upper()}: in ••• → Performance turn VRR {vrr}, come back, then "
+                          f"press Measure. Ally Hub counts every screen refresh for 30 seconds at {hz} Hz.")
+            m = FrameMeter(target_hz=hz, in_sheet=True)
+            meters[key] = m
+            v.addWidget(m)
+            status = label("", "cardMeta", wrap=True)
+            v.addWidget(status)
+
+            def measured(st, key=key, nxt=nxt):
+                res[f"frames_{key}_stats"] = st
+                if not st.get("ok"):
+                    status.setText("Couldn't measure here. Answer from Monitor OC below, or skip.")
+                    return
+                word = core._frames_word({"x_stats": st}, "x")
+                res[f"frames_{key}"] = word
+                status.setText(f"Measured: {core.frame_summary(st)}. That counts as {word}.")
+                QTimer.singleShot(2500, lambda: go(nxt) if stack.currentIndex() == pages[key][0] else None)
+
+            def measure(*_):
+                core.lab_ping()
+                status.setText("Measuring for 30 seconds… keep the handheld still and don't press anything.")
+                m.start(30, done=measured)
+            row(v, ("Measure", measure, "primary"), ("Skip this check", lambda *_: pick(f"frames_{key}", "-", nxt), ""))
+            v.addWidget(label("Or answer from Monitor OC (Verify page, 30 seconds):", "cardMeta"))
+            row(v, *[(t, (lambda *_, val=val: pick(f"frames_{key}", val, nxt)), "") for t, val in frames])
+
+        frame_page("off", "off", "on")
+        frame_page("on", "on", "end")
 
         v = page("end", "")
         summary = label("", "cardDesc", wrap=True)
@@ -7256,10 +7523,15 @@ class Hub(QMainWindow):
             for k in ("_irq0", "_touch_done"):
                 res.pop(k, None)
             core.lab_record({k: v for k, v in res.items() if not k.startswith("_")})   # logs: the agent adds them
-            summary.setText(f"Recorded: picture {res['picture']}, touch {res['touch']} "
-                            f"(taps {res['taps']}, touch signals {res['irq']}), skipped frames VRR off "
-                            f"{res['frames_off']}, VRR on {res['frames_on']}.")
+            clean = {k: v for k, v in res.items() if not k.startswith("_")}
             more = core.lab_has_next()
+            text = "What this step found:\n• " + "\n• ".join(core.lab_verdict(clean))
+            if not more:                                 # the last step: what the whole run shows
+                text += "\n\nWhat the lab found overall:\n• " + "\n• ".join(
+                    core.lab_conclusion(core.lab_state().get("results") or []))
+            else:
+                text += "\n\nNext: another way of driving the screen, to compare against this one."
+            summary.setText(text)
             if more:
                 actions.addWidget(button("Next step (restarts)", lambda: (core.lab_next() or core.lab_finish(None),
                                                                           dlg.accept()), "primary"))
@@ -7290,6 +7562,8 @@ class Hub(QMainWindow):
         finally:
             tick.stop()
             pad.tapped.disconnect()
+            for m in meters.values():
+                m.stop()
 
     def check_refresh(self):
         """While a 144 Hz test runs: a panel with a live countdown, Keep and Undo now (in Game Mode, right after the
