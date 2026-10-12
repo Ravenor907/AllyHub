@@ -2409,6 +2409,14 @@ check(any("permission didn't take" in r["title"] for r in reps),
       "blocked permission files a report instead of a restart loop")
 body = next(r["body"] for r in reps if "permission didn't take" in r["title"])
 check("chip ok: False" in body and "hidraw7" in body, "report says exactly what is blocked")
+_rap, _probs = L._report_access_problem, []
+L._report_access_problem = lambda leds: _probs.append(1)
+hub._allow_all_lighting = False
+tryit("allow-all without lighting", lambda: hub.on_job_finished("allow-all", 0, "Done"))
+hub._allow_all_lighting = True
+tryit("allow-all with lighting", lambda: hub.on_job_finished("allow-all", 0, "Done"))
+check(_probs == [1], "Allow all only checks lighting when it set lighting up (#19: HueSync in charge)")
+L._report_access_problem = _rap
 hub.runner.submit = _submit
 core.hid_writable = _hw
 # switching between HueSync and Ally Hub

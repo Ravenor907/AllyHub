@@ -7992,7 +7992,7 @@ class Hub(QMainWindow):
         after = self._decky_after.pop(key, None)
         if after:
             after(code == 0)
-        if key in ("rgb-perms", "allow-all"):
+        if key == "rgb-perms" or (key == "allow-all" and getattr(self, "_allow_all_lighting", False)):
             self.lighting.access_job_done(code == 0)
         if key == "allow-all":
             self.performance.job_done(key, code == 0)
@@ -8302,6 +8302,9 @@ class Hub(QMainWindow):
             return True
         if core.qam_installed():
             core.qam_stage()                             # the job copies the panel from here
+        # only check lighting afterwards if this job set it up (#19: with HueSync in charge lighting is skipped,
+        # and checking it anyway filed "Lighting permission didn't take")
+        self._allow_all_lighting = "lighting" in core.allow_all_missing(leds if isinstance(leds, list) else None)
         self.runner.submit("Allow Ally Hub (one password)", cmd, "allow-all")
         return True
 

@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.5.0.5
+
+- Fixed: "Allow all" in Checkup no longer reports "Lighting permission didn't take" while HueSync is in
+  charge of the lights. Lighting is skipped then, so there was nothing to check.
+
 ## 1.5.0.4
 
 - Fixed: "Couldn't reach GitHub" when checking for updates with an error-report access key that isn't allowed to
