@@ -318,6 +318,8 @@ refuses if it's writable), main.py/dist/package.json become the user's, and `DEC
 restart/start plugin_loader.service only. The agent then updates an outdated panel itself when no game runs
 (`qam_update_nopw`). Checkup "Password prompts" → `Hub.allow_all` = one job for lighting, Game Boost and the panel.
 Security reviews: this is a deliberate, owner-approved trade-off; flag it only if plugin.json or the rule widen.
+1.5.0.4: `gh_request` retries GETs without the key on 401, 403 and 404 (a fine-grained report key may not be allowed
+to read contents: the owner got "Couldn't reach GitHub"). Update errors carry the HTTP status (`github_problem`).
 1.5.0.2 (reports #9-#18): the report key gets HTTP 403 on comments, so attachments go into the issue body
 (`_body_with_attachments`, up to `ISSUE_BODY_MAX`), a failed "happened again" comment opens a new issue, and a
 report is dropped after `REPORT_MAX_TRIES`. The GUI's excepthook ignores KeyboardInterrupt/SystemExit and SIGINT/

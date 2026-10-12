@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.5.0.4
+
+- Fixed: "Couldn't reach GitHub" when checking for updates with an error-report access key that isn't allowed to
+  read the repo. Updates are read without the key in that case (the repo is public). The message now also says
+  why GitHub didn't answer.
+
 ## 1.5.0.3
 
 - **One password for everything.** Checkup has a "Password prompts" check: one tap and one password set up

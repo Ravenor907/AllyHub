@@ -1391,6 +1391,29 @@ check(_ac and "LIGHT" in _ac and "energy_performance_preference" in _ac and "pol
 core.lighting_access_ok, core.epp_files, core.epp_writable, core.qam_installed, core.decky_service_exists, \
     core.qam_self_updatable = _g5
 core.led_permission_cmd = _lpc
+# ---- a fine-grained key that can't read must not stop updates (1.5.0.4, "cannot reach GitHub") ----
+import urllib.error as _ue, io as _io
+_calls = []
+class _Resp:
+    status = 200
+    def __init__(self, b): self.b = b
+    def read(self): return self.b
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+def _fake_open(req, timeout=None):
+    auth = req.headers.get("Authorization")
+    _calls.append(bool(auth))
+    if auth:
+        raise _ue.HTTPError(req.full_url, 403, "Forbidden", {}, _io.BytesIO(b'{"message":"Resource not accessible by personal access token"}'))
+    return _Resp(b"6.5.0.4")
+_uo = core.urllib.request.urlopen
+core.urllib.request.urlopen = _fake_open
+_gt = core.github_token
+core.github_token = lambda: "github_pat_" + "x" * 40
+check(core.remote_version("main") == "6.5.0.4" and _calls == [True, False],
+      "a key that isn't allowed to read the repo falls back to reading it without the key")
+check("HTTP 403" in core.github_problem(403) and core.github_problem(0) == "no connection", "the error says why")
+core.urllib.request.urlopen, core.github_token = _uo, _gt
 # ---- the extra Ally Hub theme ----
 check(core.DEFAULT_CONFIG["theme"]["preset"] == "ROG Crimson" and "Ally Hub" in core.EXTRA_THEMES
       and list(core.THEMES)[-1] == "Ally Hub" and core.theme_palette({"preset": "nope"})["accent"] == "#e11d48",
