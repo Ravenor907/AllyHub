@@ -960,7 +960,8 @@ def _frames_word(r: dict, key: str) -> Optional[str]:
         if st.get("off_target"):
             return "not at the target rate"
         per_min = st["skipped"] / max(0.25, st["count"] * st["avg_ms"] / 60000.0)   # at least 15 s of frames
-        return "smooth" if st["skipped"] == 0 else "a few" if per_min <= 10 else "many"
+        # 1-2 skips in a 30 s run is normal background noise (reports #13, #17: 1 of 4306), not a problem
+        return "smooth" if per_min <= 4 else "a few" if per_min <= 30 else "many"
     v = r.get(key)
     return {"0": "smooth", "a few": "a few", "many": "many"}.get(v)
 
@@ -1021,16 +1022,19 @@ def lab_conclusion(results: list) -> list:
         r = full[0]
         out.append(f"Closest: {r['hz']} Hz with method {str(r['method']).upper()}: picture, touch and smooth frames "
                    "with VRR off. VRR still skips frames, which needs the VRR range fix next.")
-    t144 = [r for r in res if r["hz"] == 144 and r.get("touch") in ("none", "off target")]
-    if t144:
-        signals = [r for r in t144 if isinstance(r.get("irq"), int) and r["irq"] > 0]
-        silent = [r for r in t144 if r.get("irq") == 0]
-        if signals and not silent:
-            out.append("At 144 Hz the touch chip kept sending signals that never arrived, so touch at 144 Hz is a "
-                       "software problem in Game Mode, worth fixing.")
-        elif silent and not signals:
-            out.append("At 144 Hz the touch chip went silent with every method tried, so this panel's touch can't "
-                       "keep up at 144 Hz. The highest rate where touch worked is the realistic limit.")
+    at144 = [r for r in res if r["hz"] == 144]
+    names = lambda rs: ", ".join(sorted({str(r["method"]).upper() for r in rs}))
+    works = [r for r in at144 if r.get("touch") == "works"]
+    silent = [r for r in at144 if r.get("touch") in ("none", "off target") and r.get("irq") == 0]
+    signals = [r for r in at144 if r.get("touch") in ("none", "off target")
+               and isinstance(r.get("irq"), int) and r["irq"] > 0]
+    if silent:   # name the methods: report #13 said "every method" when only B went silent
+        out.append(f"Touch at 144 Hz: the touch chip went silent with method {names(silent)} (that timing is too "
+                   "much for it)" + (f", but touch worked with method {names(works)}." if works else
+                                     ". No 144 Hz method kept touch, so the highest rate where it worked is the limit."))
+    if signals:
+        out.append(f"Touch at 144 Hz: with method {names(signals)} the touch chip kept sending signals that never "
+                   "arrived, so Game Mode is mishandling them: a software problem, worth fixing.")
     ok_touch = sorted({r["hz"] for r in res if r.get("touch") == "works"}, reverse=True)
     if ok_touch and 144 not in ok_touch:
         out.append(f"Touch worked up to {ok_touch[0]} Hz.")
@@ -6539,6 +6543,25 @@ def upload_reports() -> tuple:
         lock.close()
 
 
+REPORT_MAX_TRIES = 30
+ISSUE_BODY_MAX = 64000
+
+
+def _body_with_attachments(rep: dict) -> tuple:
+    """The issue body with as many attachments folded in as fit (GitHub allows 65536 characters), plus the ones that
+    didn't fit, to post as comments."""
+    body = rep["body"][:ISSUE_BODY_MAX]
+    rest = []
+    for att in rep.get("attachments") or []:
+        block = (f"\n<details><summary>{att.get('name', 'Attachment')}</summary>\n\n```\n{att.get('text', '')}\n```"
+                 f"\n</details>\n")
+        if len(body) + len(block) <= ISSUE_BODY_MAX:
+            body += block
+        else:
+            rest.append(att)
+    return body, rest
+
+
 def _upload_locked(files: list) -> tuple:
     if not files:
         return 0, 0
@@ -6566,14 +6589,20 @@ def _upload_locked(files: list) -> tuple:
         fp = rep["fingerprint"]
         existing = next((i for i in open_issues if fp in (i.get("title") or "")), None)
         number = None
+        status = 0
+        # 1.5.0.2 (reports #9-#18): the access key may create issues but not comment on them (HTTP 403), so the logs
+        # go into the issue itself, as much as fits; only what doesn't fit is posted as comments.
+        body, rest = _body_with_attachments(rep)
         if existing:
             number = existing["number"]
             status, _ = gh_request("POST", f"/repos/{repo}/issues/{number}/comments",
                                    {"body": f"Happened again on {rep['time']} "
-                                            f"(v{display_version(rep['version'])}).\n\n" + rep["body"][:60000]})
-        else:
+                                            f"(v{display_version(rep['version'])}).\n\n" + body[:60000]})
+            if status in (401, 403, 404):                # can't comment: report it as a new issue instead
+                existing, number = None, None
+        if not existing:
             prefix = "[report]" if rep["kind"] == "user" else "[auto]"
-            payload = {"title": f"{prefix} {rep['title']} ({fp})", "body": rep["body"][:65000],
+            payload = {"title": f"{prefix} {rep['title']} ({fp})", "body": body,
                        "labels": ["auto-report", rep["kind"]] + (["testing"] if rep.get("channel") == "testing" else [])}
             status, resp = gh_request("POST", f"/repos/{repo}/issues", payload)
             if status == 422:   # labels not allowed for this key: send without them
@@ -6584,7 +6613,7 @@ def _upload_locked(files: list) -> tuple:
             except (ValueError, AttributeError):
                 number = None
         if status in (200, 201):
-            for att in rep.get("attachments") or []:
+            for att in rest:
                 if number:
                     for chunk in _comment_chunks(att.get("name", "Attachment"), att.get("text", "")):
                         cs, cb = gh_request("POST", f"/repos/{repo}/issues/{number}/comments", {"body": chunk})
@@ -6604,6 +6633,12 @@ def _upload_locked(files: list) -> tuple:
         else:
             failed += 1
             app_log("report", f"upload failed with HTTP {status}")
+            rep["tries"] = int(rep.get("tries", 0)) + 1
+            if rep["tries"] >= REPORT_MAX_TRIES:         # never retry one report forever (it did every minute)
+                app_log("report", f"gave up on '{rep.get('title', '')[:60]}' after {rep['tries']} tries")
+                f.unlink(missing_ok=True)
+            else:
+                write_json(f, rep)
             if status in (401, 403, 404):
                 break
     week_ago = time.time() - 7 * 86400
