@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.4.1.18
+
+- **The 144 Hz test is much simpler to follow**: one question per screen with a progress row on top (Check, Set
+  144 Hz, Picture, Touch, VRR off, VRR on, Result), numbered steps only where you need Steam's ••• menu, and Ally
+  Hub confirms by itself when the screen reaches 144 Hz. Frame tests start with one button and move on by
+  themselves. The warning is one short line.
+- Fixed: button text could be unreadable with light accent colors. It now picks black or white for contrast.
+
 ## 1.4.1.17
 
 - Fixed: after a 144 Hz or lab restart, Ally Hub could open too early and get stuck at the library's cancel button.

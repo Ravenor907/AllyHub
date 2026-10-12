@@ -1309,6 +1309,8 @@ _fs = core.frame_stats([6.94] * 400, 144)
 check(_fs["ok"] and _fs["skipped"] == 0 and 143.5 < _fs["hz"] < 144.5 and _fs["jitter_ms"] < 0.01, "smooth 144 Hz measures as smooth")
 _fs2 = core.frame_stats([6.94] * 380 + [13.88] * 20, 144)
 check(_fs2["skipped"] == 20 and core._frames_word({"x_stats": _fs2}, "x") == "many", "doubled frames count as skipped")
+check(core.frame_stats([8.333] * 400, 126)["off_target"] and not core.frame_stats([6.96] * 400, 144)["off_target"]
+      and core.frame_stats([7.25] * 400, 144)["off_target"], "120 Hz never passes as 126, nor 138 as 144")
 check(core._frames_word({"x_stats": core.frame_stats([8.33] * 400, 144)}, "x") == "not at the target rate",
       "a screen still at 120 Hz never counts as smooth 144 Hz")
 check(not core.frame_stats([0.5] * 50)["ok"] and not core.frame_stats([])["ok"],
@@ -1897,6 +1899,9 @@ check(core.update_channel() == "stable", "an unknown channel falls back to Stabl
 GUI = r"""
 import gui, core
 import inspect as _insp
+check(gui.readable_on("#fff7a0", "#ffe14d", "#ffffff") == "#000000" and gui.readable_on("#e11d48", "#8b5cf6", "#ffffff") == "#ffffff"
+      and all(gui.readable_on(t["accent"], t["accent2"], t["on_accent"]) for t in core.THEMES.values()),
+      "button text stays readable on light accent colors (the lab's unreadable button)")
 _psrc = _insp.getsource(gui.PerformancePage.__init__)
 check("adv(rcard)" in _psrc and "adv(mcard)" in _psrc,
       "experimental 144 Hz, its lab and the frame meter only show in Advanced (the owner's rule for Stable)")

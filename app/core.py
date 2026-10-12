@@ -881,7 +881,9 @@ def frame_stats(intervals_ms: list, target_hz: float = None) -> dict:
     skipped = sum(1 for x in xs if x > 1.5 * usual)
     hz = 1000.0 / avg
     return {"count": len(xs), "ok": med >= 2.0,       # under 2 ms = the swaps don't wait for the screen: can't measure
-            "off_target": bool(target_hz) and abs(hz - target_hz) / target_hz > 0.05,   # e.g. still at 120 Hz
+            # within 2 Hz (1.5% above ~133 Hz): 120 must never pass as 126, and 138 never as 144
+            # judged on the usual (median) frame: skipped frames lower the average but not the screen's rate
+            "off_target": bool(target_hz) and abs(1000.0 / med - target_hz) > max(2.0, 0.015 * target_hz),
             "hz": hz, "avg_ms": avg, "median_ms": med, "jitter_ms": sd, "fastest_ms": srt[0],
             "slowest_ms": srt[-1], "skipped": skipped, "target_ms": usual}
 
@@ -912,6 +914,9 @@ def lab_verdict(r: dict) -> list:
                 "glitches": "Picture: flicker or glitches, so the screen struggles with this timing.",
                 "unusable": "Picture: unusable, so the screen can't run this timing.",
                 }.get(pic, f"Picture: {pic or 'not checked'}."))
+    if str(r.get("rate", "")).startswith("slider stops"):
+        out.append(f"Refresh rate: Steam's slider wouldn't go to {r.get('hz')} Hz, so this setting didn't load as "
+                   "expected. The other checks ran at a lower rate.")
     t, irq, taps = r.get("touch"), r.get("irq"), r.get("taps")
     if t == "works":
         out.append(f"Touch: works ({taps} taps reached Ally Hub).")
