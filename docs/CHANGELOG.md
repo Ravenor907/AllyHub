@@ -1,156 +1,44 @@
 # Changelog
 
-## 1.4.1.19
+## 1.5.0
 
-- Fixed: the highlighted button's text was cut off all over the app. The highlight used to make the button's border
-  thicker, which squeezed the text; buttons, chips, text boxes, dropdowns, checkboxes and sliders now keep the
-  same size when highlighted.
+**Controls and look**
+- The left stick scrolls the page and the right stick moves a pointer. A or R3 clicks where it points; press the
+  D-pad and A goes back to the highlighted control.
+- Highlighted buttons no longer cut off their text, and button text stays readable with any accent color.
+- Pop-up panels open with a button already selected for the controller.
 
-## 1.4.1.18
+**Ring lighting**
+- True colors on the rings: presets no longer look washed out toward white.
+- Much smoother effects: a one-color frame is a single message to the lighting chip, so breathe, cycle, wave and
+  pulse run at full speed. On battery, Smooth stays at 15 frames a second and Silky at 20.
+- The brightness slider follows how your eyes see the lights, so low settings get much dimmer, the rainbow spiral
+  included.
+- Lighting stops asking for your password: the permission is remembered across restarts and sleep. Run the
+  lighting permission once more (Checkup → Fix or Test lights) to set it up.
+- Neon Vortex works again.
 
-- **The 144 Hz test is much simpler to follow**: one question per screen with a progress row on top (Check, Set
-  144 Hz, Picture, Touch, VRR off, VRR on, Result), numbered steps only where you need Steam's ••• menu, and Ally
-  Hub confirms by itself when the screen reaches 144 Hz. Frame tests start with one button and move on by
-  themselves. The warning is one short line.
-- Fixed: button text could be unreadable with light accent colors. It now picks black or white for contrast.
+**Experimental (Advanced only, Games → Performance)**
+- 144 Hz in Game Mode: one switch lets the screen go from 48 up to 144 Hz. The handheld restarts, Ally Hub opens
+  with a countdown once Steam is ready, and if you don't keep it, it goes back to 120 Hz by itself, even on a black
+  screen. You may see skipped frames with VRR on.
+- 144 Hz test: a guided check, one question per screen, that tries several ways of driving the screen at 144 Hz
+  and checks the picture, touch and frames after each restart. It explains what it found and sends the results as
+  a report.
+- Frame meter: measured Hz, frame time, jitter and skipped frames with a live graph.
 
-## 1.4.1.17
+**Security**
+- Phone remote: PIN guesses are capped across all devices and connections, and malformed requests can't use up
+  memory.
+- Shared profiles can't turn on SSH, move save backups or carry broken colors, and the import screen lists every
+  app it would install.
+- Settings backups are private and never include the phone remote's PIN.
+- Downloads are https only, and Decky store plugins without a store checksum aren't installed.
+- The password prompt names the task asking for it.
+- Error reports need a fine-grained access key, and report issues are locked after upload.
 
-- Fixed: after a 144 Hz or lab restart, Ally Hub could open too early and get stuck at the library's cancel button.
-  It now waits until Steam has finished starting, and the countdown starts when Ally Hub opens.
-- The frame meter is in Advanced, with 144 Hz and its lab.
-
-## 1.4.1.16
-
-- **144 Hz baseline set from your lab results**: "Turn on 144 Hz" uses method A, the one that kept the picture and
-  touch working on your Ally X. The lab stays for testing other units.
-- **New: built-in frame meter** (Games → Performance): measured Hz, frame time, jitter, fastest/slowest and skipped
-  frames with a live graph, like Monitor OC. The 144 Hz lab now uses it for its frame checks (Monitor OC answers
-  still work as a backup), and flags a screen that isn't really at the target rate.
-- **The lab explains itself**: how it works before you start, what each step found (and why) after each step, and
-  what the whole run means at the end. The report carries the same findings.
-- Fixed: the lab's frame answers were saved as "False".
-- The lab waits a bit longer before restarting at the end so its report and logs finish sending. If logs still go
-  missing, the reason is now written to the activity log.
-
-## 1.4.1.15
-
-- **New: the 144 Hz lab** (Games → Performance, 144 Hz card, Game Mode). It tries three ways of driving the screen at
-  144 Hz, one per restart, and walks you through four checks after each: the picture, touch (it counts your taps and
-  the touch chip's signals), and Monitor OC's skipped frames with VRR off and on. If no 144 Hz way keeps touch working,
-  it steps down (138, 132, 126 Hz) to find the highest rate that does. At the end, keep the best one or go back to
-  before; the results are sent as a report either way.
-- The lab undoes a step by itself if the screen goes black, if you restart in the middle of a step, or if nothing is
-  answered for 10 minutes.
-- Fixed: after a 144 Hz restart, the automatic undo could fail to start if Game Mode never came back.
-- Fixed: pop-up panels opened without the controller selecting a button.
-
-## 1.4.1.14
-
-- **144 Hz note reworded**: it no longer tells you to turn adaptive sync (VRR) off. It says you may experience
-  issues: skipped frames with VRR on, and the touch screen may not respond at 144 Hz. Update the ••• panel from
-  Games → Game settings to see it there too.
-
-## 1.4.1.13
-
-- **144 Hz is Game Mode only.** The Desktop Mode part from 1.4.1.12 is gone; if you set it up, it switches itself
-  off and Desktop Mode is back to normal after the next restart.
-- **144 Hz now says up front that it's experimental**: it may have issues, adaptive sync (VRR) causes skipped frames
-  at 144 Hz so keep VRR off, and it's made for Game Mode only for now. Shown on the card, the countdown and the
-  ••• panel (update the panel from Games → Game settings).
-- **The rainbow spiral really dims now.** The chip's own spiral only has three brightness steps, so below full
-  brightness Ally Hub draws the same rainbow spiral itself and it dims smoothly with the slider.
-
-## 1.4.1.12
-
-- **144 Hz in Desktop Mode too.** Turning on 144 Hz now also adds it to System Settings → Display Configuration →
-  Refresh rate, and adaptive sync covers the whole 48 to 144 Hz range in both modes. The first time it asks for your
-  password once. Already on 144 Hz? Tap "Add 144 Hz to Desktop Mode" on the card. Same restart, countdown and
-  automatic undo as before.
-- **Ring brightness dims for real.** The brightness slider now follows how your eyes see the lights, so lower
-  settings get much dimmer (the spiral and every other moving effect).
-
-## 1.4.1.11
-
-- **Lighting stops asking for your password.** The permission is now remembered: a small system service puts it
-  back at every boot, after sleep and whenever the controller reappears. Run the lighting permission once more
-  (Checkup → Fix or Test lights) to set it up.
-- **144 Hz now restarts the handheld**, because the screen only picks it up on a fresh start. After the restart
-  Ally Hub opens by itself with the countdown. No Keep in time and it goes back to 120 Hz with one more restart.
-
-## 1.4.1.10
-
-- **144 Hz is one switch now** (Games → Performance, Advanced): "Turn on 144 Hz" lets the screen run from 48 up to
-  144 Hz. Game Mode restarts and Ally Hub opens again by itself with a live countdown, Keep 144 Hz and Undo now. Do
-  nothing and it goes back to 120 Hz, even on a black screen.
-- "Back to 120 Hz" is on the card and in the ••• panel whenever 144 Hz is on. Update the ••• panel from
-  Games → Game settings.
-
-## 1.4.1.9
-
-- **Experimental: higher refresh rate** (Games → Performance, Advanced). Lets the screen go past 120 Hz in steps up
-  to 144 Hz. Game Mode restarts, you pick the rate with Steam's refresh slider and tap Keep in Ally Hub's ••• panel
-  within 90 seconds. Do nothing and it goes back by itself, even on a black screen. Update the ••• panel from
-  Games → Game settings first.
-
-## 1.4.1.8
-
-Security fixes from a full review:
-- **Phone remote:** opening many connections at once no longer gets extra PIN guesses past the lockout, guesses
-  from all devices together are capped, and a malformed request can no longer use up the handheld's memory.
-- **Shared profiles** can no longer turn on SSH, move your save backups or carry broken theme colors, and the import
-  screen lists every app it would install.
-- **Settings backups** are private to your user and never include the phone remote's PIN.
-- **Downloads** are https only, and Decky store plugins without a store checksum aren't installed.
-- **The password prompt** names the task that's asking for it.
-- **Error reports:** new access keys must be fine-grained (limited to this repo), the daily limit now counts reports
-  already sent, and report issues are locked after upload so nobody else can add to them.
-
-## 1.4.1.7
-
-- Small fixes.
-
-## 1.4.1.6
-
-- Small fixes.
-
-## 1.4.1.5
-
+**Fixes**
 - Small fixes and tidy-ups.
-
-## 1.4.1.4
-
-- Back to the usual Ally Hub look.
-
-## 1.4.1.2
-
-- **Much smoother effects:** your video showed the rings only changing about 3 times a second, because every frame
-  was five separate messages to the lighting chip, and it's slow to take each one. A one-color frame (breathe,
-  cycle, wave, pulse and the like) is now a single message, zones that didn't change aren't re-sent, and a frame
-  that didn't change sends nothing. Spirals still send a message per ring zone.
-- **Breathing stays lit, colors stay true:** the color fix now only corrects how colors mix, so fades and the
-  lowest point of a breathe are back to their old brightness instead of dropping to black. The default lowest
-  brightness is also higher (25%, ROG Pulse 20%). Your own saved effects keep their setting.
-- **On battery, Smooth stays at 15 frames a second** (1.4.1.1 dropped it to 13); Silky runs at 20.
-- The activity log now notes how many frames a second the rings really get, once a minute while an effect runs.
-
-## 1.4.1.1
-
-- **True colors on the rings:** colors are now converted for LEDs before they're sent, so presets no longer look
-  washed out toward white. Pure red, green, blue and white are unchanged.
-- **Smoothness works on battery:** "Slow down to save power" used to cap every effect at 15 frames a second, so
-  Smooth and Silky looked the same unplugged. It now runs at two thirds of your choice (Silky 20, Smooth 13), or pick
-  "Keep full speed".
-- **Neon Vortex works again:** it runs in Ally Hub's style, because the chip's own spiral can only show rainbow.
-  Saved copies are fixed automatically.
-- **Pointer clicks:** R3 now left-clicks where the pointer is, like A, and clicks on buttons and lists use the
-  same reliable path as the D-pad.
-
-## 1.4.1
-
-- **New controls:** the left stick scrolls the page, the right stick moves a pointer and R3 right-clicks. The
-  D-pad still moves between controls. While you use the pointer, A clicks wherever it points; press the D-pad and
-  A goes back to the highlighted control.
 
 ## 1.4.0
 
