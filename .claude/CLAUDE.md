@@ -316,7 +316,7 @@ Controller: Y = Steam keyboard, Menu = refresh (the owner).
 report is dropped after `REPORT_MAX_TRIES`. The GUI's excepthook ignores KeyboardInterrupt/SystemExit and SIGINT/
 SIGTERM quit cleanly (#14: a reboot right after an update rolled it back). An install job that exits non-zero but
 whose item `check()` passes counts as done. Lab: 1-2 skips per 30 s = smooth (`_frames_word`); the conclusion names
-methods. Second test device: the owner's wife's ROG Ally (RC71L, Z1E, SteamOS 3.9.2): all three 144 Hz methods
+methods. Second test device: a ROG Ally (RC71L, Z1E, SteamOS 3.9.2): all three 144 Hz methods
 passed touch and frames there, VRR on included (#17).
 Report attachments (comments) were missing on #9/#10: the uploader now logs the HTTP status; check the log.
 Password-free panel updates (polkit rule for plugin_loader + user-owned panel parts) were blocked by the session's
