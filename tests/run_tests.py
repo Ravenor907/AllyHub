@@ -1176,7 +1176,10 @@ check(core.refresh_step(_t0) == "started" and core.refresh_installed() == 144 an
       "turning 144 Hz on writes the profile and restarts the handheld")
 check(core.refresh_step(_t0 + 5) == "" and core.refresh_left(_t0 + 5) is None, "no countdown before the restart")
 _boot[0] = "boot-2"
-check(core.refresh_step(_t0 + 101) == "back" and core.refresh_step(_t0 + 102) == ""
+_g_gui = core.gui_opened_at
+_gui = [None]
+core.gui_opened_at = lambda: _gui[0]                     # the countdown starts when Ally Hub's window is up
+check(core.refresh_step(_t0 + 101) == "back" and (_gui.__setitem__(0, _t0 + 101) or True) and core.refresh_step(_t0 + 102) == ""
       and core.refresh_left(_t0 + 111) == core.REFRESH_CONFIRM_S - 10, "after the restart: Ally Hub opens and counts down")
 check(core.refresh_step(_t0 + 101 + core.REFRESH_CONFIRM_S + 1) == "reverted" and core.refresh_installed() is None
       and _rs == [1, 1], "no Keep in time: the profile goes and the handheld restarts again (black screen safe)")
@@ -1265,7 +1268,7 @@ core.lab_record({"picture": "good", "touch": "none", "taps": 0, "irq": 0, "frame
 check(core.lab_has_next() and core.lab_next() and core.lab_step(_t0) == "started" and core.refresh_method() == "b",
       "next step: method B")
 _boot[0] = "L3"
-core.lab_step(_t0 + 1); core.lab_step(_t0 + 2)
+core.lab_step(_t0 + 1); core.lab_step(_t0 + 2); _gui[0] = _t0 + 2   # Ally Hub opened, nobody answers
 _n = len(_rb)
 check(core.lab_step(_t0 + 2 + core.REFRESH_CONFIRM_S + 5) == "aborted" and core.refresh_installed() is None
       and len(_rb) == _n + 1 and _qr and _qr[-1][1].get("force"),
@@ -1303,6 +1306,7 @@ core.lab_finish((144, "a"))
 check(core.lab_state()["status"] == "done", "finishing twice never starts a second ending")
 core._mono = _g_mono
 core.reboot_device, core.boot_id, core.launch_self, core.game_mode_active, core.queue_report, core.lab_logs = _g3
+core.gui_opened_at = _g_gui
 core.REFRESH_SCRIPT.unlink(missing_ok=True); core.REFRESH_STATE.unlink(missing_ok=True); core.LAB_STATE.unlink(missing_ok=True)
 # ---- frame meter math and the lab's plain-language findings (1.4.1.16) ----
 _fs = core.frame_stats([6.94] * 400, 144)
@@ -1324,6 +1328,25 @@ _c = " ".join(core.lab_conclusion([dict(_r, touch="works"), dict(_r, method="b",
 check("Closest: 144 Hz with method A" in _c and "VRR range" in _c, "the overall finding names the best method and the next step")
 check(core.refresh_lua(144) == core.refresh_lua(144, core.REFRESH_BASELINE) and core.REFRESH_BASELINE == "a",
       "Turn on 144 Hz uses the lab-verified baseline (method A)")
+# ---- Decky leftovers and the launch watch (1.5.0.1) ----
+_du = core.DECKY_UNITS
+core.DECKY_UNITS = (Path(HOME) / "no-plugin_loader.service",)
+core.DECKY_PATH.mkdir(parents=True, exist_ok=True)
+check(not core.CATALOG_BY_ID["decky"].check({}), "Decky's files without its service don't count as installed (Repair, not Restart)")
+(Path(HOME) / "no-plugin_loader.service").write_text("[Unit]")
+check(core.CATALOG_BY_ID["decky"].check({}), "files plus service = installed")
+core.DECKY_UNITS = _du
+_qr2 = []
+_g4 = (core.queue_report, core.gui_opened_at, core.steam_ui_ready)
+core.queue_report = lambda *a, **k: _qr2.append(a[1])
+core.gui_opened_at = lambda: None
+core.steam_ui_ready = lambda: False
+_st = {"back": 100.0}
+core._launch_watch(_st, 130.0)
+core._launch_watch(_st, 100.0 + core.LAUNCH_REPORT_S + 1)
+core._launch_watch(_st, 100.0 + core.LAUNCH_REPORT_S + 9)
+check(len(_qr2) == 1 and "didn't open" in _qr2[0], "a launch stuck at Steam's Launching is reported once")
+core.queue_report, core.gui_opened_at, core.steam_ui_ready = _g4
 # ---- the extra Ally Hub theme ----
 check(core.DEFAULT_CONFIG["theme"]["preset"] == "ROG Crimson" and "Ally Hub" in core.EXTRA_THEMES
       and list(core.THEMES)[-1] == "Ally Hub" and core.theme_palette({"preset": "nope"})["accent"] == "#e11d48",
