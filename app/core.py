@@ -6371,8 +6371,9 @@ def gh_request(method: str, path: str, data: dict = None, accept: str = "applica
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.status, r.read()
     except urllib.error.HTTPError as e:
-        if e.code == 401 and tok:
-            # an expired or revoked access key mustn't stop updates: public reads work without one
+        if tok and (e.code == 401 or (method == "GET" and e.code in (403, 404))):
+            # an expired key (401), or a fine-grained key that isn't allowed to read this (403/404: "Resource not
+            # accessible by personal access token"), must never stop updates: the repo is public, read it without one
             return gh_request(method, path, data, accept, timeout, auth=False)
         try:
             return e.code, e.read()
@@ -6796,13 +6797,26 @@ def version_label(v: str = None) -> str:
     return display_version(v) + (" (testing)" if update_channel() == "testing" else "")
 
 
+LAST_REMOTE_STATUS = {}
+
+
 def remote_version(branch: str = "main") -> Optional[str]:
     status, body = gh_request("GET", f"/repos/{repo_name()}/contents/VERSION?ref={branch}",
                               accept="application/vnd.github.raw+json")
+    LAST_REMOTE_STATUS[branch] = status
     if status == 200:
         v = body.decode(errors="replace").strip()
         return v if re.fullmatch(VERSION_RE, v) else None
     return None
+
+
+def github_problem(status: int) -> str:
+    """Plain words for why GitHub didn't answer (shown with "Couldn't reach GitHub")."""
+    if status == 0:
+        return "no connection"
+    if status in (403, 429):
+        return f"GitHub refused or rate-limited the request (HTTP {status}); try again in an hour"
+    return f"HTTP {status}"
 
 
 def check_for_update() -> dict:
@@ -6816,7 +6830,9 @@ def check_for_update() -> dict:
     out = {"current": VERSION, "remote": remote, "branch": branch, "available": False,
            "stable": found.get("main"), "error": None}
     if remote is None:
-        out["error"] = "Couldn't reach GitHub"
+        codes = sorted({LAST_REMOTE_STATUS.get(b, 0) for b in found})
+        out["error"] = "Couldn't reach GitHub (" + "; ".join(github_problem(c) for c in codes) + ")"
+        app_log("update", f"update check failed: HTTP {codes}")
     elif parse_version(remote) > parse_version(VERSION) and remote not in st.get("bad", []):
         out["available"] = True
     st["last_remote"] = remote
