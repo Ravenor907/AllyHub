@@ -335,18 +335,22 @@ REFRESH_DEADLINE_S = 240      # from the start, whatever happens (Game Mode stuc
 GAME_MODE_UNIT = "gamescope-session.service"
 
 
+# Baseline (the owner, 1.4.1.16): method "a". Lab runs on his Ally X (issues #9, #10): a = picture good, touch works
+# (taps and touch-chip signals both arrive); b = touch chip silent (hardware limit); c = touch lands off target.
+# "Turn on 144 Hz" always uses the baseline; the lab stays for testing other units and panels.
+REFRESH_BASELINE = "a"
 # How a rate above 120 Hz is built (the 144 Hz lab compares them; the owner: 144 Hz + VRR + touch, no dropped frames).
 # The stock Ally profile keeps the pixel clock fixed and only stretches the vertical front porch (vfp 54 = 120 Hz),
 # so anything faster must raise the clock. Touch on this kind of panel likely scans during the blanking between
 # lines and frames, which a faster clock shortens; each method shortens it differently.
 LAB_METHODS = {
-    "a": "Faster clock (the 120 Hz timing, sped up)",
+    "a": "Faster clock (the 120 Hz timing, sped up). The baseline: passed picture and touch on the owner's Ally X",
     "b": "Longer pause between frames (same blanking time as 120 Hz, even faster clock)",
     "c": "Narrower side blanking (clock raised less, shorter lines)",
 }
 
 
-def refresh_lua(max_hz: int, method: str = "a") -> str:
+def refresh_lua(max_hz: int, method: str = REFRESH_BASELINE) -> str:
     max_hz = max(121, min(165, int(max_hz)))
     method = method if method in LAB_METHODS else "a"
     return f"""-- Ally Hub (experimental): lets the ROG Ally panel run above 120 Hz, up to {max_hz} Hz.
@@ -759,7 +763,7 @@ def _lab_end(st: dict, why: str, reboot: bool) -> str:
     except Exception as e:
         app_log("refresh", f"lab report failed: {e}")
     if reboot:
-        reboot_device(8.0)
+        reboot_device(20.0)                              # time for the report and its logs to go out first
     return why
 
 
@@ -836,6 +840,118 @@ def lab_step(now: float = None) -> str:
     return out[0]
 
 
+# ---------- Frame meter (1.4.1.16, the owner: a frame time counter and graph like Monitor OC's, built in) ----------
+def frame_stats(intervals_ms: list, target_hz: float = None) -> dict:
+    """Numbers for a run of frame times (ms between screen refreshes). A frame counts as skipped when it took more
+    than 1.5 times the usual (median) frame, like Monitor OC."""
+    xs = [float(x) for x in intervals_ms if x and 0 < float(x) < 1000]
+    if len(xs) < 2:
+        return {"count": len(xs), "ok": False}
+    srt = sorted(xs)
+    med = srt[len(srt) // 2]
+    avg = sum(xs) / len(xs)
+    sd = (sum((x - avg) ** 2 for x in xs) / len(xs)) ** 0.5
+    usual = 1000.0 / target_hz if target_hz else med
+    skipped = sum(1 for x in xs if x > 1.5 * usual)
+    hz = 1000.0 / avg
+    return {"count": len(xs), "ok": med >= 2.0,       # under 2 ms = the swaps don't wait for the screen: can't measure
+            "off_target": bool(target_hz) and abs(hz - target_hz) / target_hz > 0.05,   # e.g. still at 120 Hz
+            "hz": hz, "avg_ms": avg, "median_ms": med, "jitter_ms": sd, "fastest_ms": srt[0],
+            "slowest_ms": srt[-1], "skipped": skipped, "target_ms": usual}
+
+
+def frame_summary(st: dict) -> str:
+    if not st.get("ok"):
+        return "couldn't measure"
+    return f"{st['skipped']} skipped of {st['count']} at {st['hz']:.1f} Hz"
+
+
+# ---------- What a lab step means, in plain words (the owner: explain how it reached each conclusion) ----------
+def _frames_word(r: dict, key: str) -> Optional[str]:
+    st = r.get(key + "_stats")
+    if isinstance(st, dict) and st.get("ok"):
+        if st.get("off_target"):
+            return "not at the target rate"
+        per_min = st["skipped"] / max(0.25, st["count"] * st["avg_ms"] / 60000.0)   # at least 15 s of frames
+        return "smooth" if st["skipped"] == 0 else "a few" if per_min <= 10 else "many"
+    v = r.get(key)
+    return {"0": "smooth", "a few": "a few", "many": "many"}.get(v)
+
+
+def lab_verdict(r: dict) -> list:
+    """One sentence per check: what was measured and what it says."""
+    out = []
+    pic = r.get("picture")
+    out.append({"good": "Picture: fine at this timing.",
+                "glitches": "Picture: flicker or glitches, so the screen struggles with this timing.",
+                "unusable": "Picture: unusable, so the screen can't run this timing.",
+                }.get(pic, f"Picture: {pic or 'not checked'}."))
+    t, irq, taps = r.get("touch"), r.get("irq"), r.get("taps")
+    if t == "works":
+        out.append(f"Touch: works ({taps} taps reached Ally Hub).")
+    elif t in ("none", "off target"):
+        if isinstance(irq, int) and irq > 0:
+            out.append(f"Touch: the touch chip still sent {irq} signals, but {'none' if t == 'none' else 'they landed in the wrong spot and'} "
+                       "reached Ally Hub. The screen still senses your finger, so Game Mode is mishandling the touches: "
+                       "a software problem that can likely be fixed.")
+        elif irq == 0:
+            out.append("Touch: the touch chip sent no signals at all while you tapped, so it stops working at this "
+                       "timing. That's the panel's hardware, not a setting.")
+        else:
+            out.append("Touch: didn't work, and the touch chip's signals couldn't be read to tell why.")
+    off, on = _frames_word(r, "frames_off"), _frames_word(r, "frames_on")
+    if off:
+        out.append(f"Frames with VRR off: {off}" + (" (" + frame_summary(r["frames_off_stats"]) + ")."
+                                                     if isinstance(r.get("frames_off_stats"), dict) else "."))
+    if on:
+        out.append(f"Frames with VRR on: {on}" + (" (" + frame_summary(r["frames_on_stats"]) + ")."
+                                                   if isinstance(r.get("frames_on_stats"), dict) else "."))
+    if off == "smooth" and on in ("a few", "many"):
+        out.append("Since it's smooth with VRR off, the skipped frames come from VRR, not from this timing. The "
+                   "likely reason: the screen still tells the system its VRR range ends at 120 Hz.")
+    elif off in ("a few", "many"):
+        out.append("It skips frames even with VRR off, so this timing itself isn't steady on this screen.")
+    return out
+
+
+def lab_conclusion(results: list) -> list:
+    """What the whole run shows, and what to do next."""
+    res = [r for r in results or [] if r.get("hz")]
+    if not res:
+        return ["No steps were answered, so there's nothing to conclude yet."]
+    out = []
+    full = [r for r in res if r.get("picture") == "good" and r.get("touch") == "works"
+            and _frames_word(r, "frames_off") == "smooth"]
+    perfect = [r for r in full if _frames_word(r, "frames_on") == "smooth"]
+    if perfect:
+        r = perfect[0]
+        out.append(f"Best result: {r['hz']} Hz with method {str(r['method']).upper()} passed everything: picture, "
+                   "touch, and no skipped frames with VRR off or on.")
+    elif full:
+        r = full[0]
+        out.append(f"Closest: {r['hz']} Hz with method {str(r['method']).upper()}: picture, touch and smooth frames "
+                   "with VRR off. VRR still skips frames, which needs the VRR range fix next.")
+    t144 = [r for r in res if r["hz"] == 144 and r.get("touch") in ("none", "off target")]
+    if t144:
+        signals = [r for r in t144 if isinstance(r.get("irq"), int) and r["irq"] > 0]
+        silent = [r for r in t144 if r.get("irq") == 0]
+        if signals and not silent:
+            out.append("At 144 Hz the touch chip kept sending signals that never arrived, so touch at 144 Hz is a "
+                       "software problem in Game Mode, worth fixing.")
+        elif silent and not signals:
+            out.append("At 144 Hz the touch chip went silent with every method tried, so this panel's touch can't "
+                       "keep up at 144 Hz. The highest rate where touch worked is the realistic limit.")
+    ok_touch = sorted({r["hz"] for r in res if r.get("touch") == "works"}, reverse=True)
+    if ok_touch and 144 not in ok_touch:
+        out.append(f"Touch worked up to {ok_touch[0]} Hz.")
+    vrr = [r for r in res if _frames_word(r, "frames_off") == "smooth" and _frames_word(r, "frames_on") in ("a few", "many")]
+    if vrr:
+        out.append("VRR skipped frames wherever VRR off was smooth: the next step is widening the VRR range to 144 Hz.")
+    if not out:
+        out.append("No method passed every check. The step-by-step findings above show which check failed where.")
+    return out
+
+
 def touch_device() -> dict:
     """The built-in touch screen: its input name, and the interrupt line it raises (from /proc)."""
     text = read_text(INPUT_DEVICES)
@@ -894,6 +1010,9 @@ def lab_report_text(st: dict = None) -> str:
         *rows, "",
         "Methods: " + "; ".join(f"{k} = {v}" for k, v in LAB_METHODS.items()),
         f"Outcome: {st.get('status')}" + (f", kept {keep[0]} Hz method {keep[1]}" if keep else ", old profile restored"),
+        "", "What it found:", *[f"- {line}" for line in lab_conclusion(st.get("results") or [])], "",
+        "Step by step:", *[f"- Step {n} ({r.get('hz')} Hz {r.get('method')}): " + " ".join(lab_verdict(r))
+                           for n, r in enumerate(st.get("results") or [], 1)], "",
         f"Touch screen: {dev.get('name') or 'not found'} ({dev.get('client') or 'no i2c id'})",
         "Touch signals = the touch chip's interrupt count while tapping: it rising with no taps seen means Game Mode "
         "drops touches (software); no rise means the chip stops at that timing (hardware).",
@@ -6378,7 +6497,13 @@ def _upload_locked(files: list) -> tuple:
             for att in rep.get("attachments") or []:
                 if number:
                     for chunk in _comment_chunks(att.get("name", "Attachment"), att.get("text", "")):
-                        gh_request("POST", f"/repos/{repo}/issues/{number}/comments", {"body": chunk})
+                        cs, cb = gh_request("POST", f"/repos/{repo}/issues/{number}/comments", {"body": chunk})
+                        if cs not in (200, 201):                 # 1.4.1.15's lab logs never arrived: find out why
+                            time.sleep(2)
+                            cs, cb = gh_request("POST", f"/repos/{repo}/issues/{number}/comments", {"body": chunk})
+                        if cs not in (200, 201):
+                            app_log("report", f"attachment '{att.get('name', '')[:40]}' not posted: HTTP {cs} "
+                                              f"{cb[:160].decode('utf-8', 'replace') if isinstance(cb, bytes) else ''}")
             if number and not existing:
                 # only people with write access can comment on a locked issue: nobody else can slip fake logs
                 # or instructions into a report (best effort; the key may not be allowed to lock)

@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.4.1.16
+
+- **144 Hz baseline set from your lab results**: "Turn on 144 Hz" uses method A, the one that kept the picture and
+  touch working on your Ally X. The lab stays for testing other units.
+- **New: built-in frame meter** (Games → Performance): measured Hz, frame time, jitter, fastest/slowest and skipped
+  frames with a live graph, like Monitor OC. The 144 Hz lab now uses it for its frame checks (Monitor OC answers
+  still work as a backup), and flags a screen that isn't really at the target rate.
+- **The lab explains itself**: how it works before you start, what each step found (and why) after each step, and
+  what the whole run means at the end. The report carries the same findings.
+- Fixed: the lab's frame answers were saved as "False".
+- The lab waits a bit longer before restarting at the end so its report and logs finish sending. If logs still go
+  missing, the reason is now written to the activity log.
+
 ## 1.4.1.15
 
 - **New: the 144 Hz lab** (Games → Performance, 144 Hz card, Game Mode). It tries three ways of driving the screen at
