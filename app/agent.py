@@ -1017,6 +1017,11 @@ class Agent:
             add_alert(f"decky-missing-{build}",
                       "Decky Loader is missing, probably removed by a SteamOS update. "
                       "Open Ally Hub and tap Repair.")
+        # 1.5.0.3: once the one-time permission is in place, the panel follows Ally Hub's updates by itself (no
+        # password), never during a game (restarting Decky closes the ••• menu for a moment)
+        if not self.game and core.qam_outdated() and core.qam_self_updatable():
+            ok = core.qam_update_nopw()
+            log(f"quick access panel {'updated' if ok else 'update failed'} (no password)")
         if changes:
             self.cfg = core.update_config(lambda c: c["guardian"].update(changes))
             self.cfg_mtime = core.CONFIG_FILE.stat().st_mtime

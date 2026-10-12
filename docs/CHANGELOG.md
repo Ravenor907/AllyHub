@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.5.0.3
+
+- **One password for everything.** Checkup has a "Password prompts" check: one tap and one password set up
+  lighting, Game Boost and Quick Access panel updates together, so they stop asking.
+- **The Quick Access panel updates itself.** After that one password, panel updates need no password: Ally Hub
+  updates the panel by itself when it updates (never during a game), and "Update the panel" works right away.
+
 ## 1.5.0.2
 
 From the latest error reports:
