@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.5.0.1
+
+- **After a 144 Hz or test restart, Ally Hub opens the way the Play button does**, so it shouldn't get stuck at
+  Steam's "Launching" anymore. The countdown starts when Ally Hub's window is actually up. If it still gets stuck,
+  that's reported automatically with Steam's own launch log.
+- **Y opens the Steam keyboard.** Menu now refreshes.
+- Fixed: on a handheld where Decky Loader's files were left behind but its service was gone, Checkup offered
+  "Restart Decky", which failed. It now says what's wrong and offers Repair, which reinstalls Decky and keeps
+  your plugins.
+- Task output no longer fills with "wrong ELF class" lines from Steam's overlay, so real errors are easy to read.
+
 ## 1.5.0
 
 **Controls and look**

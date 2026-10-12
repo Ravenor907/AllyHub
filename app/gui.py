@@ -236,6 +236,9 @@ class JobRunner(QObject):
         env.insert("PATH", f"{bindir}:{env.value('PATH', '/usr/bin:/bin')}")
         env.insert("SUDO_ASKPASS", str(bindir / "allyhub-askpass"))
         env.insert("TERM", "dumb")
+        # Game Mode hands every app Steam's overlay in LD_PRELOAD (a 32-bit and a 64-bit copy); each command a task runs
+        # then prints "wrong ELF class: ELFCLASS32 ... ignored", which buried the real error (the owner's Ally Z1E)
+        env.remove("LD_PRELOAD")
         self.env = env
 
     def busy(self) -> bool:
@@ -480,13 +483,13 @@ class GamepadNav(QObject):
             self.back()
         elif n == 2:
             self.hub.gamepad_x()
-        elif n == 3:
-            self.hub.refresh()
-            self.hub.toast("Refreshed")
+        elif n == 3:                    # Y: the Steam keyboard (the owner, 1.5.0.1)
+            QDesktopServices.openUrl(QUrl("steam://open/keyboard"))
         elif n in (4, 5):
             self.hub.step_page(-1 if n == 4 else 1)
-        elif n == 7:
-            QDesktopServices.openUrl(QUrl("steam://open/keyboard"))
+        elif n == 7:                    # Menu: refresh (was Y before 1.5.0.1)
+            self.hub.refresh()
+            self.hub.toast("Refreshed")
 
     def _axis(self, n, value):
         if self._sheet_open() and n in (2, 5):             # triggers wait for the pop-up (axis 3 is the pointer)
@@ -1452,8 +1455,8 @@ def key_hints(pairs, vertical: bool = False) -> QWidget:
     return w
 
 
-PAD_KEYS = [("A", "Select"), ("B", "Back"), ("LS", "Scroll"), ("RS", "Pointer"), ("Y", "Refresh"),
-            ("Menu", "Keyboard")]
+PAD_KEYS = [("A", "Select"), ("B", "Back"), ("LS", "Scroll"), ("RS", "Pointer"), ("Y", "Keyboard"),
+            ("Menu", "Refresh")]
 TAB_ICONS = {"Home": "activity", "Store": "store", "Games": "gamepad-2", "Customize": "palette",
              "Settings": "settings"}
 
@@ -5973,9 +5976,13 @@ class DoctorPage(QWidget):
             active = core.service_active("plugin_loader")
             add("ok" if active else "fail", "Decky Loader",
                 "Installed and running." if active else "Installed but not running.",
-                None if active else "Restart Decky",
-                None if active else lambda: h.runner.submit(
-                    "Restart Decky", "sudo systemctl restart plugin_loader", "decky-restart"))
+                None if active else "Restart Decky", None if active else h.restart_decky)
+        elif core.DECKY_PATH.exists():
+            # its files are in your home folder but its system service is gone (a SteamOS update or reset can do
+            # this): restarting can't work, reinstalling puts the service back and keeps the plugins
+            add("fail", "Decky Loader", "Its files are here, but its system service is missing (a SteamOS update can "
+                "do this). Repairing reinstalls it and keeps your plugins.",
+                "Repair", lambda: h.on_item_action("decky", "install"))
         else:
             add("fail" if expected else "warn", "Decky Loader",
                 "Missing. A SteamOS update probably removed it." if expected else "Not installed.",
@@ -6469,7 +6476,7 @@ class AppearancePage(QWidget):
         self.nav_mode.setProperty("padCycle", False)      # stepping to "Off" would strand the controller
         cr.addWidget(self.nav_mode)
         cr.addWidget(label("D-pad/stick moves, A selects, B goes back, LB/RB switch tabs, LT/RT switch "
-                           "sections, X searches plugins, Y refreshes, Menu opens the Steam keyboard.",
+                           "sections, X searches plugins, Y opens the Steam keyboard, Menu refreshes.",
                            "cardDesc", wrap=True), 1)
         v.addLayout(cr)
         v.addStretch()
@@ -7082,6 +7089,7 @@ class Hub(QMainWindow):
         QTimer.singleShot(800, self.show_whats_new)
         QTimer.singleShot(3000, self.maybe_check_updates)
         QTimer.singleShot(core.HEALTHY_AFTER_S * 1000, lambda: core.mark_healthy("gui"))
+        QTimer.singleShot(1500, core.mark_gui_open)      # the 144 Hz countdowns start when the window is up
         self._refresh_timer = QTimer(self)             # the 144 Hz test's countdown, wherever you are in the app
         self._refresh_timer.timeout.connect(self.check_refresh)
         self._refresh_timer.timeout.connect(self.check_lab)
@@ -7903,6 +7911,9 @@ class Hub(QMainWindow):
             self._toast_pop_timer.start(ms)
 
     def restart_decky(self, *_args):
+        if not core.decky_service_exists():              # nothing to restart: reinstall instead (keeps plugins)
+            self.on_item_action("decky", "install")
+            return
         if self.needs_password():
             return
         self.runner.submit("Restart Decky", "sudo systemctl restart plugin_loader", "decky-restart")

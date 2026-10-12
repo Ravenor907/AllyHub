@@ -53,6 +53,13 @@ UDEV_LED_RULE = "/etc/udev/rules.d/99-allyhub-leds.rules"
 UDEV_CHARGE_RULE = "/etc/udev/rules.d/99-allyhub-charge.rules"
 AGENT_UNIT = HOME / ".config/systemd/user/allyhub-agent.service"
 DECKY_PATH = HOME / "homebrew/services/PluginLoader"
+DECKY_UNITS = (Path("/etc/systemd/system/plugin_loader.service"), Path("/usr/lib/systemd/system/plugin_loader.service"))
+
+
+def decky_service_exists() -> bool:
+    """Decky's system service is installed (its files in ~/homebrew can outlive it, e.g. after a SteamOS reset:
+    the owner's Ally Z1E got "Unit plugin_loader.service not found" from Restart Decky)."""
+    return any(p.exists() for p in DECKY_UNITS)
 DECKY_PLUGINS = HOME / "homebrew/plugins"
 DECKY_STORE_API = "https://plugins.deckbrew.xyz/plugins"
 DECKY_CDN = "https://cdn.tzatzikiweeb.moe/file/steam-deck-homebrew/versions/{}.zip"
@@ -478,11 +485,21 @@ def restart_game_mode() -> None:
 
 
 def launch_self() -> bool:
-    """Open Ally Hub from the Game Mode library (so the 144 Hz countdown shows right after Game Mode restarts)."""
+    """Open Ally Hub from the Game Mode library (so the 144 Hz countdown shows right after a restart).
+    1.5.0.1: the same call as Steam's Play button (SteamClient.Apps.RunGame) when Steam's debugger is on; the
+    steam:// link from the background service could stay stuck at "Launching" (the owner's photo)."""
     me = next((s for s in steam_shortcuts() if is_self_shortcut(s)), None)
-    if not me or not shutil.which("steam"):
+    if not me:
         return False
-    gameid = (int(me["appid"]) << 32) | 0x02000000
+    gameid = ((int(me["appid"]) & 0xFFFFFFFF) << 32) | 0x02000000
+    app_log("refresh", f"opening Ally Hub from the library (game id {gameid})")
+    try:
+        if cef_eval(f'(SteamClient.Apps.RunGame("{gameid}", "", -1, 100), true)', timeout=5) is True:
+            return True
+    except Exception:
+        pass
+    if not shutil.which("steam"):
+        return False
     try:
         subprocess.Popen(["steam", f"steam://rungameid/{gameid}"], stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, start_new_session=True)
@@ -495,8 +512,8 @@ def steam_ui_ready() -> bool:
     """Steam's Game Mode interface has finished starting (its JavaScript client is up). Launching Ally Hub before
     that left it stuck at the library's cancel (X) button (the owner, 1.4.1.16 lab, first restart)."""
     try:
-        return cef_eval("typeof SteamClient !== 'undefined' && !!SteamClient.Apps && !!SteamClient.Apps.RunGame",
-                        timeout=3) is True
+        return cef_eval("typeof SteamClient !== 'undefined' && !!SteamClient.Apps && !!SteamClient.Apps.RunGame"
+                        " && (window.appStore?.allApps?.length || 0) > 0", timeout=3) is True   # library loaded
     except Exception:
         return False
 
@@ -511,6 +528,46 @@ def _relaunch_due(st: dict, now: float) -> bool:
             return False
         st["gm"] = now
     return steam_ui_ready() or now - st["gm"] > STEAM_READY_MAX_S
+
+
+GUI_OPEN = DATA_DIR / "gui_open.json"
+LAUNCH_REPORT_S = 60      # Ally Hub not open this long after the launch: report it, with Steam's launch log
+
+
+def mark_gui_open() -> None:
+    """Ally Hub's window is up (this boot). The Keep / "I can see it" countdowns start here, not at the launch,
+    so a launch stuck at Steam's "Launching" can't use up the time."""
+    try:
+        write_json(GUI_OPEN, {"boot": boot_id(), "mono": time.monotonic()})
+    except OSError:
+        pass
+
+
+def gui_opened_at() -> Optional[float]:
+    g = read_json(GUI_OPEN, {}) or {}
+    return g.get("mono") if isinstance(g, dict) and g.get("boot") == boot_id() else None
+
+
+def steam_launch_log(n: int = 40) -> str:
+    """Steam's console log lines about launching Ally Hub (for the "didn't open" report)."""
+    me = next((s for s in steam_shortcuts() if is_self_shortcut(s)), None)
+    keys = ["Ally Hub", "allyhub", "rungameid", "Game process", "GameAction"]
+    if me:
+        keys += [str(int(me["appid"]) & 0xFFFFFFFF), str(((int(me["appid"]) & 0xFFFFFFFF) << 32) | 0x02000000)]
+    text = read_text(STEAM_ROOT / "logs/console_log.txt")
+    return "\n".join([ln for ln in text.splitlines() if any(k in ln for k in keys)][-n:])
+
+
+def _launch_watch(st: dict, now: float) -> None:
+    """After launching: if Ally Hub's window never came up, say so once per boot with Steam's own log."""
+    if st.get("launch_reported") or not st.get("back") or gui_opened_at() is not None:
+        return
+    if now - st["back"] > LAUNCH_REPORT_S:
+        st["launch_reported"] = True
+        queue_report("refresh", "Ally Hub didn't open by itself after a 144 Hz restart",
+                     "Steam was asked to open Ally Hub, but its window never came up "
+                     f"(steam ready: {steam_ui_ready()}).", _fingerprint("refresh", "launch-stuck"),
+                     attachments=[("Steam launch log", steam_launch_log() or "(nothing about Ally Hub)")])
 
 
 def boot_id() -> str:
@@ -564,7 +621,11 @@ def refresh_step(now: float = None) -> str:
         if due:
             threading.Timer(4.0, launch_self).start()      # the countdown opens by itself
             return "back"
-    expired = (st.get("back") and now - st["back"] > REFRESH_CONFIRM_S) or now - st["seen"] > REFRESH_DEADLINE_S
+    _launch_watch(st, now)
+    gui = gui_opened_at()
+    # Ally Hub open: the Keep countdown runs from when it opened. Not open (stuck launch, black screen): the overall
+    # deadline from the restart undoes it.
+    expired = (now - gui > REFRESH_CONFIRM_S) if gui is not None else now - st["seen"] > REFRESH_DEADLINE_S
     if expired:
         _write_refresh_lua(st.get("prev_lua") or "")
         write_json(REFRESH_STATE, {"status": "reverted", "tried": st.get("max"), "at": now})
@@ -580,9 +641,8 @@ def refresh_left(now: float = None) -> Optional[int]:
     st = refresh_state()
     if st.get("status") != "trial" or not st.get("seen"):
         return None
-    left = REFRESH_DEADLINE_S - (now - st["seen"])
-    if st.get("back"):
-        left = min(left, REFRESH_CONFIRM_S - (now - st["back"]))
+    gui = gui_opened_at()
+    left = REFRESH_CONFIRM_S - (now - gui) if gui is not None else REFRESH_DEADLINE_S - (now - st["seen"])
     return max(0, int(left))
 
 
@@ -693,9 +753,8 @@ def lab_left(now: float = None) -> Optional[int]:
     st = lab_state()
     if st.get("status") != "step" or not st.get("seen") or st.get("confirmed"):
         return None
-    left = REFRESH_DEADLINE_S - (now - st["seen"])
-    if st.get("back"):
-        left = min(left, REFRESH_CONFIRM_S - (now - st["back"]))
+    gui = gui_opened_at()
+    left = REFRESH_CONFIRM_S - (now - gui) if gui is not None else REFRESH_DEADLINE_S - (now - st["seen"])
     return max(0, int(left))
 
 
@@ -844,9 +903,9 @@ def lab_step(now: float = None) -> str:
                 out[0] = "back"
             return None
         if not st.get("confirmed"):
-            left = REFRESH_DEADLINE_S - (now - st["seen"])
-            if st.get("back"):
-                left = min(left, REFRESH_CONFIRM_S - (now - st["back"]))
+            _launch_watch(st, now)
+            gui = gui_opened_at()
+            left = REFRESH_CONFIRM_S - (now - gui) if gui is not None else REFRESH_DEADLINE_S - (now - st["seen"])
             if left <= 0:
                 st.setdefault("results", []).append({"hz": lab_current(st)[0], "method": lab_current(st)[1],
                                                      "picture": "no answer (black screen?)", "at": time.time(),
@@ -5202,7 +5261,7 @@ CATALOG = [
         monogram="D", color="#8b5cf6",
         install=fetch_run("https://github.com/SteamDeckHomebrew/decky-installer/releases/latest/download/install_release.sh"),
         uninstall=fetch_run("https://github.com/SteamDeckHomebrew/decky-installer/releases/latest/download/uninstall.sh"),
-        check=lambda s: DECKY_PATH.exists(),
+        check=lambda s: DECKY_PATH.exists() and decky_service_exists(),
         warn="SteamOS updates can remove Decky. Ally Hub's Update Guardian will spot it.",
         recommended=True,
     ),

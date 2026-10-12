@@ -306,6 +306,11 @@ when a sheet opens; interval backs off when not exposed or swaps don't block). `
 After a restart, Ally Hub is launched only once Steam's UI is ready (`steam_ui_ready` via the CEF debugger, or
 `STEAM_READY_MAX_S` after Game Mode): launching earlier left it stuck at the library's X (owner, 1.4.1.16).
 Experimental 144 Hz, the lab and the frame meter are behind `adv(...)` (a test enforces it).
+1.5.0.1: `launch_self` uses SteamClient.Apps.RunGame over the CEF debugger first (the steam:// link from the agent
+stuck at "Launching"); countdowns run from `gui_opened_at()` (GUI writes `GUI_OPEN` per boot), else the overall
+deadline; `_launch_watch` reports a stuck launch once with `steam_launch_log()`. Decky counts as installed only with
+its service unit (`decky_service_exists`); files alone = Repair. Jobs run without LD_PRELOAD (Steam overlay noise).
+Controller: Y = Steam keyboard, Menu = refresh (the owner).
 Report attachments (comments) were missing on #9/#10: the uploader now logs the HTTP status; check the log.
 Password-free panel updates (polkit rule for plugin_loader + user-owned panel parts) were blocked by the session's
 safety check in 1.4.1.16: needs the owner's explicit decision before building.

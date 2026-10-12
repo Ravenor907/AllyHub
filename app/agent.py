@@ -1005,7 +1005,7 @@ class Agent:
         osr = core.os_release()
         build = osr.get("BUILD_ID") or osr.get("VERSION_ID") or ""
         g = self.cfg["guardian"]
-        decky = core.DECKY_PATH.exists()
+        decky = core.DECKY_PATH.exists() and core.decky_service_exists()   # files alone can outlive the service
         changes = {}
         if build and build != g.get("last_build"):
             if g.get("last_build"):
