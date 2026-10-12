@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.4.1.17
+
+- Fixed: after a 144 Hz or lab restart, Ally Hub could open too early and get stuck at the library's cancel button.
+  It now waits until Steam has finished starting, and the countdown starts when Ally Hub opens.
+- The frame meter is in Advanced, with 144 Hz and its lab.
+
 ## 1.4.1.16
 
 - **144 Hz baseline set from your lab results**: "Turn on 144 Hz" uses method A, the one that kept the picture and

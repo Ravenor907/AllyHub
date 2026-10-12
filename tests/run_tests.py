@@ -1166,6 +1166,7 @@ _g = (core.game_mode_active, core.reboot_device, core.boot_id, core.launch_self)
 core.reboot_device = lambda delay=3.0: _rs.append(1)
 core.boot_id = lambda: _boot[0]
 core.launch_self = lambda: True
+core.steam_ui_ready = lambda: True
 core.game_mode_active = lambda: True
 core.REFRESH_SCRIPT.parent.mkdir(parents=True, exist_ok=True)
 core.REFRESH_SCRIPT.unlink(missing_ok=True)
@@ -1192,6 +1193,12 @@ core.game_mode_active = lambda: False                    # Game Mode never comes
 core.refresh_request(144); core.refresh_step(_t0); _boot[0] = "boot-4b"
 _seq = [core.refresh_step(_t0 + k) for k in range(1, core.REFRESH_DEADLINE_S + 3, 1)]
 check("reverted" in _seq and core.refresh_installed() == 144, "even if Game Mode never comes back, it undoes itself")
+core.steam_ui_ready = lambda: False                      # Steam's interface never reports ready
+core.refresh_request(144); core.refresh_step(_t0); _boot[0] = "boot-4s"
+_seq = [core.refresh_step(_t0 + k) for k in range(1, 200)]
+check("back" in _seq and _seq.index("back") > 60 + core.STEAM_READY_MAX_S - 5, "Ally Hub waits for Steam to be ready (up to a limit) before opening")
+core.refresh_request_off(); core.refresh_step(_t0 + 200)
+core.steam_ui_ready = lambda: True
 core.game_mode_active = lambda: True
 _boot[0] = "boot-4c"
 core.refresh_request_off()
@@ -1236,6 +1243,7 @@ _rb, _qr, _boot = [], [], ["L1"]
 core.reboot_device = lambda delay=3.0: _rb.append(delay)
 core.boot_id = lambda: _boot[0]
 core.launch_self = lambda: True
+core.steam_ui_ready = lambda: True
 core.game_mode_active = lambda: True
 core.queue_report = lambda *a, **k: (_qr.append((a, k)), Path("/x"))[1]
 core.lab_logs = lambda: {"kernel": "k", "gamescope": "g"}
@@ -1888,6 +1896,10 @@ check(core.update_channel() == "stable", "an unknown channel falls back to Stabl
 
 GUI = r"""
 import gui, core
+import inspect as _insp
+_psrc = _insp.getsource(gui.PerformancePage.__init__)
+check("adv(rcard)" in _psrc and "adv(mcard)" in _psrc,
+      "experimental 144 Hz, its lab and the frame meter only show in Advanced (the owner's rule for Stable)")
 from PySide6.QtWidgets import QApplication
 gui.ask = lambda *a: True
 class C:

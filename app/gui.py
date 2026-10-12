@@ -5707,7 +5707,7 @@ class PerformancePage(QWidget, _PerformanceRefresh):
         mr.addWidget(self.btn_meter)
         mr.addStretch()
         mv.addLayout(mr)
-        v.addWidget(mcard)
+        v.addWidget(adv(mcard))                          # experimental tools stay in Advanced (the owner, 1.5.0)
 
         tune_head = label("TUNE-UP", "section")
         tcard, tv = titled_card(
