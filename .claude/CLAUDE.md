@@ -249,6 +249,10 @@ the owner's call). Mock-Qt can't see ownership bugs: get a review before shippin
 - **Bottom bar off by default** (`theme.footer`); without it status/progress/Report sit in the header.
 - Qt ownership/event-loop changes can't be caught by mock-Qt: always get a review agent pass before shipping.
 
+Focus styles (1.4.1.19, the owner: highlighted text cut off everywhere): a :focus rule must never change a widget's
+border+padding total. When the border grows, padding shrinks by the same amount (a test checks the button pairs);
+unfocused primary buttons carry a transparent 3px border. Button text color goes through `readable_on`.
+
 Qt layout gotcha: a `QPushButton` with a child layout (tiles, preset cards,
 theme cards) does NOT grow to fit its contents, AND the app stylesheet's `QPushButton { min-height }` is
 re-applied on every polish, overwriting `setFixedHeight`/`setMinimumHeight`. Use `CardButton` for any

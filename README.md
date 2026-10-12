@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.4.1.19-e11d48?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.5.0-e11d48?style=flat-square">
   <img alt="SteamOS" src="https://img.shields.io/badge/SteamOS-3.8%2B-1a9fff?style=flat-square&logo=steam&logoColor=white">
   <img alt="Device" src="https://img.shields.io/badge/ROG%20Xbox%20Ally%20X-tested-8b5cf6?style=flat-square">
   <img alt="License" src="https://img.shields.io/github/license/Ravenor907/AllyHub?color=22c55e&style=flat-square">
@@ -34,7 +34,7 @@ and a phone remote. Works in Desktop Mode, and fully in Game Mode with just the 
 | 🧩 **One store** | Essentials, mods, apps, launchers and the full Decky Plugin Store, each a section you reach with LT/RT: Decky Loader, Ally Center, Lossless Scaling and OptiScaler frame gen (Bazzite's builds), EmuDeck and more. Turn any plugin off without uninstalling it |
 | 📦 **30 curated apps** | Heroic, Greenlight (Xbox Cloud), Moonlight, ProtonPlus, Discord, Spotify and more, each with install, update and remove |
 | 🕹️ **PC launchers** | Battle.net, Epic, EA, Ubisoft, GOG and 10 more added straight to your Steam library with their own cover art, plus uninstall and a leftover cleaner |
-| 🚀 **Performance** | Game Boost while you play, a one-tap system tune-up and FSR 4 for every game, ideas from CachyOS and Bazzite, all undoable |
+| 🚀 **Performance** | Game Boost while you play, a one-tap system tune-up and FSR 4 for every game, ideas from CachyOS and Bazzite, all undoable. In Advanced: experimental 144 Hz with a guided test, and a frame meter |
 | 🎚️ **Game settings** | Per-game switches instead of typing launch options (FSR 4, frame generation, Steam Deck mode and more), the right Proton per game, and help when a game won't start |
 | 🕰️ **Save time machine** | A snapshot of each game's saves every time it starts, restorable from Game Mode, with undo |
 | 🌙 **Sleep guardian** | Battery used per sleep, what woke the handheld and failed sleeps, with a fix for USB devices that keep waking it |
