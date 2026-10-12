@@ -311,6 +311,13 @@ stuck at "Launching"); countdowns run from `gui_opened_at()` (GUI writes `GUI_OP
 deadline; `_launch_watch` reports a stuck launch once with `steam_launch_log()`. Decky counts as installed only with
 its service unit (`decky_service_exists`); files alone = Repair. Jobs run without LD_PRELOAD (Steam overlay noise).
 Controller: Y = Steam keyboard, Menu = refresh (the owner).
+**Password-free panel updates (1.5.0.3, the owner approved in a live conversation: "yes do both").** One-time root
+step (`qam_permission_parts`, inside `qam_install_cmd` and `allow_all_cmd`): the panel folder and plugin.json stay
+root's (plugin.json's flags decide root backends: the user must never be able to write it; `qam_self_updatable`
+refuses if it's writable), main.py/dist/package.json become the user's, and `DECKY_POLKIT_RULE` lets the user
+restart/start plugin_loader.service only. The agent then updates an outdated panel itself when no game runs
+(`qam_update_nopw`). Checkup "Password prompts" → `Hub.allow_all` = one job for lighting, Game Boost and the panel.
+Security reviews: this is a deliberate, owner-approved trade-off; flag it only if plugin.json or the rule widen.
 1.5.0.2 (reports #9-#18): the report key gets HTTP 403 on comments, so attachments go into the issue body
 (`_body_with_attachments`, up to `ISSUE_BODY_MAX`), a failed "happened again" comment opens a new issue, and a
 report is dropped after `REPORT_MAX_TRIES`. The GUI's excepthook ignores KeyboardInterrupt/SystemExit and SIGINT/

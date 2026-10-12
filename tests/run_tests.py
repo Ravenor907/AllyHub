@@ -1353,6 +1353,44 @@ core._launch_watch(_st, 100.0 + core.LAUNCH_REPORT_S + 1)
 core._launch_watch(_st, 100.0 + core.LAUNCH_REPORT_S + 9)
 check(len(_qr2) == 1 and "didn't open" in _qr2[0], "a launch stuck at Steam's Launching is reported once")
 core.queue_report, core.gui_opened_at, core.steam_ui_ready = _g4
+# ---- one password for everything, panel updates without one (1.5.0.3, the owner approved) ----
+_js = core.decky_polkit_js()
+check("plugin_loader.service" in _js and '"restart"' in _js and '"start"' in _js and "stop" not in _js
+      and _js.count("Result.YES") == 1, "the polkit rule allows only restarting or starting Decky Loader")
+_pp = " && ".join(core.qam_permission_parts())
+check("chown root:root" in _pp and "/plugin.json" in _pp.split("chown -R")[0] and "plugin.json" not in _pp.split("chown -R")[1].split("&&")[0]
+      and "main.py" in _pp and "/dist" in _pp, "plugin.json stays root's; only the per-version parts become the user's")
+_pr = core.DECKY_POLKIT_RULE
+core.DECKY_POLKIT_RULE = str(Path(HOME) / "rule.rules"); Path(core.DECKY_POLKIT_RULE).write_text("x")
+for _n, _t in core.qam_files().items():
+    (core.QAM_DIR / _n).parent.mkdir(parents=True, exist_ok=True)
+    (core.QAM_DIR / _n).write_text(_t)
+(core.QAM_DIR / "package.json").write_text('{"version": "0.0.1"}')
+check(not core.qam_self_updatable(), "a writable plugin.json means the permission isn't (safely) in place: no password-free updates")
+_ga = core.os.access
+core.os.access = lambda p, m: _ga(p, m) and not str(p).endswith("plugin.json")
+_rq = core.run_quiet
+core.run_quiet = lambda cmd, timeout=8: (0, "")
+check(core.qam_self_updatable() and core.qam_outdated() and core.qam_update_nopw() and not core.qam_outdated(),
+      "with the permission in place the panel updates itself, no password")
+core.os.access, core.run_quiet, core.DECKY_POLKIT_RULE = _ga, _rq, _pr
+_g5 = (core.lighting_access_ok, core.epp_files, core.epp_writable, core.qam_installed, core.decky_service_exists,
+       core.qam_self_updatable)
+core.lighting_access_ok = lambda leds: False
+core.epp_files = lambda: ["x"]
+core.epp_writable = lambda: False
+core.qam_installed = lambda: "1.0.0"
+core.decky_service_exists = lambda: True
+core.qam_self_updatable = lambda: False
+_lpc = core.led_permission_cmd
+core.led_permission_cmd = lambda leds=None: "sudo sh -c LIGHT"
+_ac = core.allow_all_cmd(["led"])
+check(_ac and "LIGHT" in _ac and "energy_performance_preference" in _ac and "polkit" in _ac
+      and core.allow_all_missing(["led"]) == ["lighting", "Game Boost", "Quick Access panel updates"],
+      "one job covers lighting, Game Boost and the panel")
+core.lighting_access_ok, core.epp_files, core.epp_writable, core.qam_installed, core.decky_service_exists, \
+    core.qam_self_updatable = _g5
+core.led_permission_cmd = _lpc
 # ---- the extra Ally Hub theme ----
 check(core.DEFAULT_CONFIG["theme"]["preset"] == "ROG Crimson" and "Ally Hub" in core.EXTRA_THEMES
       and list(core.THEMES)[-1] == "Ally Hub" and core.theme_palette({"preset": "nope"})["accent"] == "#e11d48",

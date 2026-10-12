@@ -4788,12 +4788,108 @@ def qam_stage() -> Path:
     return QAM_STAGE
 
 
+# 1.5.0.3 (the owner approved, "yes do both"): after one password, panel updates need none. The folder and plugin.json
+# stay root's (plugin.json's "flags" decide whether Decky runs a plugin as root, so the user must never be able to
+# change it); the parts that change per version (main.py, dist/, package.json) belong to the user and run as the user
+# anyway (no "root" flag). A polkit rule lets the user restart (or start) Decky Loader's service, nothing else.
+DECKY_POLKIT_RULE = "/etc/polkit-1/rules.d/49-allyhub-decky.rules"
+QAM_USER_PARTS = ("main.py", "dist", "package.json")
+
+
+def decky_polkit_js() -> str:
+    user = re.sub(r"[^A-Za-z0-9_.-]", "", USER)
+    return f"""// Ally Hub: lets {user} restart Decky Loader (plugin_loader.service) without a password. Nothing else.
+polkit.addRule(function(action, subject) {{
+    if (action.id == "org.freedesktop.systemd1.manage-units" && subject.user == "{user}" &&
+        action.lookup("unit") == "plugin_loader.service" &&
+        (action.lookup("verb") == "restart" || action.lookup("verb") == "start")) {{
+        return polkit.Result.YES;
+    }}
+}});"""
+
+
+def qam_permission_parts() -> list:
+    """Root steps (inside one sudo sh -c) that make later panel updates password free."""
+    d = shlex.quote(str(QAM_DIR))
+    user = shlex.quote(USER)
+    return [f"chown root:root {d} {d}/plugin.json", f"chmod 755 {d}", f"chmod 644 {d}/plugin.json",
+            f"chown -R {user}: " + " ".join(f"{d}/{p}" for p in QAM_USER_PARTS),
+            "mkdir -p /etc/polkit-1/rules.d",
+            f"printf '%s\\n' {shlex.quote(decky_polkit_js())} > {DECKY_POLKIT_RULE}",
+            f"chmod 644 {DECKY_POLKIT_RULE}"]
+
+
+def qam_self_updatable() -> bool:
+    """Panel updates can happen without a password (the one-time permission is in place)."""
+    try:
+        return (Path(DECKY_POLKIT_RULE).exists() and (QAM_DIR / "plugin.json").read_text() == QAM_PLUGIN_JSON
+                and all(os.access(QAM_DIR / p, os.W_OK) for p in ("main.py", "dist", "dist/index.js", "package.json"))
+                and not os.access(QAM_DIR / "plugin.json", os.W_OK))   # plugin.json must stay locked
+    except OSError:
+        return False
+
+
+def qam_outdated() -> bool:
+    have = qam_installed()
+    return bool(have) and parse_version(have) < parse_version(QAM_VERSION)
+
+
+def qam_update_nopw() -> bool:
+    """Update the installed panel in place and restart Decky, no password (needs qam_self_updatable)."""
+    if not qam_self_updatable():
+        return False
+    files = qam_files()
+    try:
+        for name in ("main.py", "dist/index.js", "package.json"):     # package.json last: it carries the version
+            (QAM_DIR / name).write_text(files[name])
+    except OSError as e:
+        app_log("qam", f"panel update failed: {e}")
+        return False
+    rc, _ = run_quiet(["systemctl", "restart", "plugin_loader"], timeout=30)
+    app_log("qam", f"panel updated to {QAM_VERSION} without a password (Decky restart rc={rc})")
+    return rc == 0
+
+
 def qam_install_cmd() -> str:
-    """Copy the panel into Decky's plugin folder (root's) and restart Decky so it shows up."""
+    """Copy the panel into Decky's plugin folder and restart Decky so it shows up. The same password also makes
+    every later panel update password free (qam_permission_parts)."""
     stage, dest = shlex.quote(str(qam_stage())), shlex.quote(str(QAM_DIR))
-    return (f'sudo mkdir -p {shlex.quote(str(QAM_DIR.parent))} && sudo rm -rf {dest} && '
-            f'sudo cp -r {stage} {dest} && '
-            'sudo systemctl restart plugin_loader && echo "Quick Access panel ready."')
+    inner = " && ".join([f"mkdir -p {shlex.quote(str(QAM_DIR.parent))}", f"rm -rf {dest}", f"cp -r {stage} {dest}"]
+                        + qam_permission_parts() + ["systemctl restart plugin_loader"])
+    return "sudo sh -c " + shlex.quote(inner) + ' && echo "Quick Access panel ready."'
+
+
+def allow_all_cmd(leds: list = None) -> Optional[str]:
+    """Everything Ally Hub needs a password for, in one prompt (the owner): lighting, Game Boost, and password-free
+    panel updates. Only the parts that are missing. None when nothing is."""
+    cmds = []
+    if leds is None:
+        leds = [] if lighting_shelved() else find_leds()
+    if leds and not lighting_access_ok(leds):
+        cmds.append(led_permission_cmd(leds))
+    if epp_files() and not epp_writable():
+        cmds.append(boost_permission_cmd())
+    if qam_installed() and decky_service_exists() and not qam_self_updatable():
+        cmds.append(qam_install_cmd())
+    cmds = [c for c in cmds if c]
+    if not cmds:
+        return None
+    # one job: sudo asks once and the rest reuse it (same parent shell). Each part reports on its own line.
+    return " ; ".join(f"{{ {c}; }}" for c in cmds) + " ; echo 'Done: Ally Hub has what it needs.'"
+
+
+def allow_all_missing(leds: list = None) -> list:
+    """Plain names of what still needs the one-time password (for Checkup)."""
+    out = []
+    if leds is None:
+        leds = [] if lighting_shelved() else find_leds()
+    if leds and not lighting_access_ok(leds):
+        out.append("lighting")
+    if epp_files() and not epp_writable():
+        out.append("Game Boost")
+    if qam_installed() and decky_service_exists() and not qam_self_updatable():
+        out.append("Quick Access panel updates")
+    return out
 
 
 def qam_uninstall_cmd() -> str:

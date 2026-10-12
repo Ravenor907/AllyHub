@@ -4651,6 +4651,12 @@ class GamesPage(QWidget):
                          "Decky Loader now?"):
                 self.hub.on_item_action("decky", "install")
             return
+        if core.qam_outdated() and core.qam_self_updatable():    # no password needed any more (1.5.0.3)
+            self.hub.toast("Updating the panel…")
+            BackgroundTask(self, core.qam_update_nopw, lambda ok: (
+                self.hub.toast("Panel updated ✔" if ok else "Couldn't update the panel (see Activity log)"),
+                self.show_list() if self.game is None else None))
+            return
         if self.hub.needs_password():
             return
         if not load_config()["agent"].get("enabled") or not core.agent_running():
@@ -6024,12 +6030,19 @@ class DoctorPage(QWidget):
                 False)
 
         leds = [] if core.lighting_shelved() else core.find_leds()
+        missing = core.allow_all_missing(leds)
+        if missing:      # the owner (1.5.0.3): one password for everything, not one prompt per feature
+            add("warn", "Password prompts",
+                f"These still ask for your password: {', '.join(missing)}. One password sets them all up so they "
+                "never ask again.", "Allow all", lambda: h.allow_all(leds))
+        else:
+            add("ok", "Password prompts", "Lighting, Game Boost and panel updates don't need your password.")
         if leds:
             ok = core.lighting_access_ok(leds)
             add("ok" if ok else "warn", "Lighting permissions",
                 "Lighting can change without a password." if ok else
                 "Every color change asks for your password, and the background helper can't change the lights.",
-                None if ok else "Fix", None if ok else h.enable_led_permissions)
+                None if ok else "Fix", None if ok else (lambda: h.allow_all(leds)))
 
         if cfg["agent"].get("enabled"):
             ok = core.agent_running()
@@ -6046,7 +6059,7 @@ class DoctorPage(QWidget):
         perf = cfg.get("performance") or {}
         if perf.get("boost") and core.boost_backend() == "epp" and not core.epp_writable():
             add("warn", "Game Boost", "On, but it isn't allowed to change the CPU setting yet.",
-                "Allow", h.performance.allow_boost)
+                "Allow", lambda: h.allow_all())
         if core.tuneup_applied():
             off = [i["title"] for i in core.tuneup_items() if i["state"] == "off"]
             add("warn" if off else "ok", "Tune-up",
@@ -7979,8 +7992,10 @@ class Hub(QMainWindow):
         after = self._decky_after.pop(key, None)
         if after:
             after(code == 0)
-        if key == "rgb-perms":
+        if key in ("rgb-perms", "allow-all"):
             self.lighting.access_job_done(code == 0)
+        if key == "allow-all":
+            self.performance.job_done(key, code == 0)
         if key in ("boost-perms", "tuneup", "tuneup-undo"):
             self.performance.job_done(key, code == 0)
         if key == "nonsteamlaunchers":
@@ -8273,6 +8288,22 @@ class Hub(QMainWindow):
         else:
             msg_info(self, APP_NAME, "In Steam: Games > Add a Non-Steam Game, pick Ally Hub, then set its launch "
                                      "options to --gamemode.")
+
+    def allow_all(self, leds=None) -> bool:
+        """Everything that still needs the password, in one prompt (lighting, Game Boost, panel updates)."""
+        if self.needs_password():
+            return False
+        if "allow-all" in self.runner.pending_keys():
+            self.toast("Already setting it up…")
+            return True
+        cmd = core.allow_all_cmd(leds if isinstance(leds, list) else None)
+        if not cmd:
+            self.toast("Nothing needs your password ✔")
+            return True
+        if core.qam_installed():
+            core.qam_stage()                             # the job copies the panel from here
+        self.runner.submit("Allow Ally Hub (one password)", cmd, "allow-all")
+        return True
 
     def enable_led_permissions(self, leds=None) -> bool:
         """Submit the one-time lighting permission job. Returns False if it couldn't start."""
