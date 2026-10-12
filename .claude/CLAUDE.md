@@ -299,6 +299,9 @@ other handhelds). Frame checks use the built-in `FrameMeter` (gui: `FrameProbe` 
 createWindowContainer; it draws over sheets, so the box is only visible while running and the page meter stops
 when a sheet opens; interval backs off when not exposed or swaps don't block). `frame_stats` flags `off_target`
 (>5% from target). Button handlers get clicked(bool): lambdas with defaults need `*_` (1.4.1.15 saved "False").
+After a restart, Ally Hub is launched only once Steam's UI is ready (`steam_ui_ready` via the CEF debugger, or
+`STEAM_READY_MAX_S` after Game Mode): launching earlier left it stuck at the library's X (owner, 1.4.1.16).
+Experimental 144 Hz, the lab and the frame meter are behind `adv(...)` (a test enforces it).
 Report attachments (comments) were missing on #9/#10: the uploader now logs the HTTP status; check the log.
 Password-free panel updates (polkit rule for plugin_loader + user-owned panel parts) were blocked by the session's
 safety check in 1.4.1.16: needs the owner's explicit decision before building.

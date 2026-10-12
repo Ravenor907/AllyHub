@@ -491,6 +491,28 @@ def launch_self() -> bool:
         return False
 
 
+def steam_ui_ready() -> bool:
+    """Steam's Game Mode interface has finished starting (its JavaScript client is up). Launching Ally Hub before
+    that left it stuck at the library's cancel (X) button (the owner, 1.4.1.16 lab, first restart)."""
+    try:
+        return cef_eval("typeof SteamClient !== 'undefined' && !!SteamClient.Apps && !!SteamClient.Apps.RunGame",
+                        timeout=3) is True
+    except Exception:
+        return False
+
+
+STEAM_READY_MAX_S = 75     # Steam never reported ready (Decky's debugger off): launch anyway after this
+
+
+def _relaunch_due(st: dict, now: float) -> bool:
+    """After a restart: wait for Game Mode, then for Steam's interface, before opening Ally Hub (sets st["gm"])."""
+    if not st.get("gm"):
+        if not (game_mode_active() or now - st["seen"] > 60):
+            return False
+        st["gm"] = now
+    return steam_ui_ready() or now - st["gm"] > STEAM_READY_MAX_S
+
+
 def boot_id() -> str:
     return read_text("/proc/sys/kernel/random/boot_id").strip()
 
@@ -512,7 +534,7 @@ def refresh_step(now: float = None) -> str:
     status = st.get("status")
     if status == "pending":
         _write_refresh_lua(refresh_lua(st.get("max", REFRESH_MAX)))
-        st.update(status="trial", started=now, boot=boot_id(), back=None, seen=None)
+        st.update(status="trial", started=now, boot=boot_id(), back=None, seen=None, gm=None)
         write_json(REFRESH_STATE, st)
         app_log("refresh", f"trying {st.get('max')} Hz: restarting")
         reboot_device()
@@ -534,11 +556,14 @@ def refresh_step(now: float = None) -> str:
     if not st.get("seen"):
         st["seen"] = now
         write_json(REFRESH_STATE, st)                    # must persist: the 60 s and deadline timers count from it
-    if not st.get("back") and (game_mode_active() or now - st["seen"] > 60):
-        st["back"] = now
+    if not st.get("back"):
+        due = _relaunch_due(st, now)
+        if due:
+            st["back"] = now                                 # the Keep countdown starts when Ally Hub opens
         write_json(REFRESH_STATE, st)
-        threading.Timer(8.0, launch_self).start()          # the countdown opens by itself
-        return "back"
+        if due:
+            threading.Timer(4.0, launch_self).start()      # the countdown opens by itself
+            return "back"
     expired = (st.get("back") and now - st["back"] > REFRESH_CONFIRM_S) or now - st["seen"] > REFRESH_DEADLINE_S
     if expired:
         _write_refresh_lua(st.get("prev_lua") or "")
@@ -717,7 +742,7 @@ def lab_next() -> bool:
         nxt = _lab_next_index(st)
         if nxt is None:
             return False
-        st.update(status="pending", i=nxt, seen=None, back=None, confirmed=None, active=None, seen_boot=None)
+        st.update(status="pending", i=nxt, seen=None, back=None, gm=None, confirmed=None, active=None, seen_boot=None)
         ok.append(1)
     _lab_update(fn)
     return bool(ok)
@@ -786,7 +811,7 @@ def lab_step(now: float = None) -> str:
             plan, i = st.get("plan") or [], int(st.get("i", 0))
             hz, method = plan[i]
             _write_refresh_lua(refresh_lua(hz, method))
-            st.update(status="step", started=now, boot=boot_id(), seen=None, back=None, confirmed=None,
+            st.update(status="step", started=now, boot=boot_id(), seen=None, back=None, gm=None, confirmed=None,
                       active=None, seen_boot=None)
             app_log("refresh", f"144 Hz lab step {i + 1}: {hz} Hz method {method}, restarting")
             reboot_device()
@@ -812,10 +837,11 @@ def lab_step(now: float = None) -> str:
         if not st.get("seen"):                           # first look after the step's restart
             st.update(seen=now, seen_boot=me)
             return None
-        if not st.get("back") and (game_mode_active() or now - st["seen"] > 60):
-            st["back"] = now
-            threading.Timer(8.0, launch_self).start()
-            out[0] = "back"
+        if not st.get("back"):
+            if _relaunch_due(st, now):
+                st["back"] = now                             # "I can see it" countdown starts when Ally Hub opens
+                threading.Timer(4.0, launch_self).start()
+                out[0] = "back"
             return None
         if not st.get("confirmed"):
             left = REFRESH_DEADLINE_S - (now - st["seen"])
