@@ -282,6 +282,17 @@ people to turn VRR off) shows on the card, the confirm,
 the countdown sheet and the ••• panel. Owner's Monitor OC test: VRR on skipped frames, VRR off was clean (the
 panel's VRR range stays 48-120). Touch stops working at 144 Hz (owner, 1.4.1.13): suspected the panel's
 touch controller timing its scans to the display's blanking, which the faster clock shortens; unconfirmed.
+**144 Hz lab (1.4.1.15, the owner: goal 144 Hz + VRR + touch, no dropped frames; Game Mode only).** `refresh_lua(hz,
+method)`: a = clock sped up, b = keep the 120 Hz vblank time (more lines, faster clock), c = halve h porches (lower
+clock). Stock Ally profile = fixed clock, VFP only (vfp 54 = 120 Hz), so >120 must raise the clock. The lua logs
+`[allyhub-lab]` timings with `info()` (gamescope drops `debug()`). Agent `lab_step` runs LAB_STATE (locked via
+`_lab_update`, monotonic timers): pending → write + reboot → step (seen, back, launch_self) → GUI `_run_lab_sheet`
+(see/picture/touch/VRR off/VRR on/end). Undo paths: no "I can see it" (trial timers), manual reboot mid-step
+(`seen_boot`), `LAB_IDLE_S` after confirm, restart never happened. Ladder `LAB_LADDER` only if no 144 method keeps
+touch. Touch = `TouchPad` taps + `touch_irq_count` delta (rises with no taps = software drop). Agent attaches logs
+(`lab_logs`: kernel filtered, bracketed device names stripped; gamescope-session unit only) and sends the report at
+every ending (`lab_send_report`, kind `refresh-lab`). The lab and the older trial never run together (`refresh_busy`).
+Read the lab report's table before changing 144 Hz code.
 The brightness slider goes through `led_dim` (`LED_DIM_CURVE`) for streamed frames: linear drive barely dimmed.
 The chip's own spiral has only 3 brightness steps, so `chip_runs` hands it to the chip only at `CHIP_SPIRAL_FULL`;
 below that the agent streams the same rainbow spiral (owner: 1.4.1.12 still didn't dim it).

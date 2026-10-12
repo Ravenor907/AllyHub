@@ -335,11 +335,24 @@ REFRESH_DEADLINE_S = 240      # from the start, whatever happens (Game Mode stuc
 GAME_MODE_UNIT = "gamescope-session.service"
 
 
-def refresh_lua(max_hz: int) -> str:
+# How a rate above 120 Hz is built (the 144 Hz lab compares them; the owner: 144 Hz + VRR + touch, no dropped frames).
+# The stock Ally profile keeps the pixel clock fixed and only stretches the vertical front porch (vfp 54 = 120 Hz),
+# so anything faster must raise the clock. Touch on this kind of panel likely scans during the blanking between
+# lines and frames, which a faster clock shortens; each method shortens it differently.
+LAB_METHODS = {
+    "a": "Faster clock (the 120 Hz timing, sped up)",
+    "b": "Longer pause between frames (same blanking time as 120 Hz, even faster clock)",
+    "c": "Narrower side blanking (clock raised less, shorter lines)",
+}
+
+
+def refresh_lua(max_hz: int, method: str = "a") -> str:
     max_hz = max(121, min(165, int(max_hz)))
+    method = method if method in LAB_METHODS else "a"
     return f"""-- Ally Hub (experimental): lets the ROG Ally panel run above 120 Hz, up to {max_hz} Hz.
--- Delete this file and restart Game Mode to undo. Written by Ally Hub; it removes it again by itself.
+-- Delete this file and restart to undo. Written by Ally Hub; it removes it again by itself.
 local MAX = {max_hz}
+local METHOD = "{method}"
 pcall(function()
   local base
   local probe = {{ vendor = "TMX", model = "TL070FVXS01-0", product = 0x0002 }}
@@ -356,14 +369,38 @@ pcall(function()
   local rates = {{}}
   for hz = 48, MAX do rates[#rates + 1] = hz end
   oc.dynamic_refresh_rates = rates
+  local function shape(mode, refresh)
+    if METHOD == "b" then
+      -- keep the 120 Hz vertical blanking TIME: more blank lines, then the clock catches up
+      local vb = mode.vtotal - mode.vdisplay
+      local f0 = (1000 * mode.clock) / (mode.htotal * mode.vtotal)
+      local nb = math.floor((vb * refresh * mode.vdisplay) / (f0 * mode.vtotal - vb * refresh) + 0.5)
+      if nb > vb and nb < vb + 400 then
+        gamescope.modegen.adjust_front_porch(mode, (mode.vsync_start - mode.vdisplay) + (nb - vb))
+      end
+    elseif METHOD == "c" then
+      -- halve the horizontal porches (sync width kept, never under 8 px), so the clock rises less
+      local hsync = mode.hsync_end - mode.hsync_start
+      local hfp = mode.hsync_start - mode.hdisplay
+      local hbp = mode.htotal - mode.hsync_end
+      gamescope.modegen.set_h_timings(mode, math.max(8, math.floor(hfp / 2)), hsync, math.max(8, math.floor(hbp / 2)))
+    end
+  end
   oc.dynamic_modegen = function(base_mode, refresh)
     if refresh <= 120 then return base.dynamic_modegen(base_mode, refresh) end
     local mode = base.dynamic_modegen(base_mode, 120)
+    pcall(info, string.format("[allyhub-lab] base 120 Hz: clock %d h %d/%d/%d/%d v %d/%d/%d/%d", mode.clock,
+      mode.hdisplay, mode.hsync_start, mode.hsync_end, mode.htotal, mode.vdisplay, mode.vsync_start,
+      mode.vsync_end, mode.vtotal))
     local ok = pcall(function()
+      shape(mode, refresh)
       mode.clock = gamescope.modegen.calc_max_clock(mode, refresh)
       mode.vrefresh = gamescope.modegen.calc_vrefresh(mode)
     end)
     if not ok then return base.dynamic_modegen(base_mode, 120) end
+    pcall(info, string.format("[allyhub-lab] %d Hz method %s: clock %d h %d/%d/%d/%d v %d/%d/%d/%d", refresh,
+      METHOD, mode.clock, mode.hdisplay, mode.hsync_start, mode.hsync_end, mode.htotal, mode.vdisplay,
+      mode.vsync_start, mode.vsync_end, mode.vtotal))
     return mode
   end
   oc.matches = function(display)
@@ -374,6 +411,11 @@ pcall(function()
   gamescope.config.known_displays.allyhub_rogally_oc = oc
 end)
 """
+
+
+def refresh_method() -> str:
+    m = re.search(r'^local METHOD = "([a-z])"$', read_text(REFRESH_SCRIPT), re.M)
+    return m.group(1) if m else "a"
 
 
 def refresh_installed() -> Optional[int]:
@@ -387,6 +429,8 @@ def refresh_state() -> dict:
 
 
 def refresh_request(max_hz: int) -> None:
+    if lab_active():
+        return                                           # the lab owns the profile until it ends
     """Ask the agent to try a new top rate: it keeps the current file to fall back to, writes the new one and
     restarts Game Mode (the agent does it, so the restart doesn't cut off the one asking)."""
     write_json(REFRESH_STATE, {"status": "pending", "max": int(max_hz), "asked": time.time(),
@@ -403,6 +447,8 @@ def refresh_keep() -> bool:
 
 
 def refresh_request_off() -> None:
+    if lab_active():
+        return                                           # the lab restores the old profile itself when it ends
     write_json(REFRESH_STATE, {"status": "remove", "asked": time.time(), "prev_lua": ""})
 
 
@@ -456,7 +502,7 @@ def refresh_step(now: float = None) -> str:
     """One look by the agent (every second). The profile only takes effect after a full restart (the owner's test),
     so a try restarts the handheld; after the restart Ally Hub opens with a countdown, and without Keep the old
     profile comes back with another restart. Returns what it did: "", "started", "back", "reverted", "removed"."""
-    now = now or time.time()
+    now = now or time.monotonic()      # within-boot timers (each boot compares only its own times)
     clear_desktop_144()
     st = refresh_state()
     status = st.get("status")
@@ -483,6 +529,7 @@ def refresh_step(now: float = None) -> str:
         return ""
     if not st.get("seen"):
         st["seen"] = now
+        write_json(REFRESH_STATE, st)                    # must persist: the 60 s and deadline timers count from it
     if not st.get("back") and (game_mode_active() or now - st["seen"] > 60):
         st["back"] = now
         write_json(REFRESH_STATE, st)
@@ -500,7 +547,7 @@ def refresh_step(now: float = None) -> str:
 
 def refresh_left(now: float = None) -> Optional[int]:
     """Seconds left to press Keep (None when no countdown is running, also before the restart)."""
-    now = now or time.time()
+    now = now or time.monotonic()
     st = refresh_state()
     if st.get("status") != "trial" or not st.get("seen"):
         return None
@@ -522,6 +569,356 @@ def clear_desktop_144() -> bool:
         app_log("refresh", "Desktop Mode 144 Hz retired: back to the screen's own description after the next restart")
         return True
     return False
+
+# --------------------------------------------------------------------------
+# 144 Hz lab (1.4.1.15, the owner: "a separate testing and reporting process that covers all the bases"; goal 144 Hz
+# with VRR, touch and no dropped frames). Game Mode only. Each step loads one (rate, method) profile with a restart;
+# Ally Hub reopens, the owner confirms he can see the picture (else it undoes itself like the trial), then checks
+# picture, touch (taps counted in the app + the touch chip's interrupt count) and Monitor OC's skipped frames with
+# VRR off and on. If no 144 Hz method keeps touch, it steps down (LAB_LADDER) to find the highest rate that does.
+# The end restores the old profile (or keeps the one he picked), restarts, and sends one report.
+# --------------------------------------------------------------------------
+LAB_STATE = DATA_DIR / "refresh_lab.json"
+LAB_PLAN = [(144, "a"), (144, "b"), (144, "c")]
+LAB_LADDER = [138, 132, 126]
+INPUT_DEVICES = "/proc/bus/input/devices"
+INTERRUPTS = "/proc/interrupts"
+
+
+LAB_IDLE_S = 600             # after "I can see it": no answer for 10 minutes = undo (unreadable screen, walked away)
+LAB_LOCK = DATA_DIR / "refresh_lab.lock"
+
+
+def lab_state() -> dict:
+    st = read_json(LAB_STATE, {}) or {}
+    return st if isinstance(st, dict) else {}
+
+
+def _lab_update(fn) -> dict:
+    """Read-change-write of the lab state under a lock: the GUI and the agent both write it."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with open(LAB_LOCK, "a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        except OSError:
+            pass
+        st = lab_state()
+        if fn(st) is not False:
+            write_json(LAB_STATE, st)
+        return st
+
+
+def _mono() -> float:
+    return time.monotonic()      # the timers live within one boot: immune to clock corrections
+
+
+def lab_active() -> bool:
+    return lab_state().get("status") in ("pending", "step", "finishing")
+
+
+def refresh_busy() -> bool:
+    """A 144 Hz trial or the lab is running (they must never run together: both restart the handheld)."""
+    return refresh_state().get("status") in ("pending", "trial", "remove") or lab_active()
+
+
+def lab_start() -> bool:
+    if refresh_busy():
+        return False
+    write_json(LAB_STATE, {"status": "pending", "i": 0, "plan": [list(p) for p in LAB_PLAN], "results": [],
+                           "prev_lua": read_text(REFRESH_SCRIPT) or "", "started": time.time()})
+    return True
+
+
+def lab_current(st: dict = None) -> Optional[tuple]:
+    st = st if st is not None else lab_state()
+    plan, i = st.get("plan") or [], int(st.get("i", 0))
+    return tuple(plan[i]) if st.get("status") == "step" and 0 <= i < len(plan) else None
+
+
+def lab_step_ready() -> bool:
+    """The step's profile is loaded (we're past its restart): the GUI can show the checks."""
+    st = lab_state()
+    return st.get("status") == "step" and bool(st.get("seen"))
+
+
+def lab_confirm() -> None:
+    def fn(st):
+        if st.get("status") != "step":
+            return False
+        st["confirmed"] = st["active"] = _mono()
+    _lab_update(fn)
+
+
+def lab_ping() -> None:
+    """The owner answered something: push the idle undo back."""
+    def fn(st):
+        if st.get("status") != "step":
+            return False
+        st["active"] = _mono()
+    _lab_update(fn)
+
+
+def lab_left(now: float = None) -> Optional[int]:
+    """Seconds left to say "I can see this" before the step undoes itself (None when not counting)."""
+    now = now or _mono()
+    st = lab_state()
+    if st.get("status") != "step" or not st.get("seen") or st.get("confirmed"):
+        return None
+    left = REFRESH_DEADLINE_S - (now - st["seen"])
+    if st.get("back"):
+        left = min(left, REFRESH_CONFIRM_S - (now - st["back"]))
+    return max(0, int(left))
+
+
+def lab_record(result: dict) -> None:
+    def fn(st):
+        cur = lab_current(st)
+        if not cur:
+            return False
+        r = dict(result, hz=cur[0], method=cur[1], at=time.time(), boot=boot_id())
+        st["results"] = [x for x in st.get("results", []) if (x.get("hz"), x.get("method")) != cur] + [r]
+        st["active"] = _mono()
+    _lab_update(fn)
+
+
+def _lab_next_index(st: dict) -> Optional[int]:
+    """Next step, growing the plan with the step-down ladder when no 144 Hz method kept touch."""
+    plan, i, res = st.get("plan") or [], int(st.get("i", 0)), st.get("results") or []
+    if i + 1 < len(plan):
+        return i + 1
+    if any(r.get("touch") == "works" for r in res):
+        return None
+    tried = {int(p[0]) for p in plan}
+    nxt = next((hz for hz in LAB_LADDER if hz not in tried), None)
+    if nxt is None:
+        return None
+    best = next((r["method"] for r in res if r.get("picture") == "good"), "a")
+    plan.append([nxt, best])
+    st["plan"] = plan
+    return len(plan) - 1
+
+
+def lab_has_next() -> bool:
+    st = json.loads(json.dumps(lab_state()))
+    return st.get("status") == "step" and _lab_next_index(st) is not None
+
+
+def lab_next() -> bool:
+    """Move to the next step (the agent restarts into it). False when the plan is done."""
+    ok = []
+
+    def fn(st):
+        if st.get("status") != "step":
+            return False
+        nxt = _lab_next_index(st)
+        if nxt is None:
+            return False
+        st.update(status="pending", i=nxt, seen=None, back=None, confirmed=None, active=None, seen_boot=None)
+        ok.append(1)
+    _lab_update(fn)
+    return bool(ok)
+
+
+def lab_finish(keep: Optional[tuple] = None) -> None:
+    """End the lab: keep one (rate, method) or put the old profile back; the agent restarts."""
+    def fn(st):
+        if st.get("status") not in ("step", "pending"):
+            return False                                 # already over: never start a second ending
+        st.update(status="finishing", keep=list(keep) if keep else None)
+    _lab_update(fn)
+
+
+def _lab_needs_logs(st: dict) -> bool:
+    me = boot_id()
+    return any(r.get("boot") == me and not r.get("logs") for r in st.get("results") or [])
+
+
+def _lab_fill_logs(st: dict, logs: dict = None) -> bool:
+    """Attach this boot's logs to results recorded in this boot (the agent does it: journalctl can be slow)."""
+    if not _lab_needs_logs(st):
+        return False
+    logs = logs or lab_logs()
+    me = boot_id()
+    for r in st.get("results") or []:
+        if r.get("boot") == me and not r.get("logs"):
+            r["logs"] = logs
+    return True
+
+
+def _lab_end(st: dict, why: str, reboot: bool) -> str:
+    keep = st.get("keep") if why == "done" else None
+    _write_refresh_lua(refresh_lua(keep[0], keep[1]) if keep else (st.get("prev_lua") or ""))
+    if keep:
+        write_json(REFRESH_STATE, {"status": "kept", "max": keep[0], "kept": time.time(), "lab": True})
+    _lab_fill_logs(st)
+    st.update(status=why, ended=time.time())
+    write_json(LAB_STATE, st)
+    app_log("refresh", f"144 Hz lab {why}" + (f": kept {keep[0]} Hz method {keep[1]}" if keep else ""))
+    try:
+        lab_send_report(st)                              # saved now, sent now or after the restart
+    except Exception as e:
+        app_log("refresh", f"lab report failed: {e}")
+    if reboot:
+        reboot_device(8.0)
+    return why
+
+
+def lab_step(now: float = None) -> str:
+    """The agent's look every second. Returns "", "started", "back", "aborted", "done"."""
+    now = now or _mono()
+    out = [""]
+    pre = lab_state()
+    if pre.get("status") not in ("pending", "step", "finishing"):
+        return ""
+    logs = lab_logs() if _lab_needs_logs(pre) else None  # outside the lock: the GUI never waits on journalctl
+
+    def fn(st):
+        status = st.get("status")
+        if status == "pending":
+            _lab_fill_logs(st, logs)                     # the step just answered, before its boot ends
+            if refresh_state().get("status") in ("pending", "trial", "remove"):
+                out[0] = _lab_end(st, "aborted", reboot=False)   # never alongside the older trial
+                return False
+            plan, i = st.get("plan") or [], int(st.get("i", 0))
+            hz, method = plan[i]
+            _write_refresh_lua(refresh_lua(hz, method))
+            st.update(status="step", started=now, boot=boot_id(), seen=None, back=None, confirmed=None,
+                      active=None, seen_boot=None)
+            app_log("refresh", f"144 Hz lab step {i + 1}: {hz} Hz method {method}, restarting")
+            reboot_device()
+            out[0] = "started"
+            return None
+        if status == "finishing":
+            _lab_fill_logs(st, logs)
+            out[0] = _lab_end(st, "done", reboot=True)
+            return False
+        if status != "step":
+            return False
+        me = boot_id()
+        if st.get("boot") == me:                         # still before this step's restart
+            if now - st.get("started", now) > 120:       # the restart never happened
+                out[0] = _lab_end(st, "aborted", reboot=False)
+            return False
+        if st.get("seen_boot") and st["seen_boot"] != me:
+            # restarted by hand (or crashed) in the middle of a step: treat it as "this didn't work", undo
+            st.setdefault("results", []).append({"hz": lab_current(st)[0], "method": lab_current(st)[1],
+                                                 "picture": "restarted mid-step", "at": time.time()})
+            out[0] = _lab_end(st, "aborted", reboot=True)
+            return False
+        if not st.get("seen"):                           # first look after the step's restart
+            st.update(seen=now, seen_boot=me)
+            return None
+        if not st.get("back") and (game_mode_active() or now - st["seen"] > 60):
+            st["back"] = now
+            threading.Timer(8.0, launch_self).start()
+            out[0] = "back"
+            return None
+        if not st.get("confirmed"):
+            left = REFRESH_DEADLINE_S - (now - st["seen"])
+            if st.get("back"):
+                left = min(left, REFRESH_CONFIRM_S - (now - st["back"]))
+            if left <= 0:
+                st.setdefault("results", []).append({"hz": lab_current(st)[0], "method": lab_current(st)[1],
+                                                     "picture": "no answer (black screen?)", "at": time.time(),
+                                                     "boot": me})
+                out[0] = _lab_end(st, "aborted", reboot=True)
+            return False
+        if now - max(st.get("confirmed") or 0, st.get("active") or 0) > LAB_IDLE_S:
+            st.setdefault("results", []).append({"hz": lab_current(st)[0], "method": lab_current(st)[1],
+                                                 "picture": "no answer for 10 minutes", "at": time.time(),
+                                                 "boot": me})
+            out[0] = _lab_end(st, "aborted", reboot=True)
+            return False
+        if _lab_fill_logs(st, logs):
+            return None
+        return False
+    _lab_update(fn)
+    return out[0]
+
+
+def touch_device() -> dict:
+    """The built-in touch screen: its input name, and the interrupt line it raises (from /proc)."""
+    text = read_text(INPUT_DEVICES)
+    for block in text.split("\n\n"):
+        props = re.search(r"^B: PROP=([0-9a-f]+)", block, re.M)
+        if not props or not int(props.group(1), 16) & 0x2 or "B: ABS=" not in block:
+            continue                                     # INPUT_PROP_DIRECT + absolute axes = a touch screen
+        name = (re.search(r'^N: Name="([^"]*)"', block, re.M) or [None, ""])[1]
+        sysfs = (re.search(r"^S: Sysfs=(.*)$", block, re.M) or [None, ""])[1]
+        client = next((p[4:] for p in sysfs.split("/") if p.startswith("i2c-") and ":" in p), "")
+        return {"name": name, "sysfs": sysfs, "client": client}
+    return {}
+
+
+def touch_irq_count(dev: dict = None) -> Optional[int]:
+    dev = dev if dev is not None else touch_device()
+    keys = [k for k in (dev.get("client"), dev.get("name")) if k]
+    if not keys:
+        return None
+    for line in read_text(INTERRUPTS).splitlines():
+        if any(k in line for k in keys):
+            nums = []
+            for x in line.split()[1:]:                   # the per-CPU counts come first; then chip and pin names
+                if not x.isdigit():
+                    break
+                nums.append(int(x))
+            return sum(nums)
+    return None
+
+
+def lab_logs() -> dict:
+    """What this boot says about touch and the display (collected before each step's restart)."""
+    _, kernel = run_quiet(["journalctl", "-k", "-b", "--no-pager", "-o", "short-monotonic"], timeout=10)
+    pat = re.compile(r"i2c|touch|elan|goodix|wacom|amdgpu|drm|edp|vrr|freesync", re.I)
+    # device names in [brackets] (Bluetooth gear is often named after its owner) never leave the device
+    k = [re.sub(r"\[[^\]]*\]", "[…]", ln) for ln in (kernel or "").splitlines()
+         if pat.search(ln) and "bluetooth" not in ln.lower()][-60:]
+    _, user = run_quiet(["journalctl", "--user", "-b", "--user-unit", GAME_MODE_UNIT, "--no-pager", "-o", "cat"],
+                        timeout=10)
+    g = [ln for ln in (user or "").splitlines()
+         if "allyhub-lab" in ln or "rogally" in ln.lower() or "touch" in ln.lower()][-40:]
+    return {"kernel": "\n".join(k), "gamescope": "\n".join(g)}
+
+
+def lab_report_text(st: dict = None) -> str:
+    st = st if st is not None else lab_state()
+    dev = touch_device()
+    rows = ["| Step | Rate | Method | Picture | Touch | Taps seen / touch signals | Frames VRR off | Frames VRR on |",
+            "|---|---|---|---|---|---|---|---|"]
+    for n, r in enumerate(st.get("results") or [], 1):
+        rows.append(f"| {n} | {r.get('hz')} Hz | {r.get('method')} | {r.get('picture', '-')} | {r.get('touch', '-')} | "
+                    f"{r.get('taps', '-')} / {r.get('irq', '-')} | {r.get('frames_off', '-')} | {r.get('frames_on', '-')} |")
+    keep = st.get("keep")
+    return "\n".join([
+        "144 Hz lab results (Game Mode)", "",
+        *rows, "",
+        "Methods: " + "; ".join(f"{k} = {v}" for k, v in LAB_METHODS.items()),
+        f"Outcome: {st.get('status')}" + (f", kept {keep[0]} Hz method {keep[1]}" if keep else ", old profile restored"),
+        f"Touch screen: {dev.get('name') or 'not found'} ({dev.get('client') or 'no i2c id'})",
+        "Touch signals = the touch chip's interrupt count while tapping: it rising with no taps seen means Game Mode "
+        "drops touches (software); no rise means the chip stops at that timing (hardware).",
+    ])
+
+
+def lab_send_report(st: dict = None) -> Optional[str]:
+    st = st if st is not None else lab_state()
+    if not st.get("results"):
+        return None
+    atts = []
+    for n, r in enumerate(st["results"], 1):
+        if r.get("logs"):
+            atts.append((f"Step {n} ({r.get('hz')} Hz {r.get('method')}): kernel and Game Mode log",
+                         f"--- kernel ---\n{r['logs'].get('kernel', '')}\n\n--- Game Mode ---\n{r['logs'].get('gamescope', '')}"))
+    return queue_report("refresh-lab", "144 Hz lab results", lab_report_text(st),
+                        _fingerprint("refresh-lab", str(int(st.get("started", 0))), str(len(st["results"]))),
+                        attachments=atts, force=True)
+
+
+def lab_report_sent() -> bool:
+    """This lab run's results already went out (every ending sends them): pressing again would only duplicate."""
+    st = lab_state()
+    return st.get("status") in ("done", "aborted") and bool(st.get("results"))
+
 
 def sshd_active() -> bool:
     return service_active("sshd")

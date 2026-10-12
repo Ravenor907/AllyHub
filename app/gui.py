@@ -1473,7 +1473,8 @@ def run_dialog(dlg) -> int:
         overlay.raise_()
         hub._sheet = dlg
         if getattr(hub, "gamepad", None) is not None:
-            hub.gamepad.leave_mouse_mode()   # the pointer would sit under the dimmer: the D-pad drives the pop-up        QTimer.singleShot(0, lambda: _focus_first(dlg))
+            hub.gamepad.leave_mouse_mode()   # the pointer would sit under the dimmer: the D-pad drives the pop-up
+        QTimer.singleShot(0, lambda: _focus_first(dlg))
         return dlg.exec()
     except Exception:
         core.report_exception("gui-dialog")
@@ -2293,6 +2294,37 @@ class RingPreview(QWidget):
                 p.drawArc(rect, start * 16, 180 * 16)
                 p.setPen(QPen(color, pen_w))
                 p.drawArc(rect, start * 16, 180 * 16)
+
+
+class TouchPad(QFrame):
+    """A big box that counts real finger taps (the 144 Hz lab's touch check). The controller can't press it: only a
+    touch or a pointer press reaches mousePressEvent, so a count means the touch screen works."""
+    tapped = Signal(int)
+
+    def __init__(self):
+        super().__init__()
+        self.count = 0
+        self.setObjectName("card")
+        self.setAttribute(Qt.WA_AcceptTouchEvents, True)
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.setMinimumHeight(160)                     # a big target: a finger, not a pointer
+        lay = QVBoxLayout(self)
+        lay.addWidget(label("Tap here", "cardTitle"), 0, Qt.AlignCenter)
+
+    def _hit(self):
+        self.count += 1
+        self.tapped.emit(self.count)
+
+    def event(self, e):
+        if e.type() == QEvent.TouchBegin:
+            self._hit()
+            e.accept()
+            return True
+        return super().event(e)
+
+    def mousePressEvent(self, e):
+        self._hit()
 
 
 class CardButton(QPushButton):
@@ -5325,6 +5357,36 @@ class _PerformanceRefresh:
         core.refresh_request(hz)
         self.hub.toast("Restarting your handheld…", 5000)
 
+    def lab_start(self, *_args):
+        if not GAMEMODE:
+            msg_info(self, APP_NAME, "The 144 Hz lab runs in Game Mode. Switch to Game Mode and start it there.")
+            return
+        if not core.agent_running():
+            msg_warn(self, APP_NAME, "The background helper has to be on (Settings → General): it runs the restarts "
+                                     "and undoes a step if the screen goes black.")
+            return
+        if core.refresh_busy():
+            msg_info(self, APP_NAME, "A 144 Hz test is already running. Finish it first.")
+            return
+        if not ask(self, "Run the 144 Hz lab?\n\nIt tries three ways of driving the screen at 144 Hz, one per restart "
+                         "(and lower rates if none keeps touch working). After each restart Ally Hub opens and walks "
+                         "you through four quick checks: the picture, touch, and Monitor OC's skipped frames with VRR "
+                         "off and on.\n\nPlan about 10 to 15 minutes, have Monitor OC installed, and save your game. "
+                         "If the screen goes black, that step undoes itself.\n\nAt the end you can keep the best one "
+                         "or go back to before, and the results are sent as a report."):
+            return
+        if core.lab_start():
+            self.hub.toast("Restarting into step 1…", 5000)
+
+    def lab_report(self, *_args):
+        if not core.lab_state().get("results"):
+            msg_info(self, APP_NAME, "No lab results yet. Run the 144 Hz lab in Game Mode first.")
+            return
+        if core.lab_report_sent() and not ask(self, "These results were already sent when the lab ended. Send them "
+                                                    "again?"):
+            return
+        self.hub.toast("Lab report sent ✔" if core.lab_send_report() else "Couldn't save the report (see Activity log)")
+
     def refresh_keep(self, *_args):
         self.hub.toast("Kept." if core.refresh_keep() else "Nothing to keep right now.")
         self.refresh_update()
@@ -5342,7 +5404,14 @@ class _PerformanceRefresh:
         self.btn_refresh_off.setVisible(bool(have) and not trial)
         self.btn_refresh_try.setEnabled(not trial and st.get("status") != "pending")
         self.btn_refresh_try.setVisible(not have or trial)
-        if trial and core.refresh_left() is None:
+        lab, busy = core.lab_state(), core.lab_active()
+        self.btn_refresh_try.setEnabled(self.btn_refresh_try.isEnabled() and not busy)   # never with the lab
+        self.btn_refresh_off.setEnabled(not busy)
+        self.btn_lab.setEnabled(not trial and not busy and st.get("status") != "pending")
+        self.btn_lab_report.setVisible(bool(lab.get("results")))
+        if core.lab_active():
+            text = "The 144 Hz lab is running: Ally Hub opens with the next checks after each restart."
+        elif trial and core.refresh_left() is None:
             text = "Restarting to load 144 Hz…"
         elif trial:
             text = f"Testing {st.get('max')} Hz: going back in {core.refresh_left()} s unless you keep it."
@@ -5392,6 +5461,13 @@ class PerformancePage(QWidget, _PerformanceRefresh):
             rr.addWidget(b)
         rr.addStretch()
         rv.addLayout(rr)
+        lr = QHBoxLayout()
+        self.btn_lab = button("Run the 144 Hz lab", self.lab_start)
+        self.btn_lab_report = button("Send lab report", self.lab_report)
+        lr.addWidget(self.btn_lab)
+        lr.addWidget(self.btn_lab_report)
+        lr.addStretch()
+        rv.addLayout(lr)
         self.refresh_status = label("", "cardMeta", wrap=True)
         rv.addWidget(self.refresh_status)
         rv.addWidget(label("⚠ " + core.REFRESH_DISCLAIMER, "cardWarn", wrap=True))   # shown in both modes
@@ -6746,8 +6822,10 @@ class Hub(QMainWindow):
         QTimer.singleShot(core.HEALTHY_AFTER_S * 1000, lambda: core.mark_healthy("gui"))
         self._refresh_timer = QTimer(self)             # the 144 Hz test's countdown, wherever you are in the app
         self._refresh_timer.timeout.connect(self.check_refresh)
+        self._refresh_timer.timeout.connect(self.check_lab)
         self._refresh_timer.start(1000)
         self._refresh_sheet = False
+        self._lab_sheet = False
 
     # ---- sections built from blocks (1.4.0) ----
     def compose_sections(self):
@@ -7057,6 +7135,161 @@ class Hub(QMainWindow):
             return
         if core.normalize_effect(self.lighting.effect) == core.normalize_effect(core.THEME_LIGHTING):
             self.lighting.set_effect(before)
+
+    def check_lab(self):
+        """The 144 Hz lab's checks for the step that just loaded (Game Mode, right after its restart)."""
+        if self._lab_sheet or self._sheet is not None or not core.lab_step_ready():
+            return
+        cur = core.lab_current()
+        if not cur:
+            return
+        self._lab_sheet = True
+        try:
+            self._run_lab_sheet(*cur)
+        finally:
+            self._lab_sheet = False
+            if getattr(self, "performance", None) is not None:
+                self.performance.refresh_update()
+
+    def _run_lab_sheet(self, hz: int, method: str):
+        st = core.lab_state()
+        n, total = int(st.get("i", 0)) + 1, len(st.get("plan") or [])
+        res = {"picture": "-", "touch": "-", "taps": 0, "irq": "n/a", "frames_off": "-", "frames_on": "-"}
+        dev = core.touch_device()
+        dlg = QDialog(self)
+        dlg.setWindowTitle("144 Hz lab")
+        dv = QVBoxLayout(dlg)
+        dv.setContentsMargins(28, 24, 28, 24)
+        dv.addWidget(label(f"144 Hz lab · step {n} of {total}", "pageTitle"))
+        dv.addWidget(label(f"{hz} Hz, method {method.upper()}: {core.LAB_METHODS.get(method, '')}", "cardMeta", wrap=True))
+        stack = QStackedWidget()
+        dv.addWidget(stack)
+        pages = {}
+
+        def page(key, text):
+            w = QWidget()
+            v = QVBoxLayout(w)
+            v.setContentsMargins(0, 8, 0, 0)
+            v.addWidget(label(text, "cardDesc", wrap=True))
+            pages[key] = (stack.addWidget(w), v)
+            return v
+
+        def go(key):
+            stack.setCurrentIndex(pages[key][0])
+            # the controller's focus must follow the page (the old page's buttons are hidden now)
+            QTimer.singleShot(0, lambda: next((b.setFocus() for b in stack.currentWidget().findChildren(QPushButton)
+                                               if b.isVisible() and b.isEnabled()), None))
+            if key == "touch":
+                res["_irq0"] = core.touch_irq_count(dev)
+            if key == "end":
+                finish_step()
+
+        def row(v, *btns):
+            r = QHBoxLayout()
+            for text, fn, kind in btns:
+                r.addWidget(button(text, fn, kind))
+            r.addStretch()
+            v.addLayout(r)
+
+        # 0: safety, like the trial: nothing confirmed = it undoes itself
+        v = page("see", f"Press ••• → Performance and move the refresh slider to the top (it should reach {hz}). "
+                        "Can you see this clearly?")
+        count = label("", "bigValue")
+        v.addWidget(count)
+        row(v, ("I can see it", lambda: (core.lab_confirm(), go("picture")), "primary"),
+            ("Undo now", lambda: (core.lab_finish(None), dlg.reject()), ""))
+
+        def pick(key, value, nxt):
+            res[key] = value
+            core.lab_ping()                              # an answer: push the 10-minute idle undo back
+            go(nxt)
+
+        v = page("picture", "Does the picture look right? Look for flicker, lines, wrong colors or a shaking image.")
+        row(v, ("Looks right", lambda: pick("picture", "good", "touch"), "primary"),
+            ("Flicker or glitches", lambda: pick("picture", "glitches", "touch"), ""),
+            ("Unusable", lambda: pick("picture", "unusable", "end"), ""))
+
+        v = page("touch", "Tap the box below 5 times with your finger. If nothing counts, use the controller to pick "
+                          "\"Touch does nothing\".")
+        pad = TouchPad()
+        v.addWidget(pad)
+        taps = label("Taps seen: 0", "cardMeta")
+        v.addWidget(taps)
+
+        def touch_answer(value):
+            if res.get("_touch_done") or stack.currentIndex() != pages["touch"][0]:
+                return                                   # answered once already (taps keep coming)
+            res["_touch_done"] = True
+            i0, i1 = res.pop("_irq0", None), core.touch_irq_count(dev)
+            res["irq"] = (i1 - i0) if i0 is not None and i1 is not None else "n/a"
+            res["taps"] = pad.count
+            pick("touch", value, "off")
+
+        def tapped(c):
+            taps.setText(f"Taps seen: {c}")
+            if c == 5:                                   # the 5 taps asked for; extra taps change nothing
+                QTimer.singleShot(600, lambda: touch_answer("works"))
+        pad.tapped.connect(tapped)
+        row(v, ("Touch does nothing", lambda: touch_answer("none"), ""),
+            ("Touch lands in the wrong spot", lambda: touch_answer("off target"), ""))
+
+        frames = (("0 skipped", "0"), ("A few", "a few"), ("Many or a pattern", "many"), ("Didn't check", "-"))
+        v = page("off", f"Frames with VRR OFF: in ••• → Performance turn VRR off. Open Monitor OC → Verify, set the "
+                        f"target to {hz} Hz, let it run 30 seconds, then come back here. Skipped frames?")
+        row(v, *[(t, (lambda val=val: pick("frames_off", val, "on")), "primary" if i == 0 else "")
+                 for i, (t, val) in enumerate(frames)])
+        v = page("on", f"Frames with VRR ON: turn VRR on, run Monitor OC → Verify at {hz} Hz for 30 seconds again. "
+                       "Skipped frames?")
+        row(v, *[(t, (lambda val=val: pick("frames_on", val, "end")), "primary" if i == 0 else "")
+                 for i, (t, val) in enumerate(frames)])
+
+        v = page("end", "")
+        summary = label("", "cardDesc", wrap=True)
+        v.addWidget(summary)
+        actions = QHBoxLayout()
+        v.addLayout(actions)
+
+        def finish_step():
+            if res.get("_recorded"):
+                return
+            res["_recorded"] = True
+            for k in ("_irq0", "_touch_done"):
+                res.pop(k, None)
+            core.lab_record({k: v for k, v in res.items() if not k.startswith("_")})   # logs: the agent adds them
+            summary.setText(f"Recorded: picture {res['picture']}, touch {res['touch']} "
+                            f"(taps {res['taps']}, touch signals {res['irq']}), skipped frames VRR off "
+                            f"{res['frames_off']}, VRR on {res['frames_on']}.")
+            more = core.lab_has_next()
+            if more:
+                actions.addWidget(button("Next step (restarts)", lambda: (core.lab_next() or core.lab_finish(None),
+                                                                          dlg.accept()), "primary"))
+            if res.get("picture") == "good":
+                actions.addWidget(button(f"Keep this one and finish", lambda: (core.lab_finish((hz, method)),
+                                                                               dlg.accept()), "" if more else "primary"))
+            actions.addWidget(button("Finish (back to before)", lambda: (core.lab_finish(None), dlg.accept())))
+            actions.addStretch()
+
+        dv.addWidget(label("⚠ " + core.REFRESH_DISCLAIMER + " Finishing restarts the handheld and sends the report.",
+                           "cardWarn", wrap=True))
+        tick = QTimer(dlg)
+
+        def update():
+            s = core.lab_state()
+            if s.get("status") != "step":
+                dlg.reject()
+                return
+            left = core.lab_left()
+            if left is not None:
+                count.setText(f"Undoing this step in {left} s")
+        tick.timeout.connect(update)
+        tick.start(500)
+        go("picture" if st.get("confirmed") else "see")
+        update()
+        try:
+            run_dialog(dlg)
+        finally:
+            tick.stop()
+            pad.tapped.disconnect()
 
     def check_refresh(self):
         """While a 144 Hz test runs: a panel with a live countdown, Keep and Undo now (in Game Mode, right after the

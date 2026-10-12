@@ -1143,6 +1143,7 @@ class Agent:
             self.safely("sleep", self.update_sleep, battery)
             self.safely("lighting", self.update_lighting, battery)
             self.safely("refresh", core.refresh_step)          # the higher-refresh trial and its undo
+            self.safely("refresh-lab", core.lab_step)          # the 144 Hz lab: restarts between its steps
             self.safely("state", self.write_state)
             if not self.healthy and time.time() - self.started > core.HEALTHY_AFTER_S:
                 self.healthy = True

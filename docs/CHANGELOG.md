@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.4.1.15
+
+- **New: the 144 Hz lab** (Games → Performance, 144 Hz card, Game Mode). It tries three ways of driving the screen at
+  144 Hz, one per restart, and walks you through four checks after each: the picture, touch (it counts your taps and
+  the touch chip's signals), and Monitor OC's skipped frames with VRR off and on. If no 144 Hz way keeps touch working,
+  it steps down (138, 132, 126 Hz) to find the highest rate that does. At the end, keep the best one or go back to
+  before; the results are sent as a report either way.
+- The lab undoes a step by itself if the screen goes black, if you restart in the middle of a step, or if nothing is
+  answered for 10 minutes.
+- Fixed: after a 144 Hz restart, the automatic undo could fail to start if Game Mode never came back.
+- Fixed: pop-up panels opened without the controller selecting a button.
+
 ## 1.4.1.14
 
 - **144 Hz note reworded**: it no longer tells you to turn adaptive sync (VRR) off. It says you may experience
