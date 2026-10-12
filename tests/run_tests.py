@@ -2734,6 +2734,28 @@ tryit("side icons", lambda: (hub.arrange_bars("sides"), hub.apply_theme(), hub.u
 check(all(k in gui.ICONS for k in gui.TAB_ICONS.values()) and all(i in gui.ICONS for _, i, _, _ in hub.FOOT_BUTTONS),
       "every side-bar icon exists")
 check('#topBar[side="true"]' in gui.build_qss(core.theme_palette({"preset": "ROG Crimson"}), 100), "side bars have their own borders")
+import re as _re
+_q = gui.build_qss(core.theme_palette({"preset": "ROG Crimson"}), 100)
+def _box(sel):
+    # border + top padding of a selector's rule, falling back to the base rule for missing parts
+    rules = {m.group(1).strip(): m.group(2) for m in _re.finditer(r"([^{}]+)\{([^{}]*)\}", _q)}
+    b = p = None
+    for name in (sel, sel.split(":")[0], "QPushButton"):
+        r = rules.get(name, "")
+        if b is None:
+            m = _re.search(r"border:\s*(none|(\d+)px)", r)
+            if m:
+                b = 0 if m.group(1) == "none" else int(m.group(2))
+        if p is None:
+            m = _re.search(r"padding:\s*(\d+)px", r)
+            if m:
+                p = int(m.group(1))
+    return (b or 0) + (p or 0)
+_pairs = [("QPushButton", "QPushButton:focus"), ("QPushButton#primary", "QPushButton#primary:focus"),
+          ("QPushButton#chip", "QPushButton#chip:focus"), ("QPushButton#chip:checked", "QPushButton#chip:checked:focus")]
+check(all(_box(a) == _box(b) for a, b in _pairs),
+      "a highlighted button keeps its size (the owner: focused text was cut off everywhere): " +
+      ", ".join(f"{a}={_box(a)}/{_box(b)}" for a, b in _pairs))
 _vk = gui.key_hints(gui.PAD_KEYS, vertical=True)
 tryit("report a problem", hub.report_problem)
 # baseline: controller everywhere, no extra windows, footer off by default, one instance
