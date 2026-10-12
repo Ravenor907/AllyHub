@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.4.1.19
+
+- Fixed: the highlighted button's text was cut off all over the app. The highlight used to make the button's border
+  thicker, which squeezed the text; buttons, chips, text boxes, dropdowns, checkboxes and sliders now keep the
+  same size when highlighted.
+
 ## 1.4.1.18
 
 - **The 144 Hz test is much simpler to follow**: one question per screen with a progress row on top (Check, Set

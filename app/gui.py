@@ -112,28 +112,30 @@ QScrollArea > QWidget > QWidget {{ background: transparent; }}
 #pill[state="fail"] {{ background: #3b1218; color: #fb7185; }}
 QPushButton {{
     background: {p['surface2']}; border: 1px solid {p['border']}; border-radius: 12px;
-    padding: {fs(9)}px {fs(18)}px; font-size: {fs(15)}px; font-weight: 500; min-height: {fs(22)}px;
+    padding: {fs(9) + 2}px {fs(18) + 2}px; font-size: {fs(15)}px; font-weight: 500; min-height: {fs(22)}px;
 }}
 QPushButton:hover {{ border: 1px solid {a2}; }}
-QPushButton:focus {{ border: 3px solid {a2}; }}
+QPushButton:focus {{ border: 3px solid {a2}; padding: {fs(9)}px {fs(18)}px; }}
 QPushButton:disabled {{ color: {p['muted']}; background: {p['surface']}; }}
 QPushButton#primary {{
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {a}, stop:1 {a2});
-    border: none; color: {on};
+    border: 3px solid transparent; padding: {fs(9)}px {fs(18)}px; color: {on};
 }}
-QPushButton#primary:focus {{ border: 3px solid {p['text']}; }}
+QPushButton#primary:focus {{ border: 3px solid {p['text']}; padding: {fs(9)}px {fs(18)}px; }}
 QPushButton#primary:disabled {{ background: {p['surface2']}; color: {p['muted']}; }}
 QPushButton#danger {{ background: transparent; border: 1px solid #7f2a3a; color: #fb7185; }}
-QPushButton#danger:focus {{ border: 3px solid #fb7185; }}
-QPushButton#chip {{ padding: 7px 15px; font-size: {fs(14)}px; border-radius: 17px; }}
-QPushButton#chip:checked {{ background: {a2}; border: none; color: {on}; }}
+QPushButton#danger:focus {{ border: 3px solid #fb7185; padding: {fs(9)}px {fs(18)}px; }}
+QPushButton#chip {{ padding: 9px 17px; font-size: {fs(14)}px; border-radius: 17px; }}
+QPushButton#chip:focus {{ border: 3px solid {a2}; padding: 7px 15px; }}
+QPushButton#chip:checked {{ background: {a2}; border: 1px solid {a2}; color: {on}; }}
+QPushButton#chip:checked:focus {{ border: 3px solid {p['text']}; padding: 7px 15px; }}
 QPushButton#swatch {{ border-radius: 22px; min-width: 44px; max-width: 44px; min-height: 44px; max-height: 44px; padding: 0; }}
 QPushButton#themeCard {{ text-align: left; padding: 0; border-radius: 16px; background: transparent; border: 2px solid {p['border']}; }}
 QPushButton#themeCard:checked {{ border: 3px solid {a}; }}
 QPushButton#themeCard:focus {{ border: 3px solid {a2}; }}
 QLineEdit, QSpinBox {{ background: {p['surface']}; border: 1px solid {p['border']}; border-radius: 12px; padding: 10px 14px; font-size: {fs(15)}px; }}
-QLineEdit:focus, QSpinBox:focus {{ border: 2px solid {a2}; }}
-QCheckBox {{ font-size: {fs(15)}px; spacing: 12px; padding: 4px; }}
+QLineEdit:focus, QSpinBox:focus {{ border: 2px solid {a2}; padding: 9px 13px; }}
+QCheckBox {{ font-size: {fs(15)}px; spacing: 12px; padding: 4px; border: 2px solid transparent; border-radius: 10px; }}
 QCheckBox:focus {{ border: 2px solid {a2}; border-radius: 10px; }}
 QCheckBox::indicator {{ width: 44px; height: 24px; border-radius: 12px; background: {p['surface2']}; border: 1px solid {p['border']}; }}
 QCheckBox::indicator:checked {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {a}, stop:1 {a2}); border: none; }}
@@ -152,9 +154,10 @@ QPlainTextEdit#log {{
 QSlider::groove:horizontal {{ height: 8px; background: {p['surface2']}; border-radius: 4px; }}
 QSlider::sub-page:horizontal {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {a}, stop:1 {a2}); border-radius: 4px; }}
 QSlider::handle:horizontal {{ background: {p['text']}; width: 24px; height: 24px; margin: -8px 0; border-radius: 12px; }}
+QSlider {{ border: 2px solid transparent; border-radius: 8px; }}
 QSlider:focus {{ border: 2px solid {a2}; border-radius: 8px; }}
 QComboBox {{ background: {p['surface2']}; border: 1px solid {p['border']}; border-radius: 10px; padding: 8px 14px; font-size: {fs(15)}px; min-width: 130px; }}
-QComboBox:focus {{ border: 2px solid {a2}; }}
+QComboBox:focus {{ border: 2px solid {a2}; padding: 7px 13px; }}
 QComboBox QAbstractItemView {{ background: {p['surface']}; selection-background-color: {a2}; font-size: {fs(15)}px; }}
 QScrollBar:vertical {{ background: {p['surface']}; width: {max(24, fs(26))}px; margin: 4px 2px; border-radius: {max(12, fs(13))}px; }}
 QScrollBar::handle:vertical {{ background: {p['muted']}; border-radius: {max(10, fs(11))}px; min-height: 72px; margin: 3px; }}
