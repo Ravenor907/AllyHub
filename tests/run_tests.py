@@ -1188,6 +1188,12 @@ check(core.refresh_keep() and core.refresh_step(_t0 + 500) == "" and core.refres
 core.refresh_request(144); core.refresh_step(_t0)
 check(core.refresh_step(_t0 + 121) == "reverted" and core.refresh_installed() == 144, "a restart that never happens changes nothing")
 _boot[0] = "boot-5"
+core.game_mode_active = lambda: False                    # Game Mode never comes back (crashing, black screen)
+core.refresh_request(144); core.refresh_step(_t0); _boot[0] = "boot-4b"
+_seq = [core.refresh_step(_t0 + k) for k in range(1, core.REFRESH_DEADLINE_S + 3, 1)]
+check("reverted" in _seq and core.refresh_installed() == 144, "even if Game Mode never comes back, it undoes itself")
+core.game_mode_active = lambda: True
+_boot[0] = "boot-4c"
 core.refresh_request_off()
 check(core.refresh_step(_t0) == "removed" and core.refresh_installed() is None and _rs[-1] == 1, "back to 120 Hz removes it and restarts")
 core.game_mode_active, core.reboot_device, core.boot_id, core.launch_self = _g
@@ -1208,6 +1214,88 @@ check(len(set(_z)) > 1, "Ally Hub's copy of the chip spiral is still a rainbow a
 check(core.led_dim(255) == 1.0 and core.led_dim(0) == 0 and core.led_dim(128) < 0.25 and core.led_dim("x") == 1.0
       and core.led_gamma((255, 0, 0), core.led_dim(3)) == (1, 0, 0),
       "the brightness slider follows the eye (half = much dimmer), and very low stays on")
+# ---- 144 Hz lab (1.4.1.15) ----
+for _m in "abc":
+    _l = core.refresh_lua(144, _m)
+    check(f'local METHOD = "{_m}"' in _l and _l.count("(") == _l.count(")") and "[allyhub-lab]" in _l, f"lab method {_m} profile")
+check('METHOD = "a"' in core.refresh_lua(144, "zz"), "an unknown method falls back to the plain one")
+_inp = Path(HOME) / "input-devices"
+_inp.write_text('I: Bus=0011\nN: Name="AT Translated Set 2 keyboard"\nB: PROP=0\nB: EV=120013\n\n'
+                'I: Bus=0018 Vendor=04f3\nN: Name="ELAN9008:00 04F3:2E2E"\n'
+                'S: Sysfs=/devices/pci0000:00/0000:00:15.1/i2c_designware.1/i2c-1/i2c-ELAN9008:00/0018:04F3:2E2E.0001/input/input7\n'
+                'B: PROP=2\nB: EV=1b\nB: ABS=3273800000000003\n')
+_irq = Path(HOME) / "interrupts"
+_irq.write_text("           CPU0       CPU1\n  1:          0          5  IR-IO-APIC    1-edge      i8042\n"
+                " 87:        120         30  amd_gpio   9  ELAN9008:00\n")
+core.INPUT_DEVICES, core.INTERRUPTS = str(_inp), str(_irq)
+_dev = core.touch_device()
+check(_dev.get("client") == "ELAN9008:00" and "ELAN" in _dev.get("name", "") and core.touch_irq_count(_dev) == 150,
+      "finds the touch screen and counts its touch signals")
+_g3 = (core.reboot_device, core.boot_id, core.launch_self, core.game_mode_active, core.queue_report, core.lab_logs)
+_rb, _qr, _boot = [], [], ["L1"]
+core.reboot_device = lambda delay=3.0: _rb.append(delay)
+core.boot_id = lambda: _boot[0]
+core.launch_self = lambda: True
+core.game_mode_active = lambda: True
+core.queue_report = lambda *a, **k: (_qr.append((a, k)), Path("/x"))[1]
+core.lab_logs = lambda: {"kernel": "k", "gamescope": "g"}
+core.REFRESH_SCRIPT.unlink(missing_ok=True)
+core.lab_start()
+check(core.lab_step(_t0) == "started" and core.refresh_method() == "a" and core.refresh_installed() == 144 and _rb,
+      "step 1 loads 144 Hz method A and restarts")
+check(not core.lab_step_ready() and core.lab_step(_t0 + 5) == "", "no checks before the restart")
+_boot[0] = "L2"
+core.lab_step(_t0 + 100)
+check(core.lab_step(_t0 + 101) == "back" and core.lab_step_ready() and core.lab_left(_t0 + 110) is not None,
+      "after the restart Ally Hub opens with the checks and a safety countdown")
+_g_mono = core._mono
+core._mono = lambda: _t0 + 101
+core.lab_confirm()
+check(core.lab_left(_t0 + 9999) is None and core.lab_step(_t0 + 101 + 500) == "",
+      "once the picture is confirmed, the black-screen countdown stops")
+core.lab_record({"picture": "good", "touch": "none", "taps": 0, "irq": 0, "frames_off": "0", "frames_on": "many"})
+check(core.lab_has_next() and core.lab_next() and core.lab_step(_t0) == "started" and core.refresh_method() == "b",
+      "next step: method B")
+_boot[0] = "L3"
+core.lab_step(_t0 + 1); core.lab_step(_t0 + 2)
+_n = len(_rb)
+check(core.lab_step(_t0 + 2 + core.REFRESH_CONFIRM_S + 5) == "aborted" and core.refresh_installed() is None
+      and len(_rb) == _n + 1 and _qr and _qr[-1][1].get("force"),
+      "no answer (black screen): the old profile comes back, it restarts and the report goes out")
+check("no answer" in core.lab_report_text() and "| 1 | 144 Hz | a | good | none |" in core.lab_report_text(),
+      "the report has a row per step")
+core.lab_start(); core.lab_step(_t0); _boot[0] = "L4"; core.lab_step(_t0 + 1); core.lab_step(_t0 + 2); core.lab_confirm()
+for _m in "abc":
+    core.lab_record({"picture": "good", "touch": "none"})
+    if _m != "c":
+        core.lab_next(); core.lab_step(_t0); _boot[0] += "x"; core.lab_step(_t0 + 1); core.lab_step(_t0 + 2); core.lab_confirm()
+check(core.lab_has_next() and core.lab_next() and core.lab_state()["plan"][-1] == [138, "a"],
+      "no 144 Hz method kept touch: it steps down to 138 Hz")
+core.lab_step(_t0); _boot[0] = "L5"; core.lab_step(_t0 + 1); core.lab_step(_t0 + 2); core.lab_confirm()
+core.lab_record({"picture": "good", "touch": "works"})
+check(not core.lab_has_next(), "the first rate that keeps touch ends the step-down")
+core.lab_finish((138, "a"))
+check(core.lab_step(_t0 + 3) == "done" and core.refresh_installed() == 138 and core.refresh_state()["status"] == "kept"
+      and not core.lab_active(), "keep: that rate and method stay, it restarts and the report goes out")
+core.lab_start(); core.lab_step(_t0); _boot[0] = "L6"; core.lab_step(_t0 + 1); core.lab_step(_t0 + 2); core.lab_confirm()
+check(core.lab_step(_t0 + 101 + core.LAB_IDLE_S + 1) == "aborted" and core.refresh_installed() == 138,
+      "no answer for 10 minutes after confirming: it undoes the step (unreadable screen)")
+core.lab_start(); core.lab_step(_t0); _boot[0] = "L7"; core.lab_step(_t0 + 1); core.lab_step(_t0 + 2); core.lab_confirm()
+_boot[0] = "L8"
+check(core.lab_step(_t0 + 3) == "aborted" and core.refresh_installed() == 138, "restarted by hand mid-step: undone")
+core.lab_start(); core.lab_step(_t0); _boot[0] = "L9"; core.lab_step(_t0 + 1); core.lab_step(_t0 + 2)
+core.lab_confirm(); core.lab_record({"picture": "good", "touch": "works"})
+core.refresh_request(144)
+core.refresh_request_off()
+check(core.refresh_state().get("status") not in ("pending", "remove") and not core.lab_start(),
+      "the lab and the older 144 Hz trial never run together")
+core.lab_finish(None); core.lab_step(_t0 + 5)
+check(core.lab_report_sent() and core.lab_state()["status"] == "done", "an ended lab has sent its report")
+core.lab_finish((144, "a"))
+check(core.lab_state()["status"] == "done", "finishing twice never starts a second ending")
+core._mono = _g_mono
+core.reboot_device, core.boot_id, core.launch_self, core.game_mode_active, core.queue_report, core.lab_logs = _g3
+core.REFRESH_SCRIPT.unlink(missing_ok=True); core.REFRESH_STATE.unlink(missing_ok=True); core.LAB_STATE.unlink(missing_ok=True)
 # ---- the extra Ally Hub theme ----
 check(core.DEFAULT_CONFIG["theme"]["preset"] == "ROG Crimson" and "Ally Hub" in core.EXTRA_THEMES
       and list(core.THEMES)[-1] == "Ally Hub" and core.theme_palette({"preset": "nope"})["accent"] == "#e11d48",
