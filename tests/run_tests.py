@@ -1353,6 +1353,12 @@ core._launch_watch(_st, 100.0 + core.LAUNCH_REPORT_S + 1)
 core._launch_watch(_st, 100.0 + core.LAUNCH_REPORT_S + 9)
 check(len(_qr2) == 1 and "didn't open" in _qr2[0], "a launch stuck at Steam's Launching is reported once")
 core.queue_report, core.gui_opened_at, core.steam_ui_ready = _g4
+_bat = Path(HOME) / "bat0"; _bat.mkdir(exist_ok=True); (_bat / "charge_control_end_threshold").write_text("0")
+_gbd = core.battery_dir; core.battery_dir = lambda: _bat
+check(core.battery_info()["limit"] == "100", "a limit of 0 from the kernel means no limit (Checkup said 'Stops at 0%')")
+(_bat / "charge_control_end_threshold").write_text("80")
+check(core.battery_info()["limit"] == "80", "a real limit reads as itself")
+core.battery_dir = _gbd
 # ---- one password for everything, panel updates without one (1.5.0.3, the owner approved) ----
 _js = core.decky_polkit_js()
 check("plugin_loader.service" in _js and '"restart"' in _js and '"start"' in _js and "stop" not in _js
@@ -1360,8 +1366,8 @@ check("plugin_loader.service" in _js and '"restart"' in _js and '"start"' in _js
 _pp = " && ".join(core.qam_permission_parts())
 check("chown root:root" in _pp and "/plugin.json" in _pp.split("chown -R")[0] and "plugin.json" not in _pp.split("chown -R")[1].split("&&")[0]
       and "main.py" in _pp and "/dist" in _pp, "plugin.json stays root's; only the per-version parts become the user's")
-_pr = core.DECKY_POLKIT_RULE
-core.DECKY_POLKIT_RULE = str(Path(HOME) / "rule.rules"); Path(core.DECKY_POLKIT_RULE).write_text("x")
+_pr = core.DECKY_POLKIT_MARK
+core.DECKY_POLKIT_MARK = str(Path(HOME) / "restart-allowed"); Path(core.DECKY_POLKIT_MARK).write_text("")
 for _n, _t in core.qam_files().items():
     (core.QAM_DIR / _n).parent.mkdir(parents=True, exist_ok=True)
     (core.QAM_DIR / _n).write_text(_t)
@@ -1373,7 +1379,9 @@ _rq = core.run_quiet
 core.run_quiet = lambda cmd, timeout=8: (0, "")
 check(core.qam_self_updatable() and core.qam_outdated() and core.qam_update_nopw() and not core.qam_outdated(),
       "with the permission in place the panel updates itself, no password")
-core.os.access, core.run_quiet, core.DECKY_POLKIT_RULE = _ga, _rq, _pr
+core.os.access, core.run_quiet, core.DECKY_POLKIT_MARK = _ga, _rq, _pr
+check("decky-restart-allowed" in " ".join(core.qam_permission_parts()),
+      "the permission job leaves a readable marker (polkit's rule folder can't be read: the warning never cleared)")
 _g5 = (core.lighting_access_ok, core.epp_files, core.epp_writable, core.qam_installed, core.decky_service_exists,
        core.qam_self_updatable)
 core.lighting_access_ok = lambda leds: False
@@ -1997,8 +2005,25 @@ check(core.update_channel() == "stable", "an unknown channel falls back to Stabl
 """.format(root=str(ROOT))
 
 GUI = r"""
-import gui, core
+import gui, core, subprocess
 import inspect as _insp
+_bd = gui.write_helpers()
+_ap = (_bd / "allyhub-askpass").read_text()
+check("ALLYHUB_ASKPASS_TOKEN" in _ap and "kdialog" in _ap and (_bd / "allyhub-askpass.py").exists()
+      and subprocess.run(["sh", "-n", str(_bd / "allyhub-askpass")]).returncode == 0
+      and compile((_bd / "allyhub-askpass.py").read_text(), "askpass", "exec") is not None,
+      "the password prompt asks Ally Hub's window first, with the system dialog as the fallback")
+_asrc = _insp.getsource(gui.AskpassServer._ask)
+check("runner.token" in _asrc and "runner.busy()" in _asrc, "only the job Ally Hub is running can ask for the password")
+_rsrc = _insp.getsource(gui.JobRunner._next)
+check("ALLYHUB_ASKPASS_TOKEN" in _rsrc and "token_hex" in _rsrc, "every job gets its own one-time password token")
+_rbk, _g_rb = [], (core.rollback, core.on_probation, core.report_exception)
+core.rollback = lambda *a, **k: (_rbk.append(a), (False, ""))[1]
+core.on_probation = lambda *a: True
+core.report_exception = lambda *a, **k: _rbk.append("report")
+gui._excepthook(KeyboardInterrupt, KeyboardInterrupt(), None)
+check(not _rbk, "a stop signal right after an update is never a crash: no rollback, no report (#14)")
+core.rollback, core.on_probation, core.report_exception = _g_rb
 check(gui.readable_on("#fff7a0", "#ffe14d", "#ffffff") == "#000000" and gui.readable_on("#e11d48", "#8b5cf6", "#ffffff") == "#ffffff"
       and all(gui.readable_on(t["accent"], t["accent2"], t["on_accent"]) for t in core.THEMES.values()),
       "button text stays readable on light accent colors (the lab's unreadable button)")

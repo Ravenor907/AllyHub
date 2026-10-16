@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.5.0.7
+
+- **The password prompt is part of Ally Hub now**: a dark panel near the top of the screen, so the Steam keyboard
+  never covers it, and the keyboard opens by itself. Every typing box in Ally Hub sits up top the same way.
+- Fixed: "Password prompts" in Checkup never cleared after Allow all. Tap Allow all one more time; from then on
+  it stays cleared.
+- Fixed: Checkup said "Charge limit: stops at 0%" when no limit was set.
+
 ## 1.5.0.6
 
 - **Scroll with your finger like a phone.** Drag any page or list on the touch screen and it follows your finger,
