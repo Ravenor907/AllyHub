@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.5.0.6
+
+- **Scroll with your finger like a phone.** Drag any page or list on the touch screen and it follows your finger,
+  then glides when you let go. A tap still presses buttons, and sliders, text boxes and dropdowns work as before.
+- **Wider scroll bar** on the right, easier to grab with a thumb.
+
 ## 1.5.0.5
 
 - Fixed: "Allow all" in Checkup no longer reports "Lighting permission didn't take" while HueSync is in

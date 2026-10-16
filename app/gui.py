@@ -26,10 +26,10 @@ from PySide6.QtGui import (QColor, QDesktopServices, QFont, QIcon, QImage, QImag
                            QSurfaceFormat, QTextCursor, QWindow)
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
-    QAbstractButton, QAbstractItemView, QAbstractScrollArea, QApplication, QCheckBox, QColorDialog, QComboBox,
+    QAbstractButton, QAbstractItemView, QAbstractScrollArea, QAbstractSlider, QApplication, QCheckBox, QColorDialog, QComboBox,
     QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QInputDialog, QLabel, QLayout, QLineEdit, QListWidget,
     QListWidgetItem, QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
-    QScrollArea, QScroller, QSizePolicy, QSlider, QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
+    QScrollArea, QSizePolicy, QSlider, QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 GAMEMODE = "--gamemode" in sys.argv or core.in_game_mode()
@@ -159,8 +159,8 @@ QSlider:focus {{ border: 2px solid {a2}; border-radius: 8px; }}
 QComboBox {{ background: {p['surface2']}; border: 1px solid {p['border']}; border-radius: 10px; padding: 8px 14px; font-size: {fs(15)}px; min-width: 130px; }}
 QComboBox:focus {{ border: 2px solid {a2}; padding: 7px 13px; }}
 QComboBox QAbstractItemView {{ background: {p['surface']}; selection-background-color: {a2}; font-size: {fs(15)}px; }}
-QScrollBar:vertical {{ background: {p['surface']}; width: {max(24, fs(26))}px; margin: 4px 2px; border-radius: {max(12, fs(13))}px; }}
-QScrollBar::handle:vertical {{ background: {p['muted']}; border-radius: {max(10, fs(11))}px; min-height: 72px; margin: 3px; }}
+QScrollBar:vertical {{ background: {p['surface']}; width: {max(40, fs(40))}px; margin: 4px 2px; border-radius: {max(20, fs(20))}px; }}
+QScrollBar::handle:vertical {{ background: {p['muted']}; border-radius: {max(16, fs(16))}px; min-height: 80px; margin: 4px; }}
 QScrollBar::handle:vertical:hover, QScrollBar::handle:vertical:pressed {{ background: {a2}; }}
 QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; }}
@@ -1298,13 +1298,104 @@ def brand_icon(size: int) -> QLabel:
     return monogram_badge("AH", "#e11d48", size)
 
 
+class TouchScroller(QObject):
+    """Drag any scrolling area with a finger like a phone, with a glide when you let go; a tap still presses buttons
+    (the owner, 1.5.0.6). Game Mode turns touches into mouse events, so Qt's own touch gesture never fired: this
+    works from the mouse events, app-wide. Sliders, text boxes, dropdowns and the tap box keep their own drags."""
+    START = 14                # px before a press becomes a drag (a tap moves a little)
+    KEEP = (QAbstractSlider, QLineEdit, QPlainTextEdit, QComboBox, QSpinBox)
+    MOUSE = (QEvent.MouseButtonPress, QEvent.MouseMove, QEvent.MouseButtonRelease)
+
+    def __init__(self, app):
+        super().__init__(app)
+        self.area, self.dragging, self.samples, self.v, self.glide_area = None, False, [], 0.0, None
+        self.glide = QTimer(self)
+        self.glide.setInterval(16)
+        self.glide.timeout.connect(self._glide)
+        app.installEventFilter(self)
+
+    def _area_for(self, w):
+        while w is not None:
+            if isinstance(w, (TouchPad, FrameGraph)) or w.property("noTouchScroll"):
+                return None
+            if isinstance(w, self.KEEP) and not (isinstance(w, QPlainTextEdit) and w.isReadOnly()):
+                return None                              # the Activity log (read-only) still drags
+            if isinstance(w, QAbstractScrollArea) and w.verticalScrollBar().maximum() > 0:
+                return w
+            w = w.parentWidget()
+        return None
+
+    def eventFilter(self, obj, ev):
+        t = ev.type()
+        if t not in self.MOUSE or not isinstance(obj, QWidget):
+            return False      # cheap exit for every other event; the window-level copy must always pass (Qt's
+            #                   button-down tracking lives there: eating it lost the first tap after a scroll)
+        try:
+            return self._mouse(obj, ev, t)
+        except RuntimeError:                             # the page or button was deleted mid-drag
+            self.area, self.dragging = None, False
+            return False
+
+    def _mouse(self, obj, ev, t):
+        if t == QEvent.MouseButtonPress:
+            if ev.button() != Qt.LeftButton:
+                return False
+            self.glide.stop()
+            self.area = self._area_for(obj)
+            self.dragging, self.target = False, obj
+            if self.area is not None:
+                self.y0 = ev.globalPosition().y()
+                self.x0 = ev.globalPosition().x()
+                self.v0 = self.area.verticalScrollBar().value()
+                self.samples = [(time.monotonic(), self.y0)]
+            return False
+        if self.area is None:
+            return False
+        if t == QEvent.MouseMove and ev.buttons() & Qt.LeftButton:
+            y, x = ev.globalPosition().y(), ev.globalPosition().x()
+            if not self.dragging:
+                if abs(y - self.y0) < self.START or abs(y - self.y0) < abs(x - self.x0):
+                    return False
+                self.dragging = True
+                if isinstance(self.target, QAbstractButton):
+                    self.target.setDown(False)           # a drag that began on a button never clicks it
+            self.area.verticalScrollBar().setValue(int(self.v0 - (y - self.y0)))
+            self.samples = (self.samples + [(time.monotonic(), y)])[-8:]
+            return True
+        if t == QEvent.MouseButtonRelease and ev.button() == Qt.LeftButton:
+            area, dragging = self.area, self.dragging
+            self.area, self.dragging = None, False
+            if not dragging:
+                return False
+            now = time.monotonic()
+            pts = [p for p in self.samples + [(now, ev.globalPosition().y())] if now - p[0] <= 0.1]
+            (t0, y0), (t1, y1) = pts[0], pts[-1]
+            # held still before lifting = no glide (only the last 100 ms of movement counts)
+            self.v = -(y1 - y0) / max(0.016, t1 - t0) / 60.0 if len(pts) > 1 else 0.0   # px per 16 ms frame
+            self.glide_area = area
+            if abs(self.v) > 1:
+                self.glide.start()
+            return True                                  # the release after a drag is not a click
+        return False
+
+    def _glide(self):
+        try:
+            bar = self.glide_area.verticalScrollBar()
+        except (AttributeError, RuntimeError):          # the page went away mid-glide
+            bar = None
+        if bar is None or abs(self.v) < 0.5:
+            self.glide.stop()
+            return
+        bar.setValue(int(bar.value() + self.v))
+        self.v *= 0.94
+
+
 def scroll_page(inner: QWidget) -> QScrollArea:
     sa = QScrollArea()
     sa.setWidgetResizable(True)
     sa.setWidget(inner)
     sa.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-    sa.setFocusPolicy(Qt.NoFocus)
-    QScroller.grabGesture(sa.viewport(), QScroller.TouchGesture)
+    sa.setFocusPolicy(Qt.NoFocus)          # finger dragging: TouchScroller (app-wide), not QScroller
     return sa
 
 
@@ -7092,6 +7183,7 @@ class Hub(QMainWindow):
         self.clock.start(30000)
 
         self.gamepad = GamepadNav(self)
+        self.touch_scroller = TouchScroller(QApplication.instance())
         self.apply_theme()
         self.apply_mode()
         self.update_setup_chip()
