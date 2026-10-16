@@ -2847,8 +2847,8 @@ hub.needs_password, hub.on_item_action = _np6, _ia
 tryit("setup finish", hub.setup.finish)
 check(core.load_config()["setup"]["done"] is True, "finishing marks setup done")
 tryit("home checklist", lambda: hub.health.refresh_notices({"password": False, "decky": {}}))
-tryit("home checklist hide", hub.health.hide_setup)
-check(core.load_config()["setup"]["checklist_hidden"], "the Home reminder can be hidden")
+check(not hasattr(hub.health, "setup_card") or "setup_card" not in vars(hub.health),
+      "Home has no setup or password notices of its own: Checkup lists them, once (the owner's one-place rule)")
 hub.qam_after_decky = False
 tryit("NSL card opens the page", lambda: hub.on_item_action("nonsteamlaunchers", "install"))
 check(hub.current_page() is hub.launchers, "the catalog card opens the themed page, not the script's windows")

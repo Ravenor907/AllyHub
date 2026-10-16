@@ -1385,15 +1385,22 @@ def brand_icon(size: int) -> QLabel:
 
 class TouchScroller(QObject):
     """Drag any scrolling area with a finger like a phone, with a glide when you let go; a tap still presses buttons
-    (the owner, 1.5.0.6). Game Mode turns touches into mouse events, so Qt's own touch gesture never fired: this
-    works from the mouse events, app-wide. Sliders, text boxes, dropdowns and the tap box keep their own drags."""
+    (the owner, 1.5.0.6). Handles both ways a finger can arrive: real touch events (seen at the window, never eaten,
+    so Qt still turns a tap into a click) and plain mouse drags (Game Mode can turn touches into a mouse). Sliders,
+    editable text, dropdowns and the tap box keep their own drags. The first gestures are logged (1.5.0.8, "the drag
+    scroll isn't working still"): what kind of input came and how far it moved."""
     START = 14                # px before a press becomes a drag (a tap moves a little)
     KEEP = (QAbstractSlider, QLineEdit, QPlainTextEdit, QComboBox, QSpinBox)
-    MOUSE = (QEvent.MouseButtonPress, QEvent.MouseMove, QEvent.MouseButtonRelease)
+    MOUSE = (QEvent.MouseButtonPress, QEvent.MouseButtonDblClick, QEvent.MouseMove, QEvent.MouseButtonRelease)
+    PRESS = (QEvent.MouseButtonPress, QEvent.MouseButtonDblClick)   # a quick second flick arrives as a double click
+    TOUCH = (QEvent.TouchBegin, QEvent.TouchUpdate, QEvent.TouchEnd, QEvent.TouchCancel)
+    LOG_GESTURES = 6
 
     def __init__(self, app):
         super().__init__(app)
         self.area, self.dragging, self.samples, self.v, self.glide_area = None, False, [], 0.0, None
+        self.source, self.touch_until, self.logged, self.info = None, 0.0, 0, None
+        self._last_touch_dragged, self.target, self.t_begin = False, None, 0.0
         self.glide = QTimer(self)
         self.glide.setInterval(16)
         self.glide.timeout.connect(self._glide)
@@ -1410,10 +1417,76 @@ class TouchScroller(QObject):
             w = w.parentWidget()
         return None
 
+    # ---- one gesture engine for both kinds of input ----
+    def _begin(self, target, x, y, source):
+        self.glide.stop()
+        again = time.monotonic() - self.t_begin < 0.05 and self.source == source   # the same press, passed to a parent
+        self.t_begin = time.monotonic()
+        self.source, self.target, self.dragging = source, target, False
+        self.area = self._area_for(target)
+        self.x0, self.y0 = x, y
+        self.samples = [(time.monotonic(), y)]
+        if self.area is not None:
+            self.v0 = self.area.verticalScrollBar().value()
+        if self.logged < self.LOG_GESTURES and not (again and self.info is not None):
+            self.info = {"src": source, "on": type(target).__name__, "area": self.area is not None, "moves": 0,
+                         "held": 0, "dy": 0.0}
+
+    def _move(self, x, y, held=True) -> bool:
+        if self.info is not None:
+            self.info["moves"] += 1
+            self.info["held"] += 1 if held else 0
+            self.info["dy"] = max(self.info["dy"], abs(y - self.y0))
+        if self.area is None or not held:
+            return False
+        if not self.dragging:
+            if abs(y - self.y0) < self.START or abs(y - self.y0) < abs(x - self.x0):
+                return False
+            self.dragging = True
+            b = self.target
+            while b is not None and not isinstance(b, QAbstractButton):
+                b = b.parentWidget()                     # a touch lands on the label inside a button card
+            if b is not None:
+                b.setDown(False)                         # a drag that began on a button never clicks it
+        self.area.verticalScrollBar().setValue(int(self.v0 - (y - self.y0)))
+        self.samples = (self.samples + [(time.monotonic(), y)])[-8:]
+        return True
+
+    def _end(self, y) -> bool:
+        area, dragging = self.area, self.dragging
+        self.area, self.dragging = None, False
+        if self.info is not None:
+            self.logged += 1
+            i = self.info
+            core.app_log("touch", f"gesture {self.logged}: {i['src']} on {i['on']}, scrollable {i['area']}, "
+                                  f"{i['moves']} moves ({i['held']} with the button down), moved {int(i['dy'])} px, "
+                                  f"{'scrolled' if dragging else 'no scroll'}")
+            self.info = None
+        if not dragging:
+            return False
+        now = time.monotonic()
+        pts = [p for p in self.samples + [(now, y)] if now - p[0] <= 0.1]
+        (t0, y0), (t1, y1) = pts[0], pts[-1]
+        # held still before lifting = no glide (only the last 100 ms of movement counts)
+        self.v = -(y1 - y0) / max(0.016, t1 - t0) / 60.0 if len(pts) > 1 else 0.0   # px per 16 ms frame
+        self.glide_area = area
+        if abs(self.v) > 1:
+            self.glide.start()
+        return True
+
     def eventFilter(self, obj, ev):
         t = ev.type()
+        if t in self.TOUCH:
+            if isinstance(obj, QWidget):
+                return False          # touch is read once, at the window (QWidgetWindow), and never eaten
+            try:
+                self._touch(ev, t)
+                return False
+            except RuntimeError:
+                self.area, self.dragging = None, False
+                return False
         if t not in self.MOUSE or not isinstance(obj, QWidget):
-            return False      # cheap exit for every other event; the window-level copy must always pass (Qt's
+            return False      # cheap exit for every other event; the window-level mouse copy must always pass (Qt's
             #                   button-down tracking lives there: eating it lost the first tap after a scroll)
         try:
             return self._mouse(obj, ev, t)
@@ -1421,46 +1494,47 @@ class TouchScroller(QObject):
             self.area, self.dragging = None, False
             return False
 
+    def _touch(self, ev, t) -> bool:
+        if t == QEvent.TouchCancel:                      # no points come with a cancel: end the gesture anyway
+            if self.source == "touch":
+                self._last_touch_dragged = self._end(self.y0)
+            self.source, self.touch_until = None, 0.0
+            return False
+        pts = ev.points()
+        if not pts:
+            return False
+        p = pts[0].globalPosition()
+        if t == QEvent.TouchBegin:
+            self._begin(QApplication.widgetAt(p.toPoint()), p.x(), p.y(), "touch")
+        elif t == QEvent.TouchUpdate and self.source == "touch":
+            self._move(p.x(), p.y())
+        elif self.source == "touch":
+            self._last_touch_dragged = self._end(p.y())
+            self.touch_until = time.monotonic() + 0.3   # the mouse copy Qt makes of this touch comes right after
+        return False
+
     def _mouse(self, obj, ev, t):
-        if t == QEvent.MouseButtonPress:
-            if ev.button() != Qt.LeftButton:
-                return False
-            self.glide.stop()
-            self.area = self._area_for(obj)
-            self.dragging, self.target = False, obj
-            if self.area is not None:
-                self.y0 = ev.globalPosition().y()
-                self.x0 = ev.globalPosition().x()
-                self.v0 = self.area.verticalScrollBar().value()
-                self.samples = [(time.monotonic(), self.y0)]
+        p = ev.globalPosition()
+        now = time.monotonic()
+        if self.source == "touch" and (self.area is not None or now < self.touch_until
+                                       or (t in self.PRESS and now - self.t_begin < 0.05)):
+            # Qt's mouse copy of a touch we're already following: never scroll twice; after a drag, no click
+            if t == QEvent.MouseMove:
+                return self.dragging
+            if t == QEvent.MouseButtonRelease:
+                return self.dragging or (now < self.touch_until and self._last_touch_dragged)
             return False
-        if self.area is None:
+        if t in self.PRESS:
+            if ev.button() == Qt.LeftButton:
+                self._begin(obj, p.x(), p.y(), "mouse")
             return False
-        if t == QEvent.MouseMove and ev.buttons() & Qt.LeftButton:
-            y, x = ev.globalPosition().y(), ev.globalPosition().x()
-            if not self.dragging:
-                if abs(y - self.y0) < self.START or abs(y - self.y0) < abs(x - self.x0):
-                    return False
-                self.dragging = True
-                if isinstance(self.target, QAbstractButton):
-                    self.target.setDown(False)           # a drag that began on a button never clicks it
-            self.area.verticalScrollBar().setValue(int(self.v0 - (y - self.y0)))
-            self.samples = (self.samples + [(time.monotonic(), y)])[-8:]
-            return True
+        if self.source != "mouse":
+            return False
+        if t == QEvent.MouseMove:
+            return self._move(p.x(), p.y(), bool(ev.buttons() & Qt.LeftButton))
         if t == QEvent.MouseButtonRelease and ev.button() == Qt.LeftButton:
-            area, dragging = self.area, self.dragging
-            self.area, self.dragging = None, False
-            if not dragging:
-                return False
-            now = time.monotonic()
-            pts = [p for p in self.samples + [(now, ev.globalPosition().y())] if now - p[0] <= 0.1]
-            (t0, y0), (t1, y1) = pts[0], pts[-1]
-            # held still before lifting = no glide (only the last 100 ms of movement counts)
-            self.v = -(y1 - y0) / max(0.016, t1 - t0) / 60.0 if len(pts) > 1 else 0.0   # px per 16 ms frame
-            self.glide_area = area
-            if abs(self.v) > 1:
-                self.glide.start()
-            return True                                  # the release after a drag is not a click
+            self.source = None
+            return self._end(p.y())                      # the release after a drag is not a click
         return False
 
     def _glide(self):
@@ -2270,7 +2344,6 @@ class StorePage(QWidget):
         srow = QHBoxLayout()
         self.btn_safe = button("Turn all plugins off", self.safe_mode)
         srow.addWidget(self.btn_safe)
-        srow.addWidget(button("Restart Decky", lambda: hub.restart_decky()))      # was a Quick fix
         srow.addStretch()
         mv.addLayout(srow)
         mv.addWidget(label("If Game Mode acts up after installing plugins, turn them all off, then back on one at a "
@@ -4089,33 +4162,7 @@ class HealthPage(QWidget):
         super().__init__()
         self.hub = hub
         v = page_shell(self, "Health", "Live readings, history and which games drain your battery.")
-        # Home notices: only shown when something needs you (setup left, no password, Decky gone after an update)
-        self.setup_card = QFrame()
-        self.setup_card.setObjectName("banner")
-        scl = QVBoxLayout(self.setup_card)
-        scl.setContentsMargins(20, 14, 20, 14)
-        scl.addWidget(label("Finish setting up", "cardTitle"))
-        self.setup_items = QVBoxLayout()
-        scl.addLayout(self.setup_items)
-        sr = QHBoxLayout()
-        sr.addWidget(button("Open setup", lambda: hub.go("Setup"), "primary"))
-        sr.addWidget(button("Hide", self.hide_setup))
-        sr.addStretch()
-        scl.addLayout(sr)
-        self.setup_card.hide()
-        v.addWidget(self.setup_card)
-        self.alerts_box = QVBoxLayout()
-        self.alerts_box.setSpacing(8)
-        v.addLayout(self.alerts_box)
-        self.pw_banner = QFrame()
-        self.pw_banner.setObjectName("banner")
-        pl = QHBoxLayout(self.pw_banner)
-        pl.setContentsMargins(20, 14, 20, 14)
-        pl.addWidget(label("Set a sudo password so Ally Hub can install mods and plugins.",
-                           "bannerText", wrap=True), 1)
-        pl.addWidget(button("Set password", hub.set_password, "primary"))
-        self.pw_banner.hide()
-        v.addWidget(self.pw_banner)
+        # setup, password and Decky reminders live in the Checkup below (one place, 1.5.0.8)
         self.banner = QFrame()
         self.banner.setObjectName("banner")
         bl = QHBoxLayout(self.banner)
@@ -4176,19 +4223,6 @@ class HealthPage(QWidget):
         osr = core.os_release()
         self.info.setText(f"{core.short_device_name()} · SteamOS {osr.get('VERSION_ID', '?')} · "
                           f"Ally Hub {core.version_label()}")
-        left = [t for _k, t, done in core.setup_checklist(state) if not done]
-        hidden = (load_config().get("setup") or {}).get("checklist_hidden")
-        clear_layout(self.setup_items)
-        for t in left:
-            self.setup_items.addWidget(label("○  " + t, "bannerText"))
-        self.setup_card.setVisible(bool(left) and not hidden)
-        self.pw_banner.hide()           # the Checkup lists a missing password with its fix (one place, 1.4.0)
-        clear_layout(self.alerts_box)     # Update Guardian alerts show in the Checkup, with their fix (1.3.7.10)
-
-    def hide_setup(self, *_args):
-        update_config(lambda c: c.setdefault("setup", {}).__setitem__("checklist_hidden", True))
-        self.setup_card.hide()
-        self.hub.toast("Hidden. Settings → General → Run setup again brings it back.")
 
     def sample(self):
         try:
@@ -6223,12 +6257,6 @@ class DoctorPage(QWidget):
                 "never ask again.", "Allow all", lambda: h.allow_all(leds))
         else:
             add("ok", "Password prompts", "Lighting, Game Boost and panel updates don't need your password.")
-        if leds:
-            ok = core.lighting_access_ok(leds)
-            add("ok" if ok else "warn", "Lighting permissions",
-                "Lighting can change without a password." if ok else
-                "Every color change asks for your password, and the background helper can't change the lights.",
-                None if ok else "Fix", None if ok else (lambda: h.allow_all(leds)))
 
         if cfg["agent"].get("enabled"):
             ok = core.agent_running()
@@ -6243,9 +6271,6 @@ class DoctorPage(QWidget):
                 "flatpak-repair"), False)
 
         perf = cfg.get("performance") or {}
-        if perf.get("boost") and core.boost_backend() == "epp" and not core.epp_writable():
-            add("warn", "Game Boost", "On, but it isn't allowed to change the CPU setting yet.",
-                "Allow", lambda: h.allow_all())
         if core.tuneup_applied():
             off = [i["title"] for i in core.tuneup_items() if i["state"] == "off"]
             add("warn" if off else "ok", "Tune-up",
