@@ -4913,7 +4913,8 @@ def charge_permission_cmd() -> Optional[str]:
             f'RUN+="/bin/sh -c \'chgrp {group} /sys%p/charge_control_end_threshold; '
             f'chmod 0664 /sys%p/charge_control_end_threshold\'"')
     f = shlex.quote(str(b["limit_file"]))
-    parts = [f"printf '%s\\n' {shlex.quote(rule)} > {CHARGE_PERM_RULE}", f"chgrp {group} {f}", f"chmod 0664 {f}"]
+    parts = [f"printf '%s\\n' {shlex.quote(rule)} > {CHARGE_PERM_RULE}", f"chgrp {group} {f}", f"chmod 0664 {f}",
+             f"rm -f {UDEV_CHARGE_RULE}"]      # the old root rule would put a stale limit back at boot
     return "sudo sh -c " + shlex.quote(" && ".join(parts)) + " && echo 'The charge limit no longer needs a password.'"
 
 
@@ -4931,8 +4932,26 @@ def set_charge_limit(value) -> bool:
     return apply_charge_limit()
 
 
+CHARGE_APPLIED = DATA_DIR / "charge_applied"     # the boot the saved limit was last put back in
+
+
+def apply_charge_limit_once() -> bool:
+    """Once per boot (the kernel resets the limit at boot): never every minute, so a limit changed elsewhere (SteamOS,
+    another tool) isn't fought over until the next restart."""
+    me = boot_id()
+    if read_text(CHARGE_APPLIED).strip() == me:
+        return False
+    ok = apply_charge_limit()
+    if ok or not (load_config().get("battery") or {}).get("limit"):
+        try:
+            CHARGE_APPLIED.write_text(me)
+        except OSError:
+            pass
+    return ok
+
+
 def apply_charge_limit() -> bool:
-    """Put the saved limit back (the kernel resets it at boot). The helper runs this; True when it's in place."""
+    """Put the saved limit back (the kernel resets it at boot). True when it's in place."""
     want = (load_config().get("battery") or {}).get("limit") or ""
     b = battery_info()
     if not want or not b.get("limit_file"):

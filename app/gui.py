@@ -2156,8 +2156,9 @@ class BrowsePage(QWidget):
             self.list_v.addLayout(grid)
         self.store_page.mine_shown = key == "installed"
         self.store_page.show_mine()                      # shows itself under Installed when Decky has plugins
-        if not shown and key != "installed":
-            self.list_v.addWidget(label("Nothing here yet.", "cardDesc"))
+        if not shown and not (key == "installed" and self.store_page.mine_card.isVisibleTo(self.inner)):
+            self.list_v.addWidget(label("Nothing installed yet." if key == "installed" else "Nothing here yet.",
+                                        "cardDesc"))
         self.inner.layout().activate()      # focus_page picks by position: positions must be current
 
     def set_view(self, key: str):
@@ -2308,7 +2309,7 @@ class StoreRow(QFrame):
     def update_state(self, installed: Optional[dict], queued: bool, decky_ok: bool, off: bool = False):
         latest = core.store_latest_version(self.plugin) or {}
         self.off = bool(off)
-        self.btn_toggle.setVisible(bool(installed))
+        self.btn_toggle.setVisible(False)                # turning plugins off lives under Store → Installed
         self.btn_toggle.setText("Turn on" if self.off else "Turn off")
         self.btn_toggle.setEnabled(not queued)
         if queued:
@@ -7369,8 +7370,8 @@ class Hub(QMainWindow):
         self.mode_box.setProperty("padCycle", False)      # A opens it; Left/Right just move on
         mr.addWidget(self.mode_box)
         mr.addWidget(button("Run setup again", self.rerun_setup))
-        self.btn_log = button("Activity log", lambda: self.go("Activity"))   # Simple only (Advanced: its section)
-        mr.addWidget(self.btn_log)
+        self.btn_log_simple = button("Activity log", lambda: self.go("Activity"))   # Simple only (Advanced: its section)
+        mr.addWidget(self.btn_log_simple)
         mr.addStretch()
         mv.addLayout(mr)
         add_block(self.updates, block(mcard, self.automation.block_general), 0)
@@ -7452,8 +7453,8 @@ class Hub(QMainWindow):
                 _ADVANCED.remove(box)
         self.set_section_hidden("Activity log", not on)
         self.set_section_hidden("Installed", not on)     # managing installs is for Advanced (the owner, 1.5.0.9)
-        if getattr(self, "btn_log", None) is not None:
-            self.btn_log.setVisible(not on)              # Simple's only way to the log; Advanced has its section
+        if getattr(self, "btn_log_simple", None) is not None:
+            self.btn_log_simple.setVisible(not on)       # Simple's only way to the log; Advanced has its section
         if getattr(self, "games", None) is not None and self.current_page() is self.games:
             self.games.refresh()            # the game view is built per game, so it's redrawn
 
@@ -8463,9 +8464,14 @@ class Hub(QMainWindow):
                 self.update_cards()
             self.store_page.with_plugins(queue_plugins)
         if sysp.get("charge_limit") and sysp["charge_limit"] != "100":
-            cmd = self.system.charge_limit_cmd(sysp["charge_limit"])
-            if cmd:
-                self.runner.submit("Restore charge limit", cmd, "charge-limit")
+            if core.charge_limit_writable():             # no password (1.5.0.15+); the saved value is what stays
+                core.set_charge_limit(sysp["charge_limit"])
+            else:
+                update_config(lambda c: c.setdefault("battery", {}).__setitem__(
+                    "limit", core.charge_limit_ok(sysp["charge_limit"]) or ""))
+                cmd = self.system.charge_limit_cmd(sysp["charge_limit"])
+                if cmd:
+                    self.runner.submit("Restore charge limit", cmd, "charge-limit")
         if load_config()["agent"].get("enabled"):
             self.enable_agent()
         self.update_cards()

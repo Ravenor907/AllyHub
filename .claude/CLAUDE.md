@@ -133,7 +133,8 @@ Report #25 (1.5.0.8): drags arrived as mouse drags with the button down and 80-2
 **Charge limit without a password (1.5.0.15, the owner: "stop being so cautious"):** `charge_permission_cmd` (in
 `allow_all_cmd`) lets the user's group write charge_control_end_threshold (udev `CHARGE_PERM_RULE`, chgrp + 0664,
 never 0666); `set_charge_limit` saves `config["battery"]["limit"]`, the agent's `apply_charge_limit` reapplies it
-after boot. **Store (1.5.0.15, the owner):** Installed (Advanced only) is the one place to turn off or remove,
+after boot, once per boot only (`apply_charge_limit_once`, `CHARGE_APPLIED`; never fight a limit set elsewhere); the
+permission job also removes the old root rule. **Store (1.5.0.15, the owner):** Installed (Advanced only) is the one place to turn off or remove,
 Decky plugins included (`StorePage.mine_card` lives in `BrowsePage`, `mine_shown`); `ItemCard.manage` shows
 Remove/Turn off only there. Builds 1.5.0.9-1.5.0.14 from another session were dropped from testing (the owner rolled
 1.5.0.14 back); version numbers continue at 1.5.0.15 so every device updates.

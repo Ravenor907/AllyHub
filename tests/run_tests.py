@@ -1366,8 +1366,16 @@ check(core.charge_limit_writable() and core.set_charge_limit("85") and
 (_bat / "charge_control_end_threshold").write_text("100")      # the kernel reset it at boot
 check(core.apply_charge_limit() and (_bat / "charge_control_end_threshold").read_text() == "85",
       "the helper puts the chosen limit back after a restart")
+core.CHARGE_APPLIED.unlink(missing_ok=True)
+(_bat / "charge_control_end_threshold").write_text("100")
+core.apply_charge_limit_once()
+(_bat / "charge_control_end_threshold").write_text("90")       # changed elsewhere later in the same boot
+core.apply_charge_limit_once()
+check((_bat / "charge_control_end_threshold").read_text() == "90",
+      "the limit is put back once per boot, never fought over every minute")
 _pc = core.charge_permission_cmd()
-check(_pc.count("sudo ") == 1 and core.CHARGE_PERM_RULE in _pc and "chmod 0664" in _pc and "0666" not in _pc,
+check(_pc.count("sudo ") == 1 and core.CHARGE_PERM_RULE in _pc and "chmod 0664" in _pc and "0666" not in _pc
+      and core.UDEV_CHARGE_RULE in _pc,
       "one password lets the user's group write the limit (not everyone)")
 core.os.access = _ga2
 core.battery_dir = _gbd
@@ -2860,6 +2868,8 @@ hub.needs_password, hub.on_item_action = _np6, _ia
 tryit("setup finish", hub.setup.finish)
 check(core.load_config()["setup"]["done"] is True, "finishing marks setup done")
 tryit("home checklist", lambda: hub.health.refresh_notices({"password": False, "decky": {}}))
+check(hub.btn_log_simple is not getattr(hub, "btn_log", None),
+      "the General page's log button never replaces the header's (it would be moved or lost with the bars)")
 check(not hasattr(hub.health, "setup_card") or "setup_card" not in vars(hub.health),
       "Home has no setup or password notices of its own: Checkup lists them, once (the owner's one-place rule)")
 hub.qam_after_decky = False
