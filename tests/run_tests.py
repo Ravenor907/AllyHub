@@ -1358,6 +1358,18 @@ _gbd = core.battery_dir; core.battery_dir = lambda: _bat
 check(core.battery_info()["limit"] == "100", "a limit of 0 from the kernel means no limit (Checkup said 'Stops at 0%')")
 (_bat / "charge_control_end_threshold").write_text("80")
 check(core.battery_info()["limit"] == "80", "a real limit reads as itself")
+_ga2 = core.os.access
+core.os.access = lambda p, m: True if str(p).endswith("charge_control_end_threshold") else _ga2(p, m)
+check(core.charge_limit_writable() and core.set_charge_limit("85") and
+      (_bat / "charge_control_end_threshold").read_text() == "85" and core.load_config()["battery"]["limit"] == "85",
+      "the charge limit is set without a password once allowed")
+(_bat / "charge_control_end_threshold").write_text("100")      # the kernel reset it at boot
+check(core.apply_charge_limit() and (_bat / "charge_control_end_threshold").read_text() == "85",
+      "the helper puts the chosen limit back after a restart")
+_pc = core.charge_permission_cmd()
+check(_pc.count("sudo ") == 1 and core.CHARGE_PERM_RULE in _pc and "chmod 0664" in _pc and "0666" not in _pc,
+      "one password lets the user's group write the limit (not everyone)")
+core.os.access = _ga2
 core.battery_dir = _gbd
 # ---- one password for everything, panel updates without one (1.5.0.3, the owner approved) ----
 _js = core.decky_polkit_js()
@@ -2470,7 +2482,8 @@ tryit("updates callbacks", lambda: (hub.updates._checked({"error": None, "availa
 tryit("whats new", hub.show_whats_new)
 tryit("profile", lambda: (core.export_profile(hub.state), hub.import_profile(core.build_profile(hub.state))))
 hub.state["password"] = True
-tryit("items", lambda: [hub.on_item_action(i, "install") for i in ("decky", "com.spotify.Client", "nonsteamlaunchers")])
+tryit("items", lambda: [hub.on_item_action(i, "install") for i in ("decky", "com.spotify.Client")])
+check("nonsteamlaunchers" not in core.CATALOG_BY_ID, "launchers live in Store → Launchers only (no second card)")
 hub.store_page.plugins = [{"name": "CSS Loader", "author": "x", "description": "d",
                            "versions": [{"name": "2.0", "hash": "abc", "created": "2024"}], "downloads": 5}]
 tryit("store", lambda: (hub.store_page.rebuild(), hub.on_store_action(hub.store_page.plugins[0], "install")))
@@ -2850,8 +2863,8 @@ tryit("home checklist", lambda: hub.health.refresh_notices({"password": False, "
 check(not hasattr(hub.health, "setup_card") or "setup_card" not in vars(hub.health),
       "Home has no setup or password notices of its own: Checkup lists them, once (the owner's one-place rule)")
 hub.qam_after_decky = False
-tryit("NSL card opens the page", lambda: hub.on_item_action("nonsteamlaunchers", "install"))
-check(hub.current_page() is hub.launchers, "the catalog card opens the themed page, not the script's windows")
+hub.go("Launchers")
+check(hub.current_page() is hub.launchers, "Store → Launchers is the launchers page")
 # header/footer on the sides
 check(core.load_config()["theme"]["bars"] == "top", "header and footer start at the top and bottom")
 tryit("bars to sides", lambda: hub.appearance.save_bars(1))
