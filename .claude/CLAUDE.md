@@ -120,6 +120,11 @@ add new icons from github.com/lucide-icons/lucide `icons/*.svg`.
 `github_decky_install_cmd`, which replaces older copies by plugin.json name only after the download worked.
 The store only shows UPDATE when its version is newer (`plugin_newer`).
 
+**Touch scrolling (the owner: "like a smart phone"):** Game Mode delivers touches as mouse events, so QScroller's
+TouchGesture never fired. `TouchScroller` (app-wide event filter) drags the nearest scrollable area with a glide;
+it must only eat widget-level events (the QWindow-level copy carries Qt's button-down tracking) and leaves sliders,
+editable text, combos, TouchPad and FrameGraph alone. Scroll bar width is 40px.
+
 **Controller scrolling:** `GamepadNav.move` scrolls the page by most of a screen when the next
 control is far away or missing (`_too_far`), so read-only content is reachable. Never scroll the window behind a dialog.
 **Controls (1.4.1, the owner's call):** D-pad moves between controls (unchanged); the LEFT stick (js axis 1) scrolls
