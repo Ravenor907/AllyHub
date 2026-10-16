@@ -23,7 +23,7 @@ rm -f "$HOME/.local/bin/allyhub" \
       "$HOME/.local/share/applications/allyhub-gamemode.desktop" \
       "$HOME/Desktop/allyhub.desktop"
 RULES=""
-for r in /etc/udev/rules.d/99-allyhub-leds.rules /etc/udev/rules.d/99-allyhub-charge.rules /etc/udev/rules.d/70-allyhub-hid.rules \
+for r in /etc/udev/rules.d/99-allyhub-leds.rules /etc/udev/rules.d/99-allyhub-charge.rules /etc/udev/rules.d/71-allyhub-charge-perm.rules /etc/udev/rules.d/70-allyhub-hid.rules \
          /etc/udev/rules.d/71-allyhub-nowake.rules \
          /etc/udev/rules.d/70-allyhub-ntsync.rules /etc/tmpfiles.d/allyhub-boost.conf /etc/tmpfiles.d/allyhub-tuneup.conf \
          /etc/sysctl.d/99-zz-allyhub.conf /etc/sysctl.d/99-zz-allyhub-zram.conf /etc/modules-load.d/allyhub-ntsync.conf \

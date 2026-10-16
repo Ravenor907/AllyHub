@@ -51,6 +51,7 @@ HEALTH_FILE = DATA_DIR / "health.jsonl"
 LED_ROOT = Path("/sys/class/leds")
 UDEV_LED_RULE = "/etc/udev/rules.d/99-allyhub-leds.rules"
 UDEV_CHARGE_RULE = "/etc/udev/rules.d/99-allyhub-charge.rules"
+CHARGE_PERM_RULE = "/etc/udev/rules.d/71-allyhub-charge-perm.rules"   # 1.5.0.9: the limit without a password
 AGENT_UNIT = HOME / ".config/systemd/user/allyhub-agent.service"
 DECKY_PATH = HOME / "homebrew/services/PluginLoader"
 DECKY_UNITS = (Path("/etc/systemd/system/plugin_loader.service"), Path("/usr/lib/systemd/system/plugin_loader.service"))
@@ -118,6 +119,8 @@ DEFAULT_CONFIG = {
     "updates": {"repo": REPO_DEFAULT, "auto_update": True, "reporting": False, "channel": "stable"},
     # Tools > Performance. The tune-up itself lives in /etc, so only Game Boost's switch is here.
     "performance": {"boost": False},
+    # the battery charge limit the owner picked ("" = never set through Ally Hub); the helper keeps it applied
+    "battery": {"limit": ""},
 }
 
 
@@ -4880,6 +4883,8 @@ def allow_all_cmd(leds: list = None) -> Optional[str]:
         cmds.append(led_permission_cmd(leds))
     if epp_files() and not epp_writable():
         cmds.append(boost_permission_cmd())
+    if battery_info().get("limit_file") and not charge_limit_writable():
+        cmds.append(charge_permission_cmd())
     if qam_installed() and decky_service_exists() and not qam_self_updatable():
         cmds.append(qam_install_cmd())
     cmds = [c for c in cmds if c]
@@ -4887,6 +4892,58 @@ def allow_all_cmd(leds: list = None) -> Optional[str]:
         return None
     # one job: sudo asks once and the rest reuse it (same parent shell). Each part reports on its own line.
     return " ; ".join(f"{{ {c}; }}" for c in cmds) + " ; echo 'Done: Ally Hub has what it needs.'"
+
+
+def _user_group() -> str:
+    try:
+        import grp
+        return grp.getgrgid(os.getgid()).gr_name
+    except (ImportError, KeyError):
+        return USER
+
+
+def charge_permission_cmd() -> Optional[str]:
+    """One password, once: the user's group may write the battery's charge limit (the owner: "why does the battery
+    charge limit need a password"). A udev rule keeps it after restarts; the helper reapplies the chosen limit."""
+    b = battery_info()
+    if not b.get("limit_file"):
+        return None
+    group = re.sub(r"[^A-Za-z0-9_.-]", "", _user_group())
+    rule = (f'ACTION=="add|change", SUBSYSTEM=="power_supply", KERNEL=="BAT*", '
+            f'RUN+="/bin/sh -c \'chgrp {group} /sys%p/charge_control_end_threshold; '
+            f'chmod 0664 /sys%p/charge_control_end_threshold\'"')
+    f = shlex.quote(str(b["limit_file"]))
+    parts = [f"printf '%s\\n' {shlex.quote(rule)} > {CHARGE_PERM_RULE}", f"chgrp {group} {f}", f"chmod 0664 {f}"]
+    return "sudo sh -c " + shlex.quote(" && ".join(parts)) + " && echo 'The charge limit no longer needs a password.'"
+
+
+def charge_limit_writable() -> bool:
+    b = battery_info()
+    return bool(b.get("limit_file")) and os.access(b["limit_file"], os.W_OK)
+
+
+def set_charge_limit(value) -> bool:
+    """Save and apply the charge limit without a password (needs charge_limit_writable). "100" = no limit."""
+    value = charge_limit_ok(value)
+    if not value:
+        return False
+    update_config(lambda c: c.setdefault("battery", {}).__setitem__("limit", value))
+    return apply_charge_limit()
+
+
+def apply_charge_limit() -> bool:
+    """Put the saved limit back (the kernel resets it at boot). The helper runs this; True when it's in place."""
+    want = (load_config().get("battery") or {}).get("limit") or ""
+    b = battery_info()
+    if not want or not b.get("limit_file"):
+        return False
+    if b.get("limit") == want:
+        return True
+    try:
+        Path(b["limit_file"]).write_text(want)
+        return True
+    except OSError:
+        return False
 
 
 def allow_all_missing(leds: list = None) -> list:
@@ -4898,6 +4955,8 @@ def allow_all_missing(leds: list = None) -> list:
         out.append("lighting")
     if epp_files() and not epp_writable():
         out.append("Game Boost")
+    if battery_info().get("limit_file") and not charge_limit_writable():
+        out.append("the battery charge limit")
     if qam_installed() and decky_service_exists() and not qam_self_updatable():
         out.append("Quick Access panel updates")
     return out
@@ -5415,15 +5474,6 @@ CATALOG = [
         fetch_run("https://github.com/aarron-lee/SimpleDeckyTDP/raw/main/install.sh"),
         ("simpledeckytdp",),
         warn="Overlaps with Ally Center and SteamOS's own TDP slider. Pick one.",
-    ),
-    Item(
-        id="nonsteamlaunchers", name="NonSteamLaunchers", category="Launchers & stores",
-        desc="Adds Epic, GOG, EA App, Ubisoft Connect, Battle.net, Xbox Game Pass (cloud), Netflix, "
-             "YouTube and more straight into your Steam library with artwork. Pick them on the Launchers page.",
-        monogram="NS", color="#10b981", kind="run",
-        install=fetch_run("https://raw.githubusercontent.com/moraroy/NonSteamLaunchers-On-Steam-Deck/main/NonSteamLaunchers.sh", "bash"),
-        check=lambda s: False,
-        warn="Restart Steam afterwards to see the new shortcuts.",
     ),
     Item(
         id="tailscale", name="Tailscale", category="Launchers & stores",

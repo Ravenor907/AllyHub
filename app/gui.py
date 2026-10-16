@@ -1437,10 +1437,13 @@ class TouchScroller(QObject):
             self.info["moves"] += 1
             self.info["held"] += 1 if held else 0
             self.info["dy"] = max(self.info["dy"], abs(y - self.y0))
+            self.info["dx"] = max(self.info.get("dx", 0.0), abs(x - self.x0))
         if self.area is None or not held:
             return False
         if not self.dragging:
-            if abs(y - self.y0) < self.START or abs(y - self.y0) < abs(x - self.x0):
+            # vertical distance only (report #25: drags with 80-230 px of up-down travel never started while this
+            # also required "more vertical than sideways"; pages only scroll up and down anyway)
+            if abs(y - self.y0) < self.START:
                 return False
             self.dragging = True
             b = self.target
@@ -1459,7 +1462,8 @@ class TouchScroller(QObject):
             self.logged += 1
             i = self.info
             core.app_log("touch", f"gesture {self.logged}: {i['src']} on {i['on']}, scrollable {i['area']}, "
-                                  f"{i['moves']} moves ({i['held']} with the button down), moved {int(i['dy'])} px, "
+                                  f"{i['moves']} moves ({i['held']} with the button down), moved {int(i['dy'])} px up/down and "
+                                  f"{int(i.get('dx', 0))} px sideways, "
                                   f"{'scrolled' if dragging else 'no scroll'}")
             self.info = None
         if not dragging:
@@ -1993,6 +1997,8 @@ class ItemCard(QFrame):
         # Decky plugins can be switched off without uninstalling (if one misbehaves, it's one tap away)
         self.btn_toggle = button("Turn off", lambda: self.action.emit(item.id, "enable" if self.off else "disable"))
         self.off = False
+        self.manage = False           # Remove and Turn off show only under Store → Installed (one place, 1.5.0.9)
+        self._installed = False
         btns.addWidget(self.btn_install)
         btns.addWidget(self.btn_open)
         btns.addStretch()
@@ -2003,7 +2009,7 @@ class ItemCard(QFrame):
     def update_state(self, installed: bool, missing_reqs: list, queued: bool, version: str = "",
                      off: bool = False):
         self.off = bool(off)
-        self.btn_toggle.setVisible(installed and bool(self.item.decky_names))
+        self._installed = installed
         self.btn_toggle.setText("Turn on" if self.off else "Turn off")
         self.btn_toggle.setEnabled(not queued)
         if queued:
@@ -2023,8 +2029,12 @@ class ItemCard(QFrame):
         self.btn_install.setEnabled(not queued and not missing_reqs)
         self.btn_install.setToolTip("Install first: " + ", ".join(missing_reqs) if missing_reqs else "")
         self.btn_open.setVisible(installed and bool(self.item.open_cmd))
-        self.btn_remove.setVisible(installed and bool(self.item.uninstall))
         self.btn_remove.setEnabled(not queued)
+        self.apply_manage()
+
+    def apply_manage(self):
+        self.btn_toggle.setVisible(self.manage and self._installed and bool(self.item.decky_names))
+        self.btn_remove.setVisible(self.manage and self._installed and bool(self.item.uninstall))
 
 
 class BrowsePage(QWidget):
@@ -2064,6 +2074,9 @@ class BrowsePage(QWidget):
         self.list_v = QVBoxLayout()
         self.list_v.setSpacing(12)
         cv.addLayout(self.list_v)
+        # Installed = the one place to turn off or remove anything, Decky plugins included (the owner, 1.5.0.9)
+        cv.addWidget(store_page.mine_card)
+        store_page.mine_card.hide()
         cv.addStretch()
         self.stack.addWidget(scroll_page(self.inner))
         self.stack.addWidget(store_page)
@@ -2107,7 +2120,8 @@ class BrowsePage(QWidget):
         titles = {"essentials": ("Essentials", "The few things most handhelds want. Tap Install on what you'd like."),
                   "mods": ("Mods", "Game Mode plugins, launchers and emulation."),
                   "apps": ("Apps", "Hand-picked apps from Flathub, installed for your user (no password)."),
-                  "installed": ("Installed", "Everything Ally Hub installed for you. Remove anything you don't use.")}
+                  "installed": ("Installed", "Everything installed, Decky plugins included: turn things off or remove "
+                                             "what you don't use.")}
         t, sub = titles[key]
         self.title.setText(t)
         self.sub.setText(sub)
@@ -2135,10 +2149,14 @@ class BrowsePage(QWidget):
             for n, item in enumerate(items):
                 card = self.cards[item.id]
                 grid.addWidget(card, n // 2, n % 2)
+                card.manage = key == "installed"
+                card.apply_manage()
                 card.show()
                 shown += 1
             self.list_v.addLayout(grid)
-        if not shown:
+        self.store_page.mine_shown = key == "installed"
+        self.store_page.show_mine()                      # shows itself under Installed when Decky has plugins
+        if not shown and key != "installed":
             self.list_v.addWidget(label("Nothing here yet.", "cardDesc"))
         self.inner.layout().activate()      # focus_page picks by position: positions must be current
 
@@ -2349,7 +2367,7 @@ class StorePage(QWidget):
         mv.addWidget(label("If Game Mode acts up after installing plugins, turn them all off, then back on one at a "
                            "time to find the culprit.", "cardMeta", wrap=True))
         self.mine_card = mine
-        v.addWidget(mine)
+        self.mine_shown = False       # it shows under Store → Installed (BrowsePage sets this)
         v.addWidget(label("STORE", "section"))
         bar = QHBoxLayout()
         self.search = QLineEdit()
@@ -2357,8 +2375,7 @@ class StorePage(QWidget):
         self.search.setClearButtonEnabled(True)
         bar.addWidget(self.search, 1)
         self.chips = {}
-        for key, text in (("featured", "Featured"), ("popular", "Most popular"),
-                          ("new", "Newest"), ("installed", "Installed")):
+        for key, text in (("featured", "Featured"), ("popular", "Most popular"), ("new", "Newest")):
             c = button(text, lambda _=False, k=key: self.set_filter(k), "chip")
             c.setCheckable(True)
             self.chips[key] = c
@@ -2444,7 +2461,7 @@ class StorePage(QWidget):
         clear_layout(self.mine_box)
         plugins = sorted(self.hub.state.get("decky", {}).values(), key=lambda i: i["name"].lower())
         off = set(self.hub.state.get("decky_off") or [])
-        self.mine_card.setVisible(bool(plugins) or bool(core.read_json(core.DECKY_SAFE_MODE, None)))
+        self.mine_card.setVisible(self.mine_shown and (bool(plugins) or bool(core.read_json(core.DECKY_SAFE_MODE, None))))
         pending = self.hub.runner.pending_keys()
         for info in plugins:
             row = QHBoxLayout()
@@ -2505,8 +2522,6 @@ class StorePage(QWidget):
             plugins = sorted(plugins, key=lambda p: -(p.get("downloads") or 0))
         elif self.filter == "new":
             plugins = sorted(plugins, key=lambda p: p.get("created") or "", reverse=True)
-        elif self.filter == "installed":
-            plugins = [p for p in plugins if self.installed_for(p)]
         return plugins
 
     def rebuild(self):
@@ -6509,12 +6524,16 @@ class SystemPage(QWidget):
                 f"echo 'Battery will stop charging at {value}%.'")
 
     def apply_limit(self):
-        if self.hub.needs_password():
-            return
         value = self.limit_box.currentText().split("%")[0]
-        cmd = self.charge_limit_cmd(value)
-        if cmd:
-            self.hub.runner.submit(f"Set charge limit {value}%", cmd, "charge-limit")
+        if core.charge_limit_writable():                 # no password since 1.5.0.9 (after Allow all)
+            ok = core.set_charge_limit(value)
+            self.hub.toast(("No charge limit." if value == "100" else f"Battery stops charging at {value}%.")
+                           if ok else "Couldn't set the charge limit")
+            self.hub.refresh()
+            return
+        # first time: one password sets this up together with everything else, then the limit applies by itself
+        update_config(lambda c: c.setdefault("battery", {}).__setitem__("limit", core.charge_limit_ok(value) or ""))
+        self.hub.allow_all()
 
     def clear_shaders(self):
         if not ask(self, "Delete Steam's shader cache?\n\nSteam rebuilds it automatically, so the "
@@ -7350,7 +7369,8 @@ class Hub(QMainWindow):
         self.mode_box.setProperty("padCycle", False)      # A opens it; Left/Right just move on
         mr.addWidget(self.mode_box)
         mr.addWidget(button("Run setup again", self.rerun_setup))
-        mr.addWidget(button("Activity log", lambda: self.go("Activity")))   # reachable in Simple too
+        self.btn_log = button("Activity log", lambda: self.go("Activity"))   # Simple only (Advanced: its section)
+        mr.addWidget(self.btn_log)
         mr.addStretch()
         mv.addLayout(mr)
         add_block(self.updates, block(mcard, self.automation.block_general), 0)
@@ -7431,6 +7451,9 @@ class Hub(QMainWindow):
             except RuntimeError:            # its page section was rebuilt
                 _ADVANCED.remove(box)
         self.set_section_hidden("Activity log", not on)
+        self.set_section_hidden("Installed", not on)     # managing installs is for Advanced (the owner, 1.5.0.9)
+        if getattr(self, "btn_log", None) is not None:
+            self.btn_log.setVisible(not on)              # Simple's only way to the log; Advanced has its section
         if getattr(self, "games", None) is not None and self.current_page() is self.games:
             self.games.refresh()            # the game view is built per game, so it's redrawn
 
@@ -8209,6 +8232,8 @@ class Hub(QMainWindow):
             self.lighting.access_job_done(code == 0)
         if key == "allow-all":
             self.performance.job_done(key, code == 0)
+            if code == 0 and core.apply_charge_limit():   # a limit picked before the permission existed
+                self.toast("Charge limit set ✔")
         if key in ("boost-perms", "tuneup", "tuneup-undo"):
             self.performance.job_done(key, code == 0)
         if key == "nonsteamlaunchers":
@@ -8302,9 +8327,6 @@ class Hub(QMainWindow):
 
     def on_item_action(self, iid: str, action: str):
         item = CATALOG_BY_ID[iid]
-        if iid == "nonsteamlaunchers":          # our own themed picker instead of the script's windows
-            self.go("Launchers")
-            return
         if action == "open":
             self.launch(item.open_cmd)
             return

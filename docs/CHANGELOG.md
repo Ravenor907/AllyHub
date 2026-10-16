@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.5.0.15
+
+- **Touch scrolling, fixed from your report.** Your drags were arriving fine but a check meant for sideways swipes
+  blocked every one. Drags now scroll as soon as your finger moves up or down.
+- **The battery charge limit no longer needs a password.** "Allow all" in Checkup covers it too (one password,
+  once); after that, changing the limit is instant, and Ally Hub keeps your limit after every restart.
+- **Store, one place per thing:** the Installed section is the only place to turn off or remove anything, Decky
+  plugins included, and it only shows in Advanced. Store cards install and update. The extra Launchers card and the
+  Decky store's own "Installed" filter are gone (Store → Launchers and Installed cover them).
+- The Activity log button in General shows only in Simple, where the Activity log section is hidden.
+
+(Numbered 1.5.0.15 so it's newer than every earlier test build.)
+
 ## 1.5.0.8
 
 - **Touch scrolling, second try.** Dragging now works whether Game Mode sends your finger as a touch or as a mouse,

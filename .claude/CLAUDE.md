@@ -128,6 +128,15 @@ editable text, combos, TouchPad and FrameGraph alone. Scroll bar width is 40px.
 still turns taps into clicks) and skips Qt's mouse copy of a touch it follows; double-click presses count as presses
 (quick flicks); the first `LOG_GESTURES` gestures go to the log ("touch" lines: input kind, moves with the button
 down, distance). Read those lines in the next report before changing it again.
+Report #25 (1.5.0.8): drags arrived as mouse drags with the button down and 80-230 px of vertical travel, but the old
+"more vertical than sideways" test blocked all of them; a drag now starts on vertical distance alone (dx is logged).
+**Charge limit without a password (1.5.0.15, the owner: "stop being so cautious"):** `charge_permission_cmd` (in
+`allow_all_cmd`) lets the user's group write charge_control_end_threshold (udev `CHARGE_PERM_RULE`, chgrp + 0664,
+never 0666); `set_charge_limit` saves `config["battery"]["limit"]`, the agent's `apply_charge_limit` reapplies it
+after boot. **Store (1.5.0.15, the owner):** Installed (Advanced only) is the one place to turn off or remove,
+Decky plugins included (`StorePage.mine_card` lives in `BrowsePage`, `mine_shown`); `ItemCard.manage` shows
+Remove/Turn off only there. Builds 1.5.0.9-1.5.0.14 from another session were dropped from testing (the owner rolled
+1.5.0.14 back); version numbers continue at 1.5.0.15 so every device updates.
 
 **Controller scrolling:** `GamepadNav.move` scrolls the page by most of a screen when the next
 control is far away or missing (`_too_far`), so read-only content is reachable. Never scroll the window behind a dialog.
