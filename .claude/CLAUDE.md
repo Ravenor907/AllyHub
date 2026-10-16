@@ -136,7 +136,10 @@ never 0666); `set_charge_limit` saves `config["battery"]["limit"]`, the agent's 
 after boot, once per boot only (`apply_charge_limit_once`, `CHARGE_APPLIED`; never fight a limit set elsewhere); the
 permission job also removes the old root rule. **Store (1.5.0.15, the owner):** Installed (Advanced only) is the one place to turn off or remove,
 Decky plugins included (`StorePage.mine_card` lives in `BrowsePage`, `mine_shown`); `ItemCard.manage` shows
-Remove/Turn off only there. Builds 1.5.0.9-1.5.0.14 from another session were dropped from testing (the owner rolled
+Remove/Turn off only there. 1.5.0.17: the Quick Access panel is catalog Item `qam`
+(Essentials, `install=""`): `on_item_action`, `install_essentials`, Setup and profile import route it to
+`games.qam_install` (never `runner.submit` an empty install); Installed skips it and Decky plugins (Your plugins).
+"Upscaling for every game" is `GamesPage.all_card`. Builds 1.5.0.9-1.5.0.14 from another session were dropped from testing (the owner rolled
 1.5.0.14 back); version numbers continue at 1.5.0.15 so every device updates.
 
 **Controller scrolling:** `GamepadNav.move` scrolls the page by most of a screen when the next

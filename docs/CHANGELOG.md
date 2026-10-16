@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.5.0.17
+
+- The Quick Access panel is now in Store → Essentials, next to Decky Loader, instead of a card in Game settings.
+- Upscaling for every game moved to Game settings (the "All games" card), next to the per-game settings.
+- Game Boost's permission button now uses the same one-password "Allow all" as everything else.
+- Installed lists each Decky plugin once, under Your plugins.
+
 ## 1.5.0.16
 
 - Fixed: 1.5.0.15 could lose or hide the Activity log button in the top bar after changing the bar layout.

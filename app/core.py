@@ -5454,6 +5454,14 @@ CATALOG = [
         warn="SteamOS updates can remove Decky. Ally Hub's Update Guardian will spot it.",
         recommended=True,
     ),
+    # Ally Hub's own Quick Access panel (1.5.0.17: in Essentials, one place; it was a card in Game settings).
+    # The GUI installs it (qam_install: stages the files, one password, then updates need none).
+    Item(
+        id="qam", name="Ally Hub in Quick Access", category="Essentials",
+        desc="Battery, temps, this game's switches, Game Boost and lighting in the ••• menu while you play.",
+        monogram="AH", color="#14b8a6", install="", uninstall=qam_uninstall_cmd(),
+        check=lambda s: bool(qam_installed()), requires=("decky",), recommended=True,
+    ),
     decky_plugin_item(
         "allycenter", "Ally Center",
         "Built for the ROG Ally: TDP presets, RGB effects, charge limit, battery health, "
@@ -5773,7 +5781,7 @@ def build_profile(state: dict) -> dict:
         "device": device_name(),
         "flatpaks": sorted(state.get("flatpaks", [])),
         "catalog": sorted(i.id for i in CATALOG
-                          if not i.id.count(".") and i.kind == "install" and i.check(state)),
+                          if not i.id.count(".") and i.kind == "install" and i.install and i.check(state)),
         "decky_plugins": sorted(v["name"] for v in state.get("decky", {}).values()),
         "config": _profile_config(cfg),
         "system": {"charge_limit": b.get("limit") or ""},     # never SSH: a profile must not open remote logins

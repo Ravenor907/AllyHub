@@ -2524,9 +2524,9 @@ tryit("performance refresh", hub.performance.refresh)
 tryit("performance boost on", lambda: hub.performance.set_boost(True))
 check(core.load_config()["performance"]["boost"] is True, "Boost my games saves the setting")
 tryit("performance boost off", lambda: hub.performance.set_boost(False))
-tryit("every-game fsr4 on", lambda: hub.performance.set_game_env("fsr4", True))
+tryit("every-game fsr4 on", lambda: hub.games.set_game_env("fsr4", True))
 check(core.game_env_enabled("fsr4"), "FSR 4 switch saves the setting")
-tryit("every-game fsr4 off", lambda: hub.performance.set_game_env("fsr4", False))
+tryit("every-game fsr4 off", lambda: hub.games.set_game_env("fsr4", False))
 tryit("performance jobs", lambda: [hub.on_job_finished(k, 0, "") for k in ("boost-perms", "tuneup", "tuneup-undo")])
 _perf_jobs = []
 _sub = hub.runner.submit
@@ -2689,7 +2689,14 @@ for _k, _cb in hub.games.checks.items():           # the mock's checkboxes don't
 check(hub.games.new_options() == _gs["options"], "unchanged settings save the exact original text")
 hub.games.checks["deck"].isChecked = lambda: True
 check(hub.games.new_options() == "SteamDeck=1 PROTON_LOG=1 mangohud %command%", "one switch changes only its own token")
-tryit("panel card", hub.games.qam_card)
+def _panel_in_store():
+    assert core.CATALOG_BY_ID["qam"].category == "Essentials" and not hasattr(hub.games, "qam_card")
+    seen = []
+    hub.games.qam_install = lambda: seen.append(1)
+    hub.on_item_action("qam", "install")          # the panel routes to its own installer
+    del hub.games.qam_install
+    assert seen
+tryit("panel is a Store essential", _panel_in_store)
 _lj.clear()
 hub.runner.submit = lambda label, cmd, key="": _lj.append((key, cmd))
 hub.state["decky"] = {"x": {"dir": "/x", "name": "x"}}

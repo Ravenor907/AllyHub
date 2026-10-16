@@ -1033,7 +1033,7 @@ ICONS = {
 
 # Catalog items get an icon for what they do (falls back to their category's icon)
 ITEM_ICONS = {
-    "decky": "plug", "allycenter": "gauge", "simpledeckytdp": "cpu", "nonsteamlaunchers": "rocket",
+    "decky": "plug", "qam": "gamepad-2", "allycenter": "gauge", "simpledeckytdp": "cpu", "nonsteamlaunchers": "rocket",
     "lsfg": "zap", "framegen": "sparkles",
     "tailscale": "globe", "emudeck": "joystick", "net.retrodeck.retrodeck": "gamepad",
     "com.steamgriddb.SteamROMManager": "images", "com.heroicgameslauncher.hgl": "swords",
@@ -2097,7 +2097,9 @@ class BrowsePage(QWidget):
         if key == "essentials":
             return [("", [i for i in CATALOG if i.recommended])]
         if key == "installed":
-            return [("", [i for i in CATALOG if i.kind == "install" and i.check(st)])]
+            # Decky plugins (the panel too) are listed once, under Your plugins
+            return [("", [i for i in CATALOG if i.kind == "install" and i.check(st)
+                          and not i.decky_names and i.id != "qam"])]
         cats = core.MOD_CATEGORIES if key == "mods" else core.APP_CATEGORIES
         return [(c, [i for i in CATALOG if i.category == c]) for c in cats]
 
@@ -4807,14 +4809,59 @@ class GamesPage(QWidget):
         self.checks, self.other = {}, ""
         self.v = page_shell(self, "Game settings",
                             "Switches instead of launch options, Proton per game, and help when a game won't start.")
+        # every game first, then one game (1.5.0.17: upscaling for all games moved here from Performance)
+        self._loading = False
+        self.all_card, gv = titled_card(
+            "sparkles", "#ef4444", "All games",
+            'Upscaling set once for every game, no launch options. Applies after a restart.')
+        self.env_checks = {}
+        for key, (_vars, title, desc) in core.GAME_ENV_OPTIONS.items():
+            cb = QCheckBox(title)
+            cb.toggled.connect(lambda on, k=key: self.set_game_env(k, on))
+            gv.addWidget(cb)
+            gv.addWidget(label(desc, "cardDesc", wrap=True))
+            self.env_checks[key] = cb
+        self.env_status = label("", "cardMeta", wrap=True)
+        gv.addWidget(self.env_status)
+        self.v.addWidget(self.all_card)
         self.body = QVBoxLayout()
         self.body.setSpacing(12)
         self.v.addLayout(self.body)
         self.v.addStretch()
 
+    def set_game_env(self, key: str, on: bool):
+        if self._loading:
+            return
+        core.game_env_set(key, bool(on))
+        self.refresh_game_env()
+        if on:
+            self.hub.toast("Saved. Restart the handheld to apply it to games.")
+
+    def refresh_game_env(self):
+        self._loading = True
+        for key, cb in self.env_checks.items():
+            cb.setChecked(core.game_env_enabled(key))
+        self._loading = False
+        on = [k for k in self.env_checks if core.game_env_enabled(k)]
+        env = core.process_env()
+        lines = []
+        if on and env is not None:
+            pending = [core.GAME_ENV_OPTIONS[k][1] for k in on if not core.game_env_live(k, env)]
+            lines.append(f"Waiting for a restart: {', '.join(pending)}." if pending else "✔ Active in Steam right now.")
+        elif on:
+            lines.append("Saved. It takes effect the next time Steam starts.")
+        if on and "fsr4" in on and not core.custom_protons():
+            lines.append("No GE-Proton or Proton-CachyOS found. Install GE-Proton with ProtonPlus (Store → Apps), "
+                         "then pick it under a game's Properties → Compatibility.")
+        elif core.custom_protons():
+            lines.append("Proton builds that support this: " + ", ".join(core.custom_protons()[-3:]) + ".")
+        self.env_status.setText("\n".join(lines))
+
     # ---- list view ----
     def refresh(self):
+        self.all_card.setVisible(self.game is None)
         if self.game is None:
+            self.refresh_game_env()
             self.body_message("Reading your library…")
             BackgroundTask(self, lambda: {"games": core.game_choices(), "live": core.cef_eval("1") == 1},
                            self._listed)
@@ -4834,8 +4881,8 @@ class GamesPage(QWidget):
 
     def show_list(self):
         self.game = None
+        self.all_card.show()
         clear_layout(self.body)
-        self.body.addWidget(self.qam_card())
         self.body.addWidget(label("YOUR GAMES", "section"))
         if not self.live:
             self.body.addWidget(label("⚠ Steam's connection for plugins is off, so settings can be viewed but not "
@@ -4863,24 +4910,6 @@ class GamesPage(QWidget):
         self.show_list()
 
     # ---- Quick Access panel ----
-    def qam_card(self) -> QWidget:
-        have = core.qam_installed()
-        card, cv = titled_card("gamepad-2", "#14b8a6", "Quick Access panel",
-                               'Battery, temps, game switches, Game Boost and lighting in the ••• menu. Needs Decky Loader.')
-        row = QHBoxLayout()
-        if not have:
-            row.addWidget(button("Add to Quick Access", self.qam_install, "primary"))
-        elif core.parse_version(have) < core.parse_version(core.QAM_VERSION):
-            row.addWidget(button("Update the panel", self.qam_install, "primary"))
-            row.addWidget(button("Remove", self.qam_remove))
-        else:
-            cv.addWidget(label("✔ In your Quick Access menu. Press ••• while playing and open the plug icon.",
-                               "cardMeta", wrap=True))
-            row.addWidget(button("Remove", self.qam_remove))
-        row.addStretch()
-        cv.addLayout(row)
-        return card
-
     def qam_install(self, *_args):
         if not CATALOG_BY_ID["decky"].check(self.hub.state):
             if ask(self, "The Quick Access panel runs inside Decky Loader, which isn't installed yet.\n\nInstall "
@@ -4891,7 +4920,7 @@ class GamesPage(QWidget):
             self.hub.toast("Updating the panel…")
             BackgroundTask(self, core.qam_update_nopw, lambda ok: (
                 self.hub.toast("Panel updated ✔" if ok else "Couldn't update the panel (see Activity log)"),
-                self.show_list() if self.game is None else None))
+                self.hub.update_cards()))
             return
         if self.hub.needs_password():
             return
@@ -4908,12 +4937,12 @@ class GamesPage(QWidget):
     def qam_done(self, ok: bool, key: str):
         if ok and key == "qam-install":
             self.hub.toast("Ally Hub is in your Quick Access menu: press ••• and open the plug icon.")
-        if self.game is None:
-            self.show_list()
+        self.hub.update_cards()
 
     # ---- one game ----
     def open_game(self, g: dict):
         self.game = g
+        self.all_card.hide()
         self.body_message(f"Loading {g['name']}…")
         BackgroundTask(self, lambda: core.game_settings(g["appid"], g["kind"]), lambda s: self._loaded(g, s))
 
@@ -5280,13 +5309,11 @@ class SetupPage(QWidget):
     def step_essentials(self):
         cv = self.card("download", "#22c55e", "Essentials",
                        "Pick what to install now. Nothing installs until you tap Install.")
-        # the same essentials as Store > Browse > Essentials (catalog items marked recommended), plus the panel
+        # the same essentials as Store > Browse > Essentials (catalog items marked recommended)
         st = self.hub.state
         options = [("decky", "Decky Loader", "Plugins in Game Mode's ••• menu. Most Game Mode extras need it.",
-                    CATALOG_BY_ID["decky"].check(st), True),
-                   ("qam", "Ally Hub in Quick Access", "Battery, temps, game switches and lighting while you play.",
-                    bool(core.qam_installed()), True)]
-        options += [(i.id, i.name, i.desc, i.check(st), i.id == core.LUDUSAVI_ID)
+                    CATALOG_BY_ID["decky"].check(st), True)]
+        options += [(i.id, i.name, i.desc, i.check(st), i.id in (core.LUDUSAVI_ID, "qam"))
                     for i in CATALOG if i.recommended and i.id != "decky"]
         self.essentials = {}
         for key, title, desc, have, preset in options:
@@ -5306,13 +5333,13 @@ class SetupPage(QWidget):
         if not pick:
             self.hub.toast("Nothing selected")
             return
-        root = [k for k in pick if k == "qam" or (k in CATALOG_BY_ID and "." not in k)]   # Flatpaks need no password
+        root = [k for k in pick if k in CATALOG_BY_ID and "." not in k]   # Flatpaks need no password
         if root and self.hub.needs_password():
             return
         if "decky" in pick:
             self.hub.on_item_action("decky", "install")
         for iid in pick:
-            if iid in CATALOG_BY_ID and iid != "decky":
+            if iid in CATALOG_BY_ID and iid not in ("decky", "qam"):
                 self.hub.on_item_action(iid, "install")
         if "qam" in pick:
             if "decky" in pick:
@@ -5993,20 +6020,6 @@ class PerformancePage(QWidget, _PerformanceRefresh):
         tv.addLayout(tr)
         v.addWidget(adv(block(tune_head, tcard)))          # expert control: Advanced only
 
-        v.addWidget(label("EVERY GAME", "section"))
-        gcard, gv = titled_card(
-            "sparkles", "#ef4444", "Upscaling for every game",
-            'Set once and every game gets it, no launch options. Applies after a restart.')
-        self.env_checks = {}
-        for key, (_vars, title, desc) in core.GAME_ENV_OPTIONS.items():
-            cb = QCheckBox(title)
-            cb.toggled.connect(lambda on, k=key: self.set_game_env(k, on))
-            gv.addWidget(cb)
-            gv.addWidget(label(desc, "cardDesc", wrap=True))
-            self.env_checks[key] = cb
-        self.env_status = label("", "cardMeta", wrap=True)
-        gv.addWidget(self.env_status)
-        v.addWidget(gcard)
         v.addStretch()
 
     # live Game Boost status while the page is open
@@ -6029,27 +6042,6 @@ class PerformancePage(QWidget, _PerformanceRefresh):
         self.refresh_update()
         self.refresh_boost()
         self.refresh_tuneup()
-        self.refresh_game_env()
-
-    def refresh_game_env(self):
-        self._loading = True
-        for key, cb in self.env_checks.items():
-            cb.setChecked(core.game_env_enabled(key))
-        self._loading = False
-        on = [k for k in self.env_checks if core.game_env_enabled(k)]
-        env = core.process_env()
-        lines = []
-        if on and env is not None:
-            pending = [core.GAME_ENV_OPTIONS[k][1] for k in on if not core.game_env_live(k, env)]
-            lines.append(f"Waiting for a restart: {', '.join(pending)}." if pending else "✔ Active in Steam right now.")
-        elif on:
-            lines.append("Saved. It takes effect the next time Steam starts.")
-        if on and "fsr4" in on and not core.custom_protons():
-            lines.append("No GE-Proton or Proton-CachyOS found. Install GE-Proton with ProtonPlus (Store → Apps), "
-                         "then pick it under a game's Properties → Compatibility.")
-        elif core.custom_protons():
-            lines.append("Proton builds that support this: " + ", ".join(core.custom_protons()[-3:]) + ".")
-        self.env_status.setText("\n".join(lines))
 
     def refresh_boost(self):
         cfg = load_config()
@@ -6109,14 +6101,6 @@ class PerformancePage(QWidget, _PerformanceRefresh):
         self.btn_untune.setEnabled(applied)
 
     # ---- actions ----
-    def set_game_env(self, key: str, on: bool):
-        if self._loading:
-            return
-        core.game_env_set(key, bool(on))
-        self.refresh_game_env()
-        if on:
-            self.hub.toast("Saved. Restart the handheld to apply it to games.")
-
     def set_boost(self, on):
         if self._loading:
             return
@@ -6129,11 +6113,7 @@ class PerformancePage(QWidget, _PerformanceRefresh):
         self.refresh_boost()
 
     def allow_boost(self):
-        if self.hub.needs_password():
-            return
-        cmd = core.boost_permission_cmd()
-        if cmd:
-            self.hub.runner.submit("Allow Game Boost", cmd, "boost-perms")
+        self.hub.allow_all()                             # one password covers everything (1.5.0.17)
 
     def apply_tuneup(self):
         if self.hub.needs_password():
@@ -8137,7 +8117,8 @@ class Hub(QMainWindow):
                 inst = item.check(self.state)
                 off = inst and bool(item.decky_names) and bool(
                     set(core.decky_item_names(item, self.state)) & set(self.state.get("decky_off") or []))
-                card.update_state(inst, missing, iid in pending, core.decky_version(item, self.state), off=off)
+                busy = iid in pending or (iid == "qam" and bool({"qam-install", "qam-remove"} & set(pending)))
+                card.update_state(inst, missing, busy, core.decky_version(item, self.state), off=off)
         self.store_page.refresh_state()
         self.update_glyphs()
 
@@ -8328,6 +8309,9 @@ class Hub(QMainWindow):
 
     def on_item_action(self, iid: str, action: str):
         item = CATALOG_BY_ID[iid]
+        if iid == "qam":                                 # Ally Hub's own panel: staged, then one password
+            (self.games.qam_remove if action == "uninstall" else self.games.qam_install)()
+            return
         if action == "open":
             self.launch(item.open_cmd)
             return
@@ -8416,6 +8400,12 @@ class Hub(QMainWindow):
             return
         todo.sort(key=lambda i: 0 if i.id == "decky" else 1)
         for i in todo:
+            if i.id == "qam":                            # the panel goes in once Decky is there
+                if any(t.id == "decky" for t in todo):
+                    self.qam_after_decky = True
+                else:
+                    self.games.qam_install()
+                continue
             self.installing.add(i.id)
             self.runner.submit(f"Installing {i.name}", i.install, i.id)
         self.update_cards()
@@ -8443,6 +8433,8 @@ class Hub(QMainWindow):
         core.apply_profile_config(plan["config"])
         self.apply_theme()
         for iid in sorted(plan["catalog"], key=lambda i: 0 if i == "decky" else 1):
+            if not CATALOG_BY_ID[iid].install:            # the panel has its own installer, not a command
+                continue
             self.installing.add(iid)
             self.runner.submit(f"Installing {CATALOG_BY_ID[iid].name}", CATALOG_BY_ID[iid].install, iid)
         if plan["flatpaks"]:
