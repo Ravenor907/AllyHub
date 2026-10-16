@@ -1144,8 +1144,8 @@ class Agent:
                 self.safely("guardian", self.guardian)
             if self.cfg["agent"].get("health_log"):
                 self.safely("health", self.log_health, battery)
-            if self.tick % 60 == 5:     # the kernel resets the charge limit at boot: keep the owner's choice
-                self.safely("battery", core.apply_charge_limit)
+            if self.tick % 60 == 5:     # the kernel resets the charge limit at boot: put the owner's choice back once
+                self.safely("battery", core.apply_charge_limit_once)
             self.safely("saves", self.save_backups, battery)
             self.safely("sleep", self.update_sleep, battery)
             self.safely("lighting", self.update_lighting, battery)

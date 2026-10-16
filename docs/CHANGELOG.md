@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.5.0.16
+
+- Fixed: 1.5.0.15 could lose or hide the Activity log button in the top bar after changing the bar layout.
+- The charge limit is put back once after each restart, never fought over: if you change it somewhere else,
+  Ally Hub leaves it alone until the next restart. Importing a setup file keeps its limit too.
+- Decky store cards no longer show "Turn off" (that's under Store → Installed now), and Installed says
+  "Nothing installed yet." when it's empty.
+
 ## 1.5.0.15
 
 - **Touch scrolling, fixed from your report.** Your drags were arriving fine but a check meant for sideways swipes
