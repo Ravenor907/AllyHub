@@ -61,7 +61,7 @@ Dynamic Lighting on the 0x59/0x01 interface with `[0x06, 0x01]`, and send RGB en
 `[0x5A, 0xD1, 0x09, 0x01, 0x02]` before colors (`hid_packets`). HueSync writes sysfs packed zones as hex
 text (`encoding == "hex"`). The guided test probes each sysfs encoding by readback and skips any the
 kernel changes, so the owner is only asked about methods that can work. One permission job
-(`led_permission_cmd(leds)`, key `rgb-perms`) writes both udev rules; the job also chmods the files right away.
+(`led_permission_cmd(leds)`, run only inside `allow_all_cmd(leds, lighting=True)`, key `allow-all` since 1.5.0.18) writes both udev rules; the job also chmods the files right away.
 Never skip the job because a rule file exists (a stale one causes a restart loop). If access still fails
 afterwards, `lighting_access_details` goes into a "Lighting permission didn't take" report.
 
@@ -97,7 +97,7 @@ add new icons from github.com/lucide-icons/lucide `icons/*.svg`.
 - **Game Boost** (`config["performance"]["boost"]`, off by default): the agent's `update_boost` switches the CPU
   energy preference while `GameWatcher` sees a game (plugged in `performance`, battery `balance_performance`),
   via power-profiles-daemon when it runs (`ppd`, never on battery) or the EPP sysfs files (`epp`, permission by
-  `boost_permission_cmd`, key `boost-perms`, tmpfiles `z` rule). `boost_restore` only puts the old value back if
+  `boost_permission_cmd` inside `allow_all_cmd`, key `allow-all`, tmpfiles `z` rule). `boost_restore` only puts the old value back if
   ours is still set (never fight SteamOS). The undo record is in `BOOST_STATE`, so a crash or SIGTERM can't
   leave the CPU boosted (`recover_boost` at start, `Stopped` + `end_boost` on exit; keep exit code 1 for the
   rollback restart). Report uploads wait until no game runs. TDP/GPU stay with SteamOS: don't add them.

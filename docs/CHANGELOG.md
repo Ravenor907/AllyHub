@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.5.0.18
+
+- Every permission now goes through one "Allow all" job, so you get one password prompt, never one per feature.
+  Lighting's own Allow button and the light test use it too.
+- Removed some leftover code nobody used.
+
 ## 1.5.0.17
 
 - The Quick Access panel is now in Store → Essentials, next to Decky Loader, instead of a card in Game settings.

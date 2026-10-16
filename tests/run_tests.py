@@ -2435,20 +2435,20 @@ hub.runner.submit = lambda label, cmd, key="": submitted.append((key, cmd))
 hub.state["password"] = True
 gui.ask = lambda *a, **k: True
 tryit("test asks for permission", L.test_lights)
-check([k for k, _ in submitted] == ["rgb-perms"] and L.test_after_access, "one permission job, test queued")
+check([k for k, _ in submitted] == ["allow-all"] and L.test_after_access, "one permission job, test queued")
 chip_ok[0] = True
 started = []
 _start = L._start_light_test
 L._start_light_test = lambda: started.append(1)
-tryit("permission job done", lambda: hub.on_job_finished("rgb-perms", 0, "Lighting is now allowed"))
+tryit("permission job done", lambda: hub.on_job_finished("allow-all", 0, "Lighting is now allowed"))
 check(started == [1], "light test starts by itself once permission is in place")
 chip_ok[0] = False
 submitted.clear()
 tryit("old rule file present", L.allow_access)
-check([k for k, _ in submitted] == ["rgb-perms"], "an existing rule file never blocks trying again")
+check([k for k, _ in submitted] == ["allow-all"], "an existing rule file never blocks trying again")
 check("chmod 0666" in submitted[0][1] and "chmod a+w" in submitted[0][1], "permission also applies right away")
 n_rep = len(core.pending_reports())
-tryit("permission still blocked", lambda: hub.on_job_finished("rgb-perms", 0, "ok"))
+tryit("permission still blocked", lambda: hub.on_job_finished("allow-all", 0, "ok"))
 reps = [json.load(open(p)) for p in core.pending_reports()]
 check(any("permission didn't take" in r["title"] for r in reps),
       "blocked permission files a report instead of a restart loop")
@@ -2527,7 +2527,7 @@ tryit("performance boost off", lambda: hub.performance.set_boost(False))
 tryit("every-game fsr4 on", lambda: hub.games.set_game_env("fsr4", True))
 check(core.game_env_enabled("fsr4"), "FSR 4 switch saves the setting")
 tryit("every-game fsr4 off", lambda: hub.games.set_game_env("fsr4", False))
-tryit("performance jobs", lambda: [hub.on_job_finished(k, 0, "") for k in ("boost-perms", "tuneup", "tuneup-undo")])
+tryit("performance jobs", lambda: [hub.on_job_finished(k, 0, "") for k in ("tuneup", "tuneup-undo")])
 _perf_jobs = []
 _sub = hub.runner.submit
 hub.runner.submit = lambda label, cmd, key="": _perf_jobs.append((key, cmd))

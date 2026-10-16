@@ -3410,7 +3410,7 @@ class LightingPage(QWidget):
         # because a rule file exists traps the owner in a restart loop when that file is stale.
         leds = self.leds or core.find_leds()
         self.test_after_access = then_test
-        if not self.hub.enable_led_permissions(leds):
+        if not self.hub.allow_all(leds, lighting=True):
             self.test_after_access = False
 
     def access_job_done(self, ok: bool):
@@ -8210,13 +8210,13 @@ class Hub(QMainWindow):
         after = self._decky_after.pop(key, None)
         if after:
             after(code == 0)
-        if key == "rgb-perms" or (key == "allow-all" and getattr(self, "_allow_all_lighting", False)):
+        if key == "allow-all" and getattr(self, "_allow_all_lighting", False):
             self.lighting.access_job_done(code == 0)
         if key == "allow-all":
             self.performance.job_done(key, code == 0)
             if code == 0 and core.apply_charge_limit():   # a limit picked before the permission existed
                 self.toast("Charge limit set ✔")
-        if key in ("boost-perms", "tuneup", "tuneup-undo"):
+        if key in ("tuneup", "tuneup-undo"):
             self.performance.job_done(key, code == 0)
         if key == "nonsteamlaunchers":
             self.launchers.job_done(code == 0)
@@ -8522,14 +8522,15 @@ class Hub(QMainWindow):
             msg_info(self, APP_NAME, "In Steam: Games > Add a Non-Steam Game, pick Ally Hub, then set its launch "
                                      "options to --gamemode.")
 
-    def allow_all(self, leds=None) -> bool:
+    def allow_all(self, leds=None, lighting: bool = False) -> bool:
         """Everything that still needs the password, in one prompt (lighting, Game Boost, panel updates)."""
         if self.needs_password():
             return False
         if "allow-all" in self.runner.pending_keys():
             self.toast("Already setting it up…")
             return True
-        cmd = core.allow_all_cmd(leds if isinstance(leds, list) else None)
+        leds = leds if isinstance(leds, list) else None
+        cmd = core.allow_all_cmd(leds, lighting)
         if not cmd:
             self.toast("Nothing needs your password ✔")
             return True
@@ -8537,19 +8538,8 @@ class Hub(QMainWindow):
             core.qam_stage()                             # the job copies the panel from here
         # only check lighting afterwards if this job set it up (#19: with HueSync in charge lighting is skipped,
         # and checking it anyway filed "Lighting permission didn't take")
-        self._allow_all_lighting = "lighting" in core.allow_all_missing(leds if isinstance(leds, list) else None)
+        self._allow_all_lighting = lighting or "lighting" in core.allow_all_missing(leds)
         self.runner.submit("Allow Ally Hub (one password)", cmd, "allow-all")
-        return True
-
-    def enable_led_permissions(self, leds=None) -> bool:
-        """Submit the one-time lighting permission job. Returns False if it couldn't start."""
-        if self.needs_password():
-            return False
-        if "rgb-perms" in self.runner.pending_keys():
-            self.toast("Already setting up lighting permission…")
-            return True
-        leds = leds if isinstance(leds, list) else core.find_leds()
-        self.runner.submit("Allow lighting without a password", core.led_permission_cmd(leds), "rgb-perms")
         return True
 
     def use_allyhub_lighting(self, *_args):
@@ -8583,7 +8573,7 @@ class Hub(QMainWindow):
         if leds and not core.lighting_shelved() and not core.lighting_access_ok(leds):
             if ask(self, "The background helper changes lighting without asking for a password, which needs a "
                          "one-time permission. Set that up now?"):
-                self.enable_led_permissions()
+                self.allow_all()
 
     def disable_agent(self):
         update_config(lambda c: c["agent"].__setitem__("enabled", False))
