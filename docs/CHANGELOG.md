@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.5.0.8
+
+- **Touch scrolling, second try.** Dragging now works whether Game Mode sends your finger as a touch or as a mouse,
+  and quick repeated flicks scroll too. The first few drags are written to the activity log (what kind of input
+  arrived and how far it moved), so if it still doesn't scroll, the next report shows why.
+- **Home is simpler.** The "Finish setting up" and "Set a password" notices are gone: Checkup right below lists
+  those, with their fix. Checkup's separate Lighting and Game Boost permission rows are folded into "Password
+  prompts", and Restart Decky lives only in Checkup.
+
 ## 1.5.0.7
 
 - **The password prompt is part of Ally Hub now**: a dark panel near the top of the screen, so the Steam keyboard
