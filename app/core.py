@@ -266,7 +266,9 @@ def battery_info() -> dict:
     info["health"] = round(100 * full / design) if full and design else None
     limit_file = bat / "charge_control_end_threshold"
     info["limit_file"] = limit_file if limit_file.exists() else None
-    info["limit"] = read_text(limit_file) if limit_file.exists() else ""
+    raw = read_text(limit_file) if limit_file.exists() else ""
+    # the kernel reports 0 when no limit was ever set: that's "no limit", not "stops at 0%" (the owner's Checkup)
+    info["limit"] = raw if raw.isdigit() and 1 <= int(raw) <= 100 else ("100" if limit_file.exists() else "")
     return info
 
 
@@ -4793,6 +4795,7 @@ def qam_stage() -> Path:
 # change it); the parts that change per version (main.py, dist/, package.json) belong to the user and run as the user
 # anyway (no "root" flag). A polkit rule lets the user restart (or start) Decky Loader's service, nothing else.
 DECKY_POLKIT_RULE = "/etc/polkit-1/rules.d/49-allyhub-decky.rules"
+DECKY_POLKIT_MARK = "/etc/allyhub/decky-restart-allowed"   # readable stand-in: polkit's rules folder is root-only
 QAM_USER_PARTS = ("main.py", "dist", "package.json")
 
 
@@ -4816,13 +4819,21 @@ def qam_permission_parts() -> list:
             f"chown -R {user}: " + " ".join(f"{d}/{p}" for p in QAM_USER_PARTS),
             "mkdir -p /etc/polkit-1/rules.d",
             f"printf '%s\\n' {shlex.quote(decky_polkit_js())} > {DECKY_POLKIT_RULE}",
-            f"chmod 644 {DECKY_POLKIT_RULE}"]
+            f"chmod 644 {DECKY_POLKIT_RULE}",
+            f"mkdir -p /etc/allyhub && touch {DECKY_POLKIT_MARK} && chmod 644 {DECKY_POLKIT_MARK}"]
+
+
+def decky_restart_allowed() -> bool:
+    """This user may restart Decky Loader without a password. The polkit rule itself can't be seen (its folder is
+    root-only, so checking for it never cleared Checkup's "Password prompts", the owner, 1.5.0.7) and pkcheck can't
+    ask with details as a normal user, so the same job writes a readable marker."""
+    return Path(DECKY_POLKIT_MARK).exists()
 
 
 def qam_self_updatable() -> bool:
     """Panel updates can happen without a password (the one-time permission is in place)."""
     try:
-        return (Path(DECKY_POLKIT_RULE).exists() and (QAM_DIR / "plugin.json").read_text() == QAM_PLUGIN_JSON
+        return (decky_restart_allowed() and (QAM_DIR / "plugin.json").read_text() == QAM_PLUGIN_JSON
                 and all(os.access(QAM_DIR / p, os.W_OK) for p in ("main.py", "dist", "dist/index.js", "package.json"))
                 and not os.access(QAM_DIR / "plugin.json", os.W_OK))   # plugin.json must stay locked
     except OSError:

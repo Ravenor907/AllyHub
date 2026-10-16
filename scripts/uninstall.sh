@@ -30,7 +30,7 @@ for r in /etc/udev/rules.d/99-allyhub-leds.rules /etc/udev/rules.d/99-allyhub-ch
          /etc/systemd/system/allyhub-zram.service /etc/allyhub/zram.sh \
          /etc/systemd/system/allyhub-lighting-perms.service /etc/allyhub/lighting-perms.sh \
          /etc/systemd/system/allyhub-edid.service /etc/allyhub/edid-override.sh /etc/allyhub/edid-144.bin \
-         /etc/polkit-1/rules.d/49-allyhub-decky.rules; do
+         /etc/polkit-1/rules.d/49-allyhub-decky.rules /etc/allyhub/decky-restart-allowed; do
     [ -f "$r" ] && RULES="$RULES $r"
 done
 QAM="$HOME/homebrew/plugins/AllyHub"          # Ally Hub's Quick Access panel (a Decky plugin, owned by root)

@@ -209,18 +209,99 @@ def write_helpers() -> Path:
     bindir = core.DATA_DIR / "bin"
     bindir.mkdir(parents=True, exist_ok=True)
     askpass = bindir / "allyhub-askpass"
+    # 1.5.0.7 (the owner: dark, higher up, keyboard by itself): ask Ally Hub's own window first (a dark panel near
+    # the top, Steam keyboard opens by itself); only a job Ally Hub started can (its one-time token). The plain
+    # system dialog stays as the fallback when the window can't answer.
     askpass.write_text(
         "#!/bin/sh\n"
+        "if [ -n \"$ALLYHUB_ASKPASS_TOKEN\" ] && command -v python3 >/dev/null 2>&1; then\n"
+        "  python3 -I \"$(dirname \"$0\")/allyhub-askpass.py\"\n"
+        "  rc=$?\n"
+        "  [ $rc -eq 0 ] && exit 0\n"
+        "  [ $rc -eq 2 ] && exit 1      # cancelled in Ally Hub: don't ask a second time\n"
+        "fi\n"
         "TASK=$(printf '%s' \"${ALLYHUB_TASK:-a task}\" | tr -cd 'A-Za-z0-9 .,:()+_-' | cut -c1-80)\n"
         "MSG=\"Ally Hub needs your password (sudo) for: $TASK\"\n"
         "if command -v kdialog >/dev/null 2>&1; then exec kdialog --title 'Ally Hub' --password \"$MSG\"\n"
         "elif command -v zenity >/dev/null 2>&1; then exec zenity --password --title='Ally Hub'\n"
         "fi\nexit 1\n")
+    (bindir / "allyhub-askpass.py").write_text(ASKPASS_CLIENT)
     shim = bindir / "sudo"
     shim.write_text("#!/bin/sh\nexec /usr/bin/sudo -A \"$@\"\n")
     for f in (askpass, shim):
         f.chmod(0o755)
     return bindir
+
+
+ASKPASS_CLIENT = r'''# Ally Hub's password prompt, client side: asks the Ally Hub window over its private socket. Exit 0 = the
+# password is on stdout; 2 = cancelled; 1 = the window couldn't answer (the caller falls back to a system dialog).
+import os, socket, sys
+path = os.environ.get("ALLYHUB_ASKPASS_SOCK") or os.path.expanduser("~/.local/share/allyhub/askpass.sock")
+try:
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.connect(path)
+    s.sendall((os.environ.get("ALLYHUB_ASKPASS_TOKEN", "") + "\n").encode())
+    f = s.makefile("rb")
+    s.settimeout(5)                    # the window answers at once: WAIT (it's asking) or NO; silence = frozen
+    first = f.readline().decode("utf-8", "replace").rstrip("\n")
+    if first != "WAIT":
+        sys.exit(1)
+    s.settimeout(None)                 # now the person is typing: take as long as they need
+    line = f.readline().decode("utf-8", "replace").rstrip("\n")
+except OSError:
+    sys.exit(1)
+if line.startswith("OK "):
+    sys.stdout.write(line[3:] + "\n")
+    sys.exit(0)
+sys.exit(2 if line == "CANCEL" else 1)
+'''
+
+
+class AskpassServer(QObject):
+    """The window side of the password prompt: answers only the job Ally Hub is running right now (its token), with
+    a dark panel near the top of the window and the Steam keyboard open (the owner, 1.5.0.7)."""
+
+    def __init__(self, hub):
+        super().__init__(hub)
+        from PySide6.QtNetwork import QLocalServer
+        self.hub = hub
+        self.path = str(core.DATA_DIR / "askpass.sock")
+        QLocalServer.removeServer(self.path)
+        self.server = QLocalServer(self)
+        self.server.setSocketOptions(QLocalServer.SocketOption.UserAccessOption)   # only this user can connect
+        self.ok = self.server.listen(self.path)
+        self.server.newConnection.connect(self._conn)
+
+    def _conn(self):
+        conn = self.server.nextPendingConnection()
+        if conn is None:
+            return
+        conn.readyRead.connect(lambda c=conn: self._ask(c))
+
+    def _ask(self, conn):
+        if not conn.canReadLine():
+            return
+        token = bytes(conn.readLine()).decode("utf-8", "replace").strip()
+        runner, hub = self.hub.runner, self.hub
+        ok = (token and runner.busy() and token == runner.token
+              and hub.isVisible() and getattr(hub, "_sheet", None) is None)   # never a separate window
+        if not ok:
+            conn.write(b"NO\n")                         # the plain dialog asks instead
+        else:
+            conn.write(b"WAIT\n")                       # "I'm asking": the client waits for the answer
+            conn.flush()
+            pw = ask_password(hub, runner.current[0] if runner.current else "a task")
+            from PySide6.QtNetwork import QLocalSocket
+            if token != runner.token or conn.state() != QLocalSocket.LocalSocketState.ConnectedState:
+                pass                                     # the job ended while the panel was open: drop it
+            elif pw is None:
+                conn.write(b"CANCEL\n")
+            else:
+                conn.write(b"OK " + pw.encode("utf-8") + b"\n")
+            pw = None
+        conn.flush()
+        conn.disconnectFromServer()
+        conn.deleteLater()
 
 
 class JobRunner(QObject):
@@ -231,7 +312,7 @@ class JobRunner(QObject):
 
     def __init__(self, bindir: Path):
         super().__init__()
-        self.queue, self.proc, self.current, self.tail = [], None, None, []
+        self.queue, self.proc, self.current, self.tail, self.token = [], None, None, [], None
         env = QProcessEnvironment.systemEnvironment()
         env.insert("PATH", f"{bindir}:{env.value('PATH', '/usr/bin:/bin')}")
         env.insert("SUDO_ASKPASS", str(bindir / "allyhub-askpass"))
@@ -272,6 +353,9 @@ class JobRunner(QObject):
         self.proc = QProcess(self)
         env = QProcessEnvironment(self.env)
         env.insert("ALLYHUB_TASK", label)        # the password prompt names the task asking (security review)
+        self.token = secrets.token_hex(16)        # only this job may ask Ally Hub's window for the password
+        env.insert("ALLYHUB_ASKPASS_TOKEN", self.token)
+        env.insert("ALLYHUB_ASKPASS_SOCK", str(core.DATA_DIR / "askpass.sock"))
         self.proc.setProcessEnvironment(env)
         self.proc.setWorkingDirectory(str(HOME))
         self.proc.setProcessChannelMode(QProcess.MergedChannels)
@@ -306,6 +390,7 @@ class JobRunner(QObject):
         if self.proc is None:
             return
         _label, key = self.current
+        self.token = None                        # its password token dies with the job
         self.output.emit(f"[{'done' if code == 0 else f'failed, exit code {code}'}]\n")
         if getattr(self, "log_file", None):
             try:
@@ -1555,7 +1640,7 @@ TAB_ICONS = {"Home": "activity", "Store": "store", "Games": "gamepad-2", "Custom
 _HUB = None          # the main window, set by Hub.__init__; dialogs open inside it
 
 
-def run_dialog(dlg) -> int:
+def run_dialog(dlg, top: bool = False) -> int:
     """Show a dialog as a panel inside the Ally Hub window, over a dimmed page, instead of a new window
     (the owner: no more extra windows). Falls back to a normal window if embedding isn't possible."""
     hub = _HUB
@@ -1588,7 +1673,8 @@ def run_dialog(dlg) -> int:
         dlg.setAttribute(Qt.WA_StyledBackground, True)
         dlg.setMaximumWidth(max(420, int(hub.width() * 0.8)))
         dlg.setMaximumHeight(max(300, int(hub.height() * 0.9)))
-        lay.addWidget(dlg, 0, Qt.AlignCenter)
+        # top: typing panels sit high so the Steam keyboard (bottom half of the screen) never covers them
+        lay.addWidget(dlg, 0, (Qt.AlignHCenter | Qt.AlignTop) if top else Qt.AlignCenter)
         overlay.show()
         overlay.raise_()
         hub._sheet = dlg
@@ -1758,16 +1844,25 @@ def ask_color(current, parent, title):
     return _Color(pick_color(parent, current.name() if hasattr(current, "name") else str(current), title))
 
 
-def ask_text(parent, title: str, prompt: str, text: str = "") -> tuple:
-    """Text input inside the window that brings up the Steam keyboard in Game Mode."""
+def ask_text(parent, title: str, prompt: str, text: str = "", password: bool = False) -> tuple:
+    """Text input inside the window, near the top so the Steam keyboard doesn't cover it; the keyboard opens by
+    itself in Game Mode."""
     dlg = QInputDialog(parent or _HUB)
     dlg.setWindowTitle(title)
     dlg.setLabelText(prompt)
     dlg.setTextValue(text)
+    if password:
+        dlg.setTextEchoMode(QLineEdit.Password)
     if GAMEMODE:
-        QTimer.singleShot(150, lambda: QDesktopServices.openUrl(QUrl("steam://open/keyboard")))
-    ok = run_dialog(dlg) == QDialog.Accepted
+        QTimer.singleShot(250, lambda: QDesktopServices.openUrl(QUrl("steam://open/keyboard")))
+    ok = run_dialog(dlg, top=True) == QDialog.Accepted
     return dlg.textValue(), ok
+
+
+def ask_password(parent, task: str):
+    """The sudo password, asked in Ally Hub's own dark panel (None when cancelled)."""
+    pw, ok = ask_text(parent, APP_NAME, f"Your password (sudo) for: {task}", password=True)
+    return pw if ok and pw else None
 
 
 def file_dialog_options():
@@ -7184,6 +7279,7 @@ class Hub(QMainWindow):
 
         self.gamepad = GamepadNav(self)
         self.touch_scroller = TouchScroller(QApplication.instance())
+        self.askpass = AskpassServer(self)
         self.apply_theme()
         self.apply_mode()
         self.update_setup_chip()
@@ -8458,6 +8554,7 @@ class Hub(QMainWindow):
         srv = getattr(self.app, "_instance_server", None)
         if srv is not None:
             srv.close()                                # let the new copy take over as the only instance
+        self.askpass.server.close()                    # before the new copy starts: closing later would delete its socket
         QProcess.startDetached(sys.executable, [str(core.APP_DIR / "allyhub.py")] + sys.argv[1:])
         self.app.quit()
 

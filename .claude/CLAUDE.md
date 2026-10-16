@@ -323,6 +323,13 @@ refuses if it's writable), main.py/dist/package.json become the user's, and `DEC
 restart/start plugin_loader.service only. The agent then updates an outdated panel itself when no game runs
 (`qam_update_nopw`). Checkup "Password prompts" → `Hub.allow_all` = one job for lighting, Game Boost and the panel.
 Security reviews: this is a deliberate, owner-approved trade-off; flag it only if plugin.json or the rule widen.
+**In-app password prompt (1.5.0.7, the owner asked: dark, higher up, keyboard by itself).** `allyhub-askpass` first
+runs `allyhub-askpass.py`, which asks the window's `AskpassServer` (QLocalServer `askpass.sock`, user-only) with the
+job's one-time token (`JobRunner.token`, env ALLYHUB_ASKPASS_TOKEN). The window answers WAIT then OK/CANCEL, or NO
+(not the current job, another sheet open, window hidden) and kdialog asks instead; 5 s of silence also falls back.
+The password is never logged. `run_dialog(top=True)` keeps typing panels above the keyboard. The Decky restart
+permission is detected by the marker `DECKY_POLKIT_MARK` (polkit's rules folder is root-only; pkcheck can't pass
+details as a user).
 1.5.0.4: `gh_request` retries GETs without the key on 401, 403 and 404 (a fine-grained report key may not be allowed
 to read contents: the owner got "Couldn't reach GitHub"). Update errors carry the HTTP status (`github_problem`).
 1.5.0.2 (reports #9-#18): the report key gets HTTP 403 on comments, so attachments go into the issue body
