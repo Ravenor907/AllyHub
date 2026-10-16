@@ -339,7 +339,6 @@ def service_active(name: str, user: bool = False) -> bool:
 REFRESH_SCRIPT = HOME / ".config/gamescope/scripts/90-allyhub-refresh.lua"
 REFRESH_STATE = DATA_DIR / "refresh_trial.json"
 REFRESH_MAX = 144            # one setting (the owner): the panel's range becomes 48-144 Hz
-REFRESH_STEPS = (REFRESH_MAX,)
 REFRESH_DISCLAIMER = ("Experimental: you may experience issues at 144 Hz. With adaptive sync (VRR) on you may see "
                       "skipped frames, and the touch screen may not respond. Made for Game Mode only for now.")
 REFRESH_CONFIRM_S = 90        # after Game Mode is back: time to pick the rate in Steam and press Keep
@@ -478,15 +477,6 @@ def _write_refresh_lua(text: str) -> None:
 
 def game_mode_active() -> bool:
     return service_active(GAME_MODE_UNIT.removesuffix(".service"), user=True)
-
-
-def restart_game_mode() -> None:
-    run_quiet(["systemctl", "--user", "reset-failed", GAME_MODE_UNIT])
-    try:
-        subprocess.Popen(["systemctl", "--user", "restart", GAME_MODE_UNIT], stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL, start_new_session=True)
-    except OSError:
-        pass
 
 
 def launch_self() -> bool:
@@ -1507,10 +1497,6 @@ class LedDevice:
     @property
     def name(self) -> str:
         return self.path.name
-
-    @property
-    def pretty(self) -> str:
-        return self.name.split(":")[-1].replace("_", " ").title()
 
 
 def find_leds() -> list:
@@ -4873,13 +4859,14 @@ def qam_install_cmd() -> str:
     return "sudo sh -c " + shlex.quote(inner) + ' && echo "Quick Access panel ready."'
 
 
-def allow_all_cmd(leds: list = None) -> Optional[str]:
-    """Everything Ally Hub needs a password for, in one prompt (the owner): lighting, Game Boost, and password-free
-    panel updates. Only the parts that are missing. None when nothing is."""
+def allow_all_cmd(leds: list = None, lighting: bool = False) -> Optional[str]:
+    """Everything Ally Hub needs a password for, in one prompt (the owner): lighting, Game Boost, the charge limit
+    and password-free panel updates. Only the parts that are missing (lighting=True always redoes lighting: a
+    stale rule file must never stop a retry). None when nothing is. The only permission path (1.5.0.18)."""
     cmds = []
     if leds is None:
         leds = [] if lighting_shelved() else find_leds()
-    if leds and not lighting_access_ok(leds):
+    if leds and (lighting or not lighting_access_ok(leds)):
         cmds.append(led_permission_cmd(leds))
     if epp_files() and not epp_writable():
         cmds.append(boost_permission_cmd())
