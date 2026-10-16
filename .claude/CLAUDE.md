@@ -23,7 +23,7 @@ move VERSION without making sure installed copies can still update.
 
 **Layout (1.4.0, the owner's call: "simple up front, complex under the hood", intuitive at a glance, customizable
 without feeling overwhelming).** `Hub.TABS`:
-- **Home:** Overview (`HealthPage`: notices, live tiles, then the Checkup (`DoctorPage.block`: only problems show,
+- **Home:** Overview (`HealthPage`: live tiles, then the Checkup (`DoctorPage.block`: only problems show,
   "Show all checks" for the rest; Update Guardian alerts show here only), then history) · Battery & sleep
   (`SleepPage` + `SystemPage.card_battery`) · Storage (`StoragePage` + `card_storage` "More cleanup": shader cache,
   unused app runtimes, launcher leftovers) · Setup (chip only until setup is done).
@@ -124,6 +124,10 @@ The store only shows UPDATE when its version is newer (`plugin_newer`).
 TouchGesture never fired. `TouchScroller` (app-wide event filter) drags the nearest scrollable area with a glide;
 it must only eat widget-level events (the QWindow-level copy carries Qt's button-down tracking) and leaves sliders,
 editable text, combos, TouchPad and FrameGraph alone. Scroll bar width is 40px.
+1.5.0.8 (the owner: still not scrolling): it also reads real QTouchEvents at the window level (never eaten, so Qt
+still turns taps into clicks) and skips Qt's mouse copy of a touch it follows; double-click presses count as presses
+(quick flicks); the first `LOG_GESTURES` gestures go to the log ("touch" lines: input kind, moves with the button
+down, distance). Read those lines in the next report before changing it again.
 
 **Controller scrolling:** `GamepadNav.move` scrolls the page by most of a screen when the next
 control is far away or missing (`_too_far`), so read-only content is reachable. Never scroll the window behind a dialog.
@@ -204,8 +208,7 @@ catalog item needs a working Remove (EmuDeck uses its own uninstall.sh).
 (`start_agent`), Ally Hub added to Game Mode (`core.add_to_steam`, steamos-add-to-steam), `setup.done = False`.
 The GUI then opens Home → Setup (`SetupPage`, steps redraw inside one page: welcome, password, Game Mode +
 helper, essentials the user picks, lighting (only with ring LEDs), favorites, reports (only when a report key is
-saved, i.e. the owner's device), done). Home shows "Finish setting up" (`core.setup_checklist`) until done or
-hidden. Existing installs default to `setup.done = True`. Keep every new first-time requirement in this flow.
+saved, i.e. the owner's device), done). Checkup lists what's left; Home has no notices of its own (1.5.0.8, one place per thing). Existing installs default to `setup.done = True`. Keep every new first-time requirement in this flow.
 **Sudo password (1.3.3, the owner hit a loop: setup reopened passwd after the password was set):** never trust a
 cached `state["password"]`. `Hub.refresh_password` re-checks (`passwd -S`; only NP/L/LK count as "none", anything
 unclear is None and never blocks), `needs_password` re-checks before asking and offers "Create a password" or
