@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.5.0.19
+
+- Lossless Scaling (LSFG-VK) and Decky Framegen now install the newest GitHub release every time, even if the
+  download is renamed. Installing them from the Decky plugin store uses that release too, not the store's older copy.
+- Their Store cards say UPDATE when a newer release is out (checked at most every 6 hours).
+
 ## 1.5.0.18
 
 - Every permission now goes through one "Allow all" job, so you get one password prompt, never one per feature.
