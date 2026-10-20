@@ -1547,9 +1547,10 @@ core.gh_request = _real_gh
 # ---- frame generation plugins: installed like Bazzite (latest stable GitHub release) ----
 import zipfile, stat as _st
 ls = core.CATALOG_BY_ID["lsfg"]; fg = core.CATALOG_BY_ID["framegen"]
-check("decky-lsfg-vk/releases/latest/download/Decky.LSFG-VK.zip" in ls.install
-      and "Decky-Framegen/releases/latest/download/Decky-Framegen.zip" in fg.install,
-      "frame gen plugins come from the latest stable GitHub release, like Bazzite")
+check("eugeniosegala/decky-lsfg-vk-experimental/releases?per_page=1" in ls.install
+      and "Decky-Framegen/releases?per_page=1" in fg.install
+      and "decky-lsfg-vk/releases/latest/download/Decky.LSFG-VK.zip" in ls.install,
+      "frame gen plugins come from the newest GitHub release, pre-releases included (LSFG: experimental fork)")
 check(ls.category == fg.category == "Game Mode plugins" and ls.requires == ("decky",), "listed under Mods with Decky")
 check(core.plugin_newer("0.14.4", "0.12.9") and not core.plugin_newer("0.12.2", "0.14.4")
       and not core.plugin_newer("0.14.4", "v0.14.4"), "the store never offers an older build as an update")
@@ -1573,8 +1574,8 @@ r = subprocess.run(["bash", "-c", ls.install], env=dict(os.environ, HOME=str(fh)
                    USER="deck"), capture_output=True, text=True)
 check(r.returncode == 0, "frame gen install runs: " + r.stderr[-300:])
 check(not old.exists() and (plugins / "Decky LSFG-VK" / "package.json").exists(),
-      "the old pre-release is replaced by the stable build, even under another folder name")
-check(exp.exists() and other.exists(), "other plugins (and the experimental fork) are left alone")
+      "an old copy is replaced, even under another folder name")
+check(not exp.exists() and other.exists(), "every older LSFG copy is replaced; other plugins are left alone")
 (fbin / "curl").write_text("#!/bin/sh\nexit 22\n")
 r = subprocess.run(["bash", "-c", ls.install], env=dict(os.environ, HOME=str(fh), PATH=f"{fbin}:{os.environ['PATH']}",
                    USER="deck"), capture_output=True, text=True)
