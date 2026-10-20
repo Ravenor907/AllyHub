@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.5.0.20
+
+- Lossless Scaling now installs the experimental version (decky-lsfg-vk-experimental) and replaces any older copy.
+- Decky Framegen installs its newest release, test versions included.
+
 ## 1.5.0.19
 
 - Lossless Scaling (LSFG-VK) and Decky Framegen now install the newest GitHub release every time, even if the

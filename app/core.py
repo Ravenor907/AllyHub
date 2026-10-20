@@ -2912,7 +2912,7 @@ def fetch_run(url: str, shell: str = "bash") -> str:
 # only/first .zip), and only github.com download links
 GITHUB_ZIP_PICK = (
     "import json,sys\n"
-    "try: a=json.load(sys.stdin).get('assets') or []\n"
+    "try:\n d=json.load(sys.stdin); d=d[0] if isinstance(d,list) and d else d; a=d.get('assets') or []\n"
     "except Exception: a=[]\n"
     "u=[x.get('browser_download_url','') for x in a if str(x.get('name','')).lower().endswith('.zip')]\n"
     "u=[x for x in u if x.startswith('https://github.com/')]\n"
@@ -2944,12 +2944,13 @@ def github_latest_refresh(repos, force: bool = False) -> bool:
         old = data.get(repo) if isinstance(data.get(repo), dict) else {}
         if not force and time.time() - float(old.get("checked", 0) or 0) < GITHUB_LATEST_TTL_S:
             continue
-        status, body = gh_request("GET", f"/repos/{repo}/releases/latest", timeout=10, auth=False)
+        status, body = gh_request("GET", f"/repos/{repo}/releases?per_page=1", timeout=10, auth=False)
         if status != 200:
             continue
         try:
-            tag = str(json.loads(body).get("tag_name") or "")
-        except ValueError:
+            rel = json.loads(body)
+            tag = str((rel[0] if isinstance(rel, list) and rel else {}).get("tag_name") or "")
+        except (ValueError, AttributeError):
             continue
         ver = tag.lstrip("vV")
         changed |= ver != old.get("version")
@@ -2976,18 +2977,19 @@ def newest_version(*versions: str) -> str:
     return max(vs, key=parse_version) if vs else ""
 
 
-def github_decky_install_cmd(repo: str, asset: str, plugin_names: tuple) -> str:
+def github_decky_install_cmd(repo: str, asset: str, plugin_names: tuple, fallback: str = "") -> str:
     """Install a Decky plugin the way Bazzite's ujust recipes do: the newest stable GitHub release
     (releases/latest never points at a pre-release). Any older copy, including a pre-release saved under
     another folder name, is removed first, but only after the download worked. Plugin settings live in
     ~/homebrew/settings, so they're kept."""
     # The newest release is looked up at install time (1.5.0.19, the owner: "pull the latest version every time"),
     # so a renamed zip still installs; the fixed releases/latest/download URL is only the fallback.
-    fallback = shlex.quote(f"https://github.com/{repo}/releases/latest/download/{asset}")
-    api = shlex.quote(f"https://api.github.com/repos/{repo}/releases/latest")
+    fallback = shlex.quote(fallback or f"https://github.com/{repo}/releases/latest/download/{asset}")
+    # newest release, pre-releases included (1.5.0.20, the owner: "experimental versions"); drafts never show here
+    api = shlex.quote(f"https://api.github.com/repos/{repo}/releases?per_page=1")
     pick = shlex.quote(GITHUB_ZIP_PICK)
     names = "|".join(re.escape(n) for n in plugin_names)
-    match = shlex.quote(f'"name"[[:space:]]*:[[:space:]]*"({names})"')
+    match = shlex.quote(f'"name"[[:space:]]*:[[:space:]]*"[^"]*({names})')    # any copy, experimental included
     return (
         'tmp=$(mktemp -d) && '
         f'url=$(curl -fsSL --proto =https --max-time 20 {api} | python3 -c {pick} {shlex.quote(asset)}) ; '
@@ -5540,8 +5542,11 @@ CATALOG = [
         "Doubles, triples or quadruples your frame rate in almost any game. The same build Bazzite "
         "installs: per-game profiles, a simple multiplier slider and launch options set for you.",
         "LS", "#8b5cf6",
-        github_decky_install_cmd("xXJSONDeruloXx/decky-lsfg-vk", "Decky.LSFG-VK.zip", ("Decky LSFG-VK",)),
-        ("lsfg",), github="xXJSONDeruloXx/decky-lsfg-vk",
+        # the experimental fork (the owner named it, 1.5.0.20); the stable repo's zip is only the fallback
+        github_decky_install_cmd("eugeniosegala/decky-lsfg-vk-experimental", "Decky.LSFG-VK.zip", ("LSFG",),
+                                 fallback="https://github.com/xXJSONDeruloXx/decky-lsfg-vk/releases/latest/download/"
+                                          "Decky.LSFG-VK.zip"),
+        ("lsfg",), github="eugeniosegala/decky-lsfg-vk-experimental",
         warn="Needs Lossless Scaling from Steam (paid), switched to its lsfg-vk beta branch. "
              "After installing, open the plugin once and tap Install lsfg-vk.",
     ),
