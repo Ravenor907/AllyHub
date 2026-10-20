@@ -119,6 +119,9 @@ add new icons from github.com/lucide-icons/lucide `icons/*.svg`.
 `releases/latest` asset (stable only, never pre-releases or the Decky store's older copy) via
 `github_decky_install_cmd`, which replaces older copies by plugin.json name only after the download worked.
 The store only shows UPDATE when its version is newer (`plugin_newer`).
+1.5.0.19 (the owner: "pull the latest version every time"): the install asks api.github.com for the latest release's
+zip (`GITHUB_ZIP_PICK`, github.com links only; fixed URL as fallback); `Item.github` + `github_latest_refresh`
+(6 h cache) show UPDATE on cards; store installs of these plugins route to the GitHub installer (`github_item_for`).
 
 **Touch scrolling (the owner: "like a smart phone"):** Game Mode delivers touches as mouse events, so QScroller's
 TouchGesture never fired. `TouchScroller` (app-wide event filter) drags the nearest scrollable area with a glide;

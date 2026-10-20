@@ -2869,6 +2869,7 @@ class Item:
     recommended: bool = False
     kind: str = "install"
     decky_names: tuple = ()
+    github: str = ""             # owner/repo when the plugin installs from its newest GitHub release (1.5.0.19)
 
 
 def flatpak_install_cmd(app_id: str) -> str:
@@ -2907,17 +2908,91 @@ def fetch_run(url: str, shell: str = "bash") -> str:
             f"&& {shell} < \"$t\" )")
 
 
+# reads a GitHub "latest release" reply on stdin, prints the zip to download (the expected name first, else the
+# only/first .zip), and only github.com download links
+GITHUB_ZIP_PICK = (
+    "import json,sys\n"
+    "try: a=json.load(sys.stdin).get('assets') or []\n"
+    "except Exception: a=[]\n"
+    "u=[x.get('browser_download_url','') for x in a if str(x.get('name','')).lower().endswith('.zip')]\n"
+    "u=[x for x in u if x.startswith('https://github.com/')]\n"
+    "p=[x for x in u if x.endswith('/'+sys.argv[1])]\n"
+    "print((p or u or [''])[0])\n"
+)
+GITHUB_LATEST_FILE = DATA_DIR / "plugin_latest.json"
+GITHUB_LATEST_TTL_S = 6 * 3600
+
+
+def github_latest_cached(repo: str) -> str:
+    """Newest release version of a GitHub plugin from the last check ("" when unknown). No network."""
+    try:
+        return str(json.loads(GITHUB_LATEST_FILE.read_text()).get(repo, {}).get("version", ""))
+    except (OSError, ValueError, AttributeError):
+        return ""
+
+
+def github_latest_refresh(repos, force: bool = False) -> bool:
+    """Look up the newest stable release of each repo (api.github.com, already used for updates). At most every
+    6 hours per repo. True when something changed."""
+    try:
+        data = json.loads(GITHUB_LATEST_FILE.read_text())
+        data = data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        data = {}
+    changed = False
+    for repo in repos:
+        old = data.get(repo) if isinstance(data.get(repo), dict) else {}
+        if not force and time.time() - float(old.get("checked", 0) or 0) < GITHUB_LATEST_TTL_S:
+            continue
+        status, body = gh_request("GET", f"/repos/{repo}/releases/latest", timeout=10, auth=False)
+        if status != 200:
+            continue
+        try:
+            tag = str(json.loads(body).get("tag_name") or "")
+        except ValueError:
+            continue
+        ver = tag.lstrip("vV")
+        changed |= ver != old.get("version")
+        data[repo] = {"version": ver, "checked": time.time()}
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        GITHUB_LATEST_FILE.write_text(json.dumps(data))
+    except OSError:
+        pass
+    return changed
+
+
+def github_item_for(plugin_name: str):
+    """The catalog item that installs this Decky store plugin from GitHub instead (newer than the store's copy)."""
+    n = (plugin_name or "").lower()
+    for i in CATALOG:
+        if i.github and any(k in n for k in i.decky_names):
+            return i
+    return None
+
+
+def newest_version(*versions: str) -> str:
+    vs = [v for v in versions if v]
+    return max(vs, key=parse_version) if vs else ""
+
+
 def github_decky_install_cmd(repo: str, asset: str, plugin_names: tuple) -> str:
     """Install a Decky plugin the way Bazzite's ujust recipes do: the newest stable GitHub release
     (releases/latest never points at a pre-release). Any older copy, including a pre-release saved under
     another folder name, is removed first, but only after the download worked. Plugin settings live in
     ~/homebrew/settings, so they're kept."""
-    url = shlex.quote(f"https://github.com/{repo}/releases/latest/download/{asset}")
+    # The newest release is looked up at install time (1.5.0.19, the owner: "pull the latest version every time"),
+    # so a renamed zip still installs; the fixed releases/latest/download URL is only the fallback.
+    fallback = shlex.quote(f"https://github.com/{repo}/releases/latest/download/{asset}")
+    api = shlex.quote(f"https://api.github.com/repos/{repo}/releases/latest")
+    pick = shlex.quote(GITHUB_ZIP_PICK)
     names = "|".join(re.escape(n) for n in plugin_names)
     match = shlex.quote(f'"name"[[:space:]]*:[[:space:]]*"({names})"')
     return (
         'tmp=$(mktemp -d) && '
-        f'curl -fL --proto =https --proto-redir =https -o "$tmp/p.zip" {url} && '
+        f'url=$(curl -fsSL --proto =https --max-time 20 {api} | python3 -c {pick} {shlex.quote(asset)}) ; '
+        f'[ -n "$url" ] || url={fallback} ; echo "Downloading $url" && '
+        'curl -fL --proto =https --proto-redir =https -o "$tmp/p.zip" "$url" && '
         'python3 -m zipfile -e "$tmp/p.zip" "$tmp/out" && '
         'ls -d "$tmp/out"/*/ >/dev/null && '
         'sudo mkdir -p "$HOME/homebrew/plugins" && '
@@ -5414,12 +5489,12 @@ def decky_version(item, state: dict) -> str:
 
 
 def decky_plugin_item(id, name, desc, monogram, color, install, names, warn="",
-                      recommended=False) -> Item:
+                      recommended=False, github: str = "") -> Item:
     return Item(
         id=id, name=name, category="Game Mode plugins", desc=desc, monogram=monogram,
         color=color, install=install, check=lambda s, n=names: bool(decky_match(n, s)),
         uninstall="decky", warn=warn, requires=("decky",), recommended=recommended,
-        decky_names=names,
+        decky_names=names, github=github,
     )
 
 
@@ -5466,7 +5541,7 @@ CATALOG = [
         "installs: per-game profiles, a simple multiplier slider and launch options set for you.",
         "LS", "#8b5cf6",
         github_decky_install_cmd("xXJSONDeruloXx/decky-lsfg-vk", "Decky.LSFG-VK.zip", ("Decky LSFG-VK",)),
-        ("lsfg",),
+        ("lsfg",), github="xXJSONDeruloXx/decky-lsfg-vk",
         warn="Needs Lossless Scaling from Steam (paid), switched to its lsfg-vk beta branch. "
              "After installing, open the plugin once and tap Install lsfg-vk.",
     ),
@@ -5477,7 +5552,7 @@ CATALOG = [
         "OS", "#0ea5e9",
         github_decky_install_cmd("xXJSONDeruloXx/Decky-Framegen", "Decky-Framegen.zip",
                                  ("Decky-Framegen", "Decky Framegen")),
-        ("framegen",),
+        ("framegen",), github="xXJSONDeruloXx/Decky-Framegen",
         warn="Large download (about 190 MB). Works only in games with DLSS, FSR or XeSS.",
     ),
     decky_plugin_item(
@@ -6831,7 +6906,8 @@ VERSION_RE = r"\d+\.\d+\.\d+(?:\.\d+)?"      # 6.3.6 (Stable) or 6.3.6.4 (test b
 def plugin_newer(latest: str, installed: str) -> bool:
     """True only when the store's version is really newer, so the store never "updates" a newer build
     (like the GitHub release Ally Hub installs for frame generation) down to its older copy."""
-    return parse_version(latest) > parse_version(installed)
+    # "0.12.2-781ab64": the part after "-" is a build hash, not a version
+    return parse_version(str(latest or "").split("-")[0]) > parse_version(str(installed or "").split("-")[0])
 
 
 # Public version numbers. The VERSION file is the updater's build number and must only ever go up,

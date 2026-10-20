@@ -2012,19 +2012,24 @@ class ItemCard(QFrame):
         self._installed = installed
         self.btn_toggle.setText("Turn on" if self.off else "Turn off")
         self.btn_toggle.setEnabled(not queued)
+        # GitHub plugins: the newest release from the last check (no network here), so the card can say UPDATE
+        latest = core.github_latest_cached(self.item.github) if self.item.github else ""
+        upd = bool(installed and version and latest and core.plugin_newer(latest, version))
         if queued:
             set_pill(self.pill, "WORKING…", "busy")
         elif installed and self.off:
             set_pill(self.pill, "TURNED OFF", "off")
         elif self.item.kind == "run":
             set_pill(self.pill, "TOOL", "tool")
+        elif upd:
+            set_pill(self.pill, f"UPDATE {version.lstrip('v')} → {latest}", "update")
         elif installed:
             set_pill(self.pill, f"INSTALLED · v{version.lstrip('v')}" if version else "INSTALLED", "on")
         else:
             set_pill(self.pill, "NOT INSTALLED", "off")
         if self.item.kind != "run":
-            self.btn_install.setText("Reinstall / Update" if installed else "Install")
-            self.btn_install.setObjectName("" if installed else "primary")
+            self.btn_install.setText("Update" if upd else "Reinstall / Update" if installed else "Install")
+            self.btn_install.setObjectName("" if installed and not upd else "primary")
             repolish(self.btn_install)
         self.btn_install.setEnabled(not queued and not missing_reqs)
         self.btn_install.setToolTip("Install first: " + ", ".join(missing_reqs) if missing_reqs else "")
@@ -2168,6 +2173,7 @@ class BrowsePage(QWidget):
 
     def refresh(self):
         self.set_filter(self.filter or "essentials")
+        self.hub.refresh_plugin_latest()
 
 
 class StatTile(QFrame):
@@ -2309,7 +2315,10 @@ class StoreRow(QFrame):
         h.addLayout(btns)
 
     def update_state(self, installed: Optional[dict], queued: bool, decky_ok: bool, off: bool = False):
-        latest = core.store_latest_version(self.plugin) or {}
+        latest = dict(core.store_latest_version(self.plugin) or {})
+        gi = core.github_item_for(self.plugin.get("name", ""))
+        if gi:          # installs from GitHub (newer than the store's copy), so compare with that
+            latest["name"] = core.newest_version(core.github_latest_cached(gi.github), latest.get("name", ""))
         self.off = bool(off)
         self.btn_toggle.setVisible(False)                # turning plugins off lives under Store → Installed
         self.btn_toggle.setText("Turn on" if self.off else "Turn off")
@@ -2408,6 +2417,7 @@ class StorePage(QWidget):
         self.ensure_loaded()
 
     def ensure_loaded(self):
+        self.hub.refresh_plugin_latest()
         if self.plugins or self.loading:
             return
         self.loading = True
@@ -8344,6 +8354,21 @@ class Hub(QMainWindow):
             self.runner.submit(f"{verb} {item.name}", item.install, iid)
         self.update_cards()
 
+    def refresh_plugin_latest(self):
+        """Newest GitHub release of the plugins that install from GitHub (checked at most every 6 hours)."""
+        if getattr(self, "_latest_busy", False):
+            return
+        repos = [i.github for i in CATALOG if i.github]
+        if not repos:
+            return
+        self._latest_busy = True
+
+        def done(changed):
+            self._latest_busy = False
+            if changed:
+                self.update_cards()
+        BackgroundTask(self, lambda: core.github_latest_refresh(repos), done)
+
     def on_store_action(self, plugin: dict, action: str):
         name = plugin.get("name", "plugin")
         key = "store:" + name
@@ -8360,6 +8385,11 @@ class Hub(QMainWindow):
                 return
             self.runner.submit(f"Removing {name}", core.decky_remove_cmd([info["dir"]]), key)
         else:
+            gi = core.github_item_for(name)
+            if gi:                                       # the newest GitHub release, not the store's older copy
+                self.runner.submit(f"Installing plugin {name}", gi.install, key)
+                self.update_cards()
+                return
             url = core.store_artifact_url(plugin)
             if not url:
                 msg_warn(self, APP_NAME, f"{name} has no downloadable release.")
@@ -8449,6 +8479,10 @@ class Hub(QMainWindow):
             def queue_plugins(plugins):
                 for p in plugins:
                     if (p.get("name") or "").lower() in wanted:
+                        gi = core.github_item_for(p.get("name", ""))
+                        if gi:
+                            self.runner.submit(f"Installing plugin {p['name']}", gi.install, "store:" + p["name"])
+                            continue
                         url = core.store_artifact_url(p)
                         if url:
                             self.runner.submit(f"Installing plugin {p['name']}",
