@@ -1597,6 +1597,14 @@ check(subprocess.run(["bash", "-n", "-c", _pt.split("Exec=", 1)[1]]).returncode 
 core.SHORTCUT_MODE_FILE = fh / "shortcut_mode"
 core.set_shortcut_mode("steam"); check(core.shortcut_mode() == "steam", "shortcut mode saved")
 core.set_shortcut_mode(""); check(core.shortcut_mode() == "" and not core.SHORTCUT_MODE_FILE.exists(), "ask-once clears the saved choice")
+# stale desktop shortcuts (launcher removed) are leftovers; live ones are not
+_live = fh / "drive_c/Battle.net/Battle.net.exe"; _live.parent.mkdir(parents=True); _live.write_text("")
+(core.APPLICATIONS_DIR / "Live.desktop").write_text("[Desktop Entry]\n" + _ask.replace("umu-run x", f"umu-run {_live}"))
+(core.APPLICATIONS_DIR / "Gone.desktop").write_text("[Desktop Entry]\n" + _ask.replace("umu-run x", f"umu-run {fh}/drive_c/Gone/Gone.exe"))
+_stale = core.stale_nsl_shortcuts()
+check([p.name for p in _stale] == ["Gone.desktop"], "only shortcuts whose program is gone count as leftovers")
+check(core.nsl_clean_cmd(_stale) and "Gone.desktop" in core.nsl_clean_cmd(_stale)
+      and core.nsl_clean_cmd([fh / "Other.txt"]) is None, "cleanup deletes stale shortcuts and nothing else")
 # ---- keep current (1.5.0.23): one registry for everything installed through Ally Hub ----
 _fu = core.flatpak_updates
 core.flatpak_updates = lambda: ["com.heroicgameslauncher.hgl"]

@@ -4109,6 +4109,37 @@ def nsl_leftovers() -> list:
         old = sorted(f.glob("*"), key=lambda p: p.stat().st_mtime)[:-3]       # keep the newest 3
         for p in old:
             out.append({"label": "Old shortcut backup", "path": p, "size": _du(p), "warn": ""})
+    for p in stale_nsl_shortcuts():
+        out.append({"label": f"Desktop shortcut: {p.stem}", "path": p, "size": _du(p), "warn": ""})
+    return out
+
+
+def stale_nsl_shortcuts() -> list:
+    """NSL desktop files (applications folder + desktop links) whose standalone program is gone, i.e. the
+    launcher was removed (1.5.0.24). A file counts as NSL's by its question line; its exe is any
+    /drive_c/... path in the Exec line."""
+    out = []
+    for folder in (APPLICATIONS_DIR, HOME / "Desktop"):
+        try:
+            files = list(folder.glob("*.desktop")) if folder.exists() else []
+        except OSError:
+            continue
+        for p in files:
+            try:
+                text = p.read_text(errors="replace") if not p.is_symlink() else ""
+                target = p.resolve() if p.is_symlink() else None
+                if target is not None:
+                    text = target.read_text(errors="replace") if target.exists() else ""
+                    if not text and not target.exists():
+                        out.append(p)                  # dangling link to a removed NSL file
+                        continue
+            except OSError:
+                continue
+            if "Standalone or with Steam?" not in text:
+                continue
+            exes = re.findall(r'(/[^\s"\']*?/drive_c/[^\s"\']*?\.exe)', text, flags=re.I)
+            if exes and not any(Path(e).exists() for e in exes):
+                out.append(p)
     return out
 
 
@@ -4117,7 +4148,9 @@ def nsl_clean_cmd(paths: list) -> Optional[str]:
     home = str(HOME) + "/"
     safe = [str(p) for p in paths if str(p).startswith(home) and str(p) != str(HOME)
             and (str(p).startswith(str(COMPATDATA) + "/") or str(p).startswith(str(NSL_USER_DIR) + "/")
-                 or str(p).startswith(str(NSL_DOWNLOADS)) or "/shortcuts.vdf_backups/" in str(p))]
+                 or str(p).startswith(str(NSL_DOWNLOADS)) or "/shortcuts.vdf_backups/" in str(p)
+                 or (str(p).endswith(".desktop") and (str(p).startswith(str(APPLICATIONS_DIR) + "/")
+                                                      or str(p).startswith(str(HOME / "Desktop") + "/"))))]
     if not safe:
         return None
     parts = []

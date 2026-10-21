@@ -4773,29 +4773,33 @@ class LaunchersPage(QWidget):
             if r.get("removed") is None:
                 parts.append("Steam's connection for plugins is off, so remove the tiles yourself: select one in "
                              "your library, press the menu button, then Manage → Remove non-Steam game.")
-            msg_info(self, APP_NAME, "\n\n".join(parts) if parts else
-                                    "Removed: " + ", ".join(names) + ". To free the space they used: Home → "
-                                                                     "Storage → Find launcher leftovers.")
+            if parts:
+                msg_info(self, APP_NAME, "\n\n".join(parts))
+                return
+            self.hub.toast("Removed " + ", ".join(names) + " ✔")
+            self.find_leftovers(after=", ".join(names))   # one flow (1.5.0.24): the leftovers come up right away
         BackgroundTask(self, remove, done)
 
     # ---- leftovers ----
-    def find_leftovers(self):
+    def find_leftovers(self, *_args, after: str = ""):
         self.btn_clean.setEnabled(False)
         self.btn_clean.setText("Looking…")
-        BackgroundTask(self, core.nsl_leftovers, self._show_leftovers)
+        BackgroundTask(self, core.nsl_leftovers, lambda items: self._show_leftovers(items, after))
 
-    def _show_leftovers(self, items):
+    def _show_leftovers(self, items, after: str = ""):
         self.btn_clean.setEnabled(True)
         self.btn_clean.setText("Find launcher leftovers")
         if not isinstance(items, list) or not items:
-            msg_info(self, APP_NAME, "Nothing left over. All clean ✔")
+            if not after:
+                msg_info(self, APP_NAME, "Nothing left over. All clean ✔")
             return
         dlg = QDialog(self)
         dlg.setWindowTitle("Leftover data")
         dv = QVBoxLayout(dlg)
         dv.setContentsMargins(24, 20, 24, 20)
-        dv.addWidget(label(f"Found {core.human_size(sum(i['size'] for i in items))} you can free up. "
-                           "Untick anything you want to keep.", "cardDesc", wrap=True))
+        dv.addWidget(label((f"{after} removed. " if after else "") +
+                           f"Found {core.human_size(sum(i['size'] for i in items))} left behind that you can "
+                           "free up. Untick anything you want to keep.", "cardDesc", wrap=True))
         boxes = []
         for it in items:
             cb = QCheckBox(f"{it['label']}  ({core.human_size(it['size'])})")
@@ -8271,6 +8275,8 @@ class Hub(QMainWindow):
             self.launchers.uninstall_done(code == 0)
         elif key == "nsl-clean":
             self.launchers.refresh()
+            if code == 0:
+                self.toast("Leftovers cleaned ✔")
         elif key == "storage-clean":
             self.storage.job_done(code == 0)
         elif key == "sleep-nowake":

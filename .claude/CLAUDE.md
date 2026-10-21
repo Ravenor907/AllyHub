@@ -186,7 +186,8 @@ NSL bakes a kdialog "Standalone or with Steam?" into every .desktop Exec and its
 (1.5.0.24, the owner: remember the answer): `patch_nsl_shortcuts` rewrites that block (`_NSL_ASK_RE`) to read
 `SHORTCUT_MODE_FILE` first and save the first answer; the agent re-patches every guardian pass, the Launchers page
 on refresh, and "Desktop shortcuts open with" sets or clears the file (`SHORTCUT_MODES`).
-Leftovers: `nsl_leftovers` / `nsl_clean_cmd` (home-folder paths only; the shared prefix only when no store is
+1.5.0.25: `uninstall_done` goes straight to `find_leftovers(after=...)`; `stale_nsl_shortcuts` (NSL .desktop files
+whose drive_c exe is gone, dangling desktop links) are leftovers too. Leftovers: `nsl_leftovers` / `nsl_clean_cmd` (home-folder paths only; the shared prefix only when no store is
 left in it, unticked by default because games live there). Battle.net through Launchers still needs the
 owner's confirmation that it shows up in Game Mode.
 
