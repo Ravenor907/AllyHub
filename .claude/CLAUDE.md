@@ -182,6 +182,10 @@ makes shortcuts.vdf exist and executable (the scanner WIPES a non-executable one
 same shortcut NSL would (`nsl_shortcut_spec`) via SteamClient.Apps over Steam's local CEF debugger
 (127.0.0.1:8080, opened by Decky; stdlib websocket in core, localhost only). Web picks must also pass "Google
 Chrome" to NSL. Uninstall = NSL "Uninstall <name>" args (Ubisoft is "Uplay") + `cef_remove_shortcuts`.
+NSL bakes a kdialog "Standalone or with Steam?" into every .desktop Exec and its scanner rewrites them on each run
+(1.5.0.24, the owner: remember the answer): `patch_nsl_shortcuts` rewrites that block (`_NSL_ASK_RE`) to read
+`SHORTCUT_MODE_FILE` first and save the first answer; the agent re-patches every guardian pass, the Launchers page
+on refresh, and "Desktop shortcuts open with" sets or clears the file (`SHORTCUT_MODES`).
 Leftovers: `nsl_leftovers` / `nsl_clean_cmd` (home-folder paths only; the shared prefix only when no store is
 left in it, unticked by default because games live there). Battle.net through Launchers still needs the
 owner's confirmation that it shows up in Game Mode.

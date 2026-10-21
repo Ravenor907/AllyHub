@@ -1582,6 +1582,21 @@ r = subprocess.run(["bash", "-c", ls.install], env=dict(os.environ, HOME=str(fh)
 check(r.returncode != 0 and (plugins / "Decky LSFG-VK").exists(), "a failed download keeps the installed plugin")
 check(core.decky_version(ls, {"decky": {"decky lsfg-vk": {"dir": str(plugins / "Decky LSFG-VK"), "version": "0.14.4"}}})
       == "0.14.4", "the card shows the installed version")
+# ---- NSL desktop shortcuts remember "Standalone or with Steam?" (1.5.0.24) ----
+_ask = ('Exec=sh -c \'if command -v kdialog >/dev/null; then CHOICE=$(kdialog --yesno "Standalone or with Steam?" '
+        '--yes-label "UMU + Battle.net" --no-label "Steam"); exit_code=$?; if [ $exit_code -eq 2 ]; then exit 0; fi; '
+        'if [ $exit_code -eq 0 ]; then CHOICE=battle.net; elif [ $exit_code -eq 1 ]; then CHOICE=steam; fi; else CHOICE=steam; fi; '
+        'if [ "$CHOICE" = "steam" ]; then steam steam://rungameid/1; else umu-run x; fi\'\n')
+core.APPLICATIONS_DIR = fh / "applications"; core.APPLICATIONS_DIR.mkdir()
+(core.APPLICATIONS_DIR / "Battle.net.desktop").write_text("[Desktop Entry]\n" + _ask)
+(core.APPLICATIONS_DIR / "Other.desktop").write_text("[Desktop Entry]\nExec=steam steam://rungameid/2\n")
+check(core.patch_nsl_shortcuts() == 1 and core.patch_nsl_shortcuts() == 0, "NSL shortcuts patched once, others untouched")
+_pt = (core.APPLICATIONS_DIR / "Battle.net.desktop").read_text()
+check("shortcut_mode" in _pt and 'CHOICE=battle.net' in _pt and "steam://rungameid/1" in _pt, "patched Exec reads the saved choice and keeps both launch paths")
+check(subprocess.run(["bash", "-n", "-c", _pt.split("Exec=", 1)[1]]).returncode == 0, "patched Exec is valid shell")
+core.SHORTCUT_MODE_FILE = fh / "shortcut_mode"
+core.set_shortcut_mode("steam"); check(core.shortcut_mode() == "steam", "shortcut mode saved")
+core.set_shortcut_mode(""); check(core.shortcut_mode() == "" and not core.SHORTCUT_MODE_FILE.exists(), "ask-once clears the saved choice")
 # ---- keep current (1.5.0.23): one registry for everything installed through Ally Hub ----
 _fu = core.flatpak_updates
 core.flatpak_updates = lambda: ["com.heroicgameslauncher.hgl"]

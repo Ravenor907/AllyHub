@@ -3012,6 +3012,87 @@ def github_decky_install_cmd(repo: str, asset: str, plugin_names: tuple, fallbac
     )
 
 
+# ---------- Desktop shortcuts from NonSteamLaunchers: remember "Standalone or with Steam?" (1.5.0.24) ----------
+# NSL writes every launcher/game .desktop file with a kdialog question baked into its Exec line and its scanner
+# rewrites those files on every run, so the question comes back every time (the owner). Ally Hub patches the
+# Exec line to read a saved choice first: SHORTCUT_MODE_FILE holds "standalone" or "steam"; empty = ask once and
+# save the answer. The agent re-patches whenever NSL rewrites the files.
+SHORTCUT_MODE_FILE = CONFIG_DIR / "shortcut_mode"
+SHORTCUT_MODES = (("", "Ask once, then remember"), ("standalone", "Standalone (no Steam)"), ("steam", "Steam"))
+APPLICATIONS_DIR = HOME / ".local/share/applications"
+_NSL_ASK_RE = re.compile(
+    r'if command -v kdialog >/dev/null; then CHOICE=\$\(kdialog --yesno "Standalone or with Steam\?" '
+    r'--yes-label "UMU \+ (?P<label>[^"]+)" --no-label "Steam"\); exit_code=\$\?; '
+    r'if \[ \$exit_code -eq 2 \]; then exit 0; fi; if \[ \$exit_code -eq 0 \]; then CHOICE=(?P<val>[^;]+); '
+    r'elif \[ \$exit_code -eq 1 \]; then CHOICE=steam; fi; else CHOICE=steam; fi;')
+_SHORTCUT_MARK = "ALLYHUB_MODE"
+
+
+def shortcut_mode() -> str:
+    try:
+        v = SHORTCUT_MODE_FILE.read_text().strip()
+    except OSError:
+        return ""
+    return v if v in ("standalone", "steam") else ""
+
+
+def set_shortcut_mode(mode: str) -> None:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    if mode in ("standalone", "steam"):
+        SHORTCUT_MODE_FILE.write_text(mode + "\n")
+    else:
+        try:
+            SHORTCUT_MODE_FILE.unlink()
+        except OSError:
+            pass
+
+
+def _shortcut_patch(m) -> str:
+    """The same question, asked only while no choice is saved; the answer is saved (no single quotes: the Exec line
+    sits inside sh -c '...')."""
+    f = "$HOME/.config/allyhub/shortcut_mode"
+    label, val = m.group("label"), m.group("val")
+    return (f'{_SHORTCUT_MARK}=$(cat "{f}" 2>/dev/null); '
+            f'if [ "${_SHORTCUT_MARK}" = steam ]; then CHOICE=steam; '
+            f'elif [ "${_SHORTCUT_MARK}" = standalone ]; then CHOICE={val}; '
+            f'elif command -v kdialog >/dev/null; then '
+            f'CHOICE=$(kdialog --yesno "Standalone or with Steam? (Ally Hub remembers your answer)" '
+            f'--yes-label "UMU + {label}" --no-label "Steam"); exit_code=$?; '
+            f'if [ $exit_code -eq 2 ]; then exit 0; fi; '
+            f'if [ $exit_code -eq 0 ]; then CHOICE={val}; echo standalone > "{f}"; '
+            f'elif [ $exit_code -eq 1 ]; then CHOICE=steam; echo steam > "{f}"; fi; '
+            f'else CHOICE=steam; fi;')
+
+
+def patch_shortcut_text(content: str) -> Optional[str]:
+    """The .desktop text with the question replaced, or None when there's nothing to do."""
+    if _SHORTCUT_MARK in content or "Standalone or with Steam?" not in content:
+        return None
+    new, n = _NSL_ASK_RE.subn(_shortcut_patch, content)
+    return new if n else None
+
+
+def patch_nsl_shortcuts() -> int:
+    """Patch every NSL desktop file (applications folder; the desktop holds links to them). Returns how many."""
+    done = 0
+    try:
+        files = list(APPLICATIONS_DIR.glob("*.desktop")) if APPLICATIONS_DIR.exists() else []
+    except OSError:
+        return 0
+    for p in files:
+        try:
+            if p.is_symlink():
+                continue
+            new = patch_shortcut_text(p.read_text(errors="replace"))
+            if new is None:
+                continue
+            p.write_text(new)
+            done += 1
+        except OSError:
+            continue
+    return done
+
+
 # ---------- NonSteamLaunchers, driven from Ally Hub's own page ----------
 # NSL's script installs launchers silently when given their names as arguments (its Decky plugin's method).
 # A stand-in `zenity` turns its windows into Activity log lines and answers "no" to questions.

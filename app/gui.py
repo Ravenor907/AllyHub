@@ -4445,6 +4445,17 @@ class LaunchersPage(QWidget):
         v.addLayout(row)
         self.status = label("", "cardMeta", wrap=True)
         v.addWidget(self.status)
+        # desktop shortcuts (1.5.0.24, the owner): NSL asks "Standalone or with Steam?" on every launch
+        mrow = QHBoxLayout()
+        mrow.addWidget(label("Desktop shortcuts open with", "cardDesc"))
+        self.mode_box = QComboBox()
+        for val, text in core.SHORTCUT_MODES:
+            self.mode_box.addItem(text, val)
+        self.mode_box.setProperty("padCycle", False)
+        self.mode_box.activated.connect(self.set_shortcut_mode)
+        mrow.addWidget(self.mode_box)
+        mrow.addStretch()
+        v.addLayout(mrow)
 
         v.addWidget(label("LIBRARY ART", "section"))
         ac, av = titled_card("images", "#8b5cf6", "Library art",
@@ -4478,7 +4489,14 @@ class LaunchersPage(QWidget):
         for cb in self.checks.values():
             cb.setChecked(False)
 
+    def set_shortcut_mode(self, idx: int):
+        core.set_shortcut_mode(self.mode_box.itemData(idx) or "")
+        core.patch_nsl_shortcuts()
+        self.hub.toast("Saved ✔" if self.mode_box.itemData(idx) else "Shortcuts will ask once more, then remember ✔")
+
     def refresh(self):
+        core.patch_nsl_shortcuts()
+        self.mode_box.setCurrentIndex(max(0, [v for v, _ in core.SHORTCUT_MODES].index(core.shortcut_mode())))
         have = [n for n in core.NSL_NAMES if core.nsl_installed(n)]
         for name, cb in self.checks.items():
             cb.setText(f"{name}  ✔" if name in have else name)

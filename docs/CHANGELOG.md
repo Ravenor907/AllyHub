@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.5.0.24
+
+- Desktop shortcuts for launchers and their games (Battle.net, Epic, GOG...) no longer ask "Standalone or with
+  Steam?" every time. The first answer is remembered; change it under Store → Launchers ("Desktop shortcuts open with").
+
 ## 1.5.0.23
 
 - Everything installed through Ally Hub now keeps up with what's current: apps from Flathub, Decky plugins (store or
