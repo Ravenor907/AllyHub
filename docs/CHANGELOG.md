@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.5.0.25
+
+- Removing a launcher is one flow now: after it's gone, Ally Hub shows what it left behind (prefixes, downloads,
+  desktop shortcuts) with sizes, and one tap deletes it. No trip to Storage needed.
+- Leftover desktop shortcuts for removed launchers and their games are found and cleaned up too.
+
 ## 1.5.0.24
 
 - Desktop shortcuts for launchers and their games (Battle.net, Epic, GOG...) no longer ask "Standalone or with
