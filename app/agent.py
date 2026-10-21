@@ -1059,6 +1059,9 @@ class Agent:
         if changes:
             self.cfg = core.update_config(lambda c: c["guardian"].update(changes))
             self.cfg_mtime = core.CONFIG_FILE.stat().st_mtime
+        n = core.patch_nsl_shortcuts()        # NSL rewrites its desktop files; keep the remembered choice in them
+        if n:
+            log(f"desktop shortcuts: {n} patched to remember Standalone or Steam")
         snaps = sorted(SNAP_DIR.glob("settings-*.tar.gz"))
         if not snaps or now - snaps[-1].stat().st_mtime > 86400:
             try:
