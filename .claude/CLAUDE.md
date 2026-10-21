@@ -372,6 +372,17 @@ below that the agent streams the same rainbow spiral (owner: 1.4.1.12 still didn
 also installs `allyhub-lighting-perms.service` (`LIGHT_PERMS_SCRIPT`/`LIGHT_PERMS_UNIT`), run at boot, after sleep and
 by the leds udev rule (`SYSTEMD_WANTS`). The uninstaller removes it.
 
+**Keep current (1.5.0.23, the owner: "timeless": nothing pinned inside, everything installed through Ally Hub tracks
+what's current).** Never hardcode a version or a release tag: installers fetch what's newest at tap time, and
+`core.update_registry(state, store, refresh)` is the ONE place that knows installed vs newest for everything (Flatpak
+`remote-ls --updates`; Decky plugins with `Item.github` via `github_latest_refresh`; store plugins via the cached store
+list `STORE_CACHE`; Tailscale via `TAILSCALE_REPO`). Each entry has `cmd` + `needs_root`. Password-free in-place update
+(`decky_store_update_nopw_cmd` / `github_update_nopw_cmd`) only for plugin folders that are entirely the user's
+(`_user_writable_tree`; both installers `chown -R $USER` on install) plus the Decky restart permission from Allow all;
+everything else waits for the Checkup "Updates" row → `Hub.update_all` (one job `update-all`, one password). The agent's
+`keep_current` applies the password-free ones daily when no game runs (`config.updates.keep_current`, default on;
+`KEEP_CURRENT_FILE`). Store → Installed has the same Update all. Add every new install source to the registry.
+
 **Wording rules (1.5.0.21, the owner: consistent and intuitive):** Remove for anything installed (Delete only for
 files and the user's own effects); Refresh for lists, Check again for checks; "Decky Loader" in full; "Allow all (one
 password)" on every permission button; "Quick Access (the ••• button)" on first mention, then "Quick Access";

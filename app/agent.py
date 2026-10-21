@@ -997,6 +997,40 @@ class Agent:
             tmp.write_text("".join(json.dumps(r) + "\n" for r in keep))
             os.replace(tmp, core.HEALTH_FILE)
 
+    def keep_current(self, now: float):
+        """1.5.0.23 (the owner: "keeps up by default"): once a day, when no game runs, apply the updates that need no
+        password (Flatpak apps; Decky plugins Ally Hub installed, whose folders are the user's, with the Decky
+        restart permission from Allow all). What needs a password waits for the Checkup's Update all."""
+        if self.game or not self.cfg.get("updates", {}).get("keep_current", True):
+            return
+        st = core.keep_current_state()
+        if now - float(st.get("last", 0) or 0) < 86400 or not core.internet_ok():
+            return
+        st["last"] = now
+        core.keep_current_save(st)
+        with core.keep_current_lock() as got:      # never at the same time as the window's Update all
+            if not got:
+                return
+            core.store_cache_refresh()
+            ups = core.update_registry(refresh=True)
+            done, skipped = [], [u["name"] for u in ups if u["needs_root"]]
+            for u in ups:
+                if u["needs_root"]:
+                    continue
+                self.safely("game", self.update_game)      # fresh: this runs on the network thread
+                if self.game:
+                    break
+                rc, out = core.run_job(u["cmd"], timeout=900)
+                if rc == 0:
+                    done.append(u["name"])
+                else:
+                    log(f"keep current: {u['name']} failed (rc={rc}): {out[-300:]}")
+        if done:
+            log("keep current: updated " + ", ".join(done))
+            add_alert(f"kept-current-{int(now)}", "Updated by itself: " + ", ".join(done) + ".", notify=False)
+        if skipped:
+            log("keep current: waiting for a password: " + ", ".join(skipped))
+
     def guardian(self):
         now = time.time()
         if now - self.last_guard < 600:
@@ -1103,6 +1137,7 @@ class Agent:
                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 elif res["error"]:
                     log(f"update check: {res['error']}")
+            self.keep_current(now)
         except Exception:
             core.report_exception("agent-network")
         finally:

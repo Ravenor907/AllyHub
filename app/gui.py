@@ -2013,7 +2013,8 @@ class ItemCard(QFrame):
         self.btn_toggle.setText("Turn on" if self.off else "Turn off")
         self.btn_toggle.setEnabled(not queued)
         # GitHub plugins: the newest release from the last check (no network here), so the card can say UPDATE
-        latest = core.github_latest_cached(self.item.github) if self.item.github else ""
+        repo = self.item.github or self.item.releases
+        latest = core.github_latest_cached(repo) if repo else ""
         upd = bool(installed and version and latest and core.plugin_newer(latest, version))
         if queued:
             set_pill(self.pill, "WORKING…", "busy")
@@ -2070,9 +2071,7 @@ class BrowsePage(QWidget):
         top = QHBoxLayout()
         self.btn_all = button("Install all essentials", hub.install_essentials, "primary")
         top.addWidget(self.btn_all)
-        self.btn_update = button("Update all apps", lambda: hub.runner.submit(      # was a Quick fix
-            "Update apps", "flatpak update --user -y --noninteractive; flatpak update -y --noninteractive",
-            "flatpak-update"))
+        self.btn_update = button("Update all", hub.update_all)        # everything with a newer version (1.5.0.23)
         top.addWidget(self.btn_update)
         top.addStretch()
         cv.addLayout(top)
@@ -2134,7 +2133,7 @@ class BrowsePage(QWidget):
         self.sub.setText(sub)
         self.btn_all.setVisible(key == "essentials" and any(
             i.recommended and not i.check(self.hub.state) for i in CATALOG))
-        self.btn_update.setVisible(key in ("apps", "installed"))
+        self.btn_update.setVisible(key == "installed")
         while self.list_v.count():                     # take the cards out; they're reused, never deleted
             it = self.list_v.takeAt(0)
             lay, w = it.layout(), it.widget()
@@ -2434,6 +2433,7 @@ class StorePage(QWidget):
             try:
                 data = json.loads(bytes(reply.readAll()).decode("utf-8"))
                 self.plugins = [p for p in data if p.get("visible", True)]
+                core.store_cache_save(self.plugins)      # the Checkup and the background helper read it
             except Exception as e:
                 self.status.setText(f"Store returned something unexpected: {e}")
         reply.deleteLater()
@@ -6265,6 +6265,15 @@ class DoctorPage(QWidget):
         else:
             add("ok", "Permissions", "Lighting, Game Boost, the charge limit and panel updates don't need your password.")
 
+        ups = probe.get("updates") or []
+        if ups:          # keep current (1.5.0.23): everything installed through Ally Hub tracks what's current
+            names = ", ".join(u["name"] for u in ups[:4]) + (f" and {len(ups) - 4} more" if len(ups) > 4 else "")
+            pw = any(u["needs_root"] for u in ups)
+            add("warn", "Updates", f"Newer versions are out for {names}." + (" One password." if pw else ""),
+                "Update all", lambda: h.update_all(ups), False)     # not part of Fix everything: restarts Decky
+        elif probe.get("net"):
+            add("ok", "Updates", "Everything installed through Ally Hub is current.")
+
         if cfg["agent"].get("enabled"):
             ok = core.agent_running()
             add("ok" if ok else "fail", "Background helper", "Running." if ok else "Turned on but not running.",
@@ -6294,9 +6303,11 @@ class DoctorPage(QWidget):
     @staticmethod
     def _probe() -> dict:
         """The slow checks (network, walking the shader cache, flatpak), run off the UI thread."""
-        return {"net": core.internet_ok(),
+        net = core.internet_ok()
+        return {"net": net,
                 "shader": core.dir_size(core.SHADER_CACHE) if core.SHADER_CACHE.exists() else None,
-                "flathub": "flathub" in core.run_quiet(["flatpak", "remotes", "--columns=name"])[1].split()}
+                "flathub": "flathub" in core.run_quiet(["flatpak", "remotes", "--columns=name"])[1].split(),
+                "updates": core.update_registry(refresh=net) if net else []}
 
     def run_checks(self, *_args):
         self.ran = True
@@ -6903,6 +6914,11 @@ class UpdatesPage(QWidget):
         self.auto_cb.toggled.connect(lambda on: update_config(
             lambda c: c["updates"].__setitem__("auto_update", on)))
         uv.addWidget(self.auto_cb)
+        self.keep_cb = QCheckBox("Keep apps and plugins up to date too (the background helper, daily, no game running)")
+        self.keep_cb.setChecked(bool(load_config()["updates"].get("keep_current", True)))
+        self.keep_cb.toggled.connect(lambda on: update_config(
+            lambda c: c["updates"].__setitem__("keep_current", on)))
+        uv.addWidget(self.keep_cb)
         chr_ = QHBoxLayout()
         chr_.addWidget(label("Update channel", "cardDesc"))
         self.channel = QComboBox()
@@ -8223,6 +8239,8 @@ class Hub(QMainWindow):
             after(code == 0)
         if key == "allow-all" and getattr(self, "_allow_all_lighting", False):
             self.lighting.access_job_done(code == 0)
+        if key == "update-all":
+            self.doctor.run_checks()
         if key == "allow-all":
             self.performance.job_done(key, code == 0)
             if code == 0 and core.apply_charge_limit():   # a limit picked before the permission existed
@@ -8369,6 +8387,30 @@ class Hub(QMainWindow):
             if changed:
                 self.update_cards()
         BackgroundTask(self, lambda: core.github_latest_refresh(repos), done)
+
+    def update_all(self, updates=None, *_args):
+        """Update everything installed through Ally Hub that has a newer version, in one job (one password at
+        most). Without a list it looks one up first."""
+        if isinstance(updates, dict) and "error" in updates:
+            self.toast("Couldn't look for updates. Check the Activity log (Settings → General).")
+            return
+        if not isinstance(updates, list):
+            self.toast("Looking for updates…")
+            BackgroundTask(self, lambda: core.update_registry(refresh=True), self.update_all)
+            return
+        if not updates:
+            self.toast("Everything is current ✔")
+            return
+        if any(u["needs_root"] for u in updates) and self.needs_password():
+            return
+        if "update-all" in self.runner.pending_keys():
+            self.toast("Already updating…")
+            return
+        lock = shlex.quote(str(core.KEEP_CURRENT_LOCK))      # never at the same time as the background helper
+        cmd = f"flock -n {lock} bash -c {shlex.quote(core.update_all_cmd(updates))} || " \
+              "{ echo 'The background helper is updating right now. Try again in a few minutes.' >&2; exit 1; }"
+        self.runner.submit(f"Updating {len(updates)} " + ("thing" if len(updates) == 1 else "things"), cmd,
+                           "update-all")
 
     def on_store_action(self, plugin: dict, action: str):
         name = plugin.get("name", "plugin")

@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.5.0.23
+
+- Everything installed through Ally Hub now keeps up with what's current: apps from Flathub, Decky plugins (store or
+  GitHub, Ally Center and SimpleDeckyTDP included) and Tailscale. Nothing is pinned inside the app.
+- The Checkup shows "Updates" with one Update all button (one password at most). Store → Installed has it too.
+- The background helper applies the updates that need no password by itself, daily, when no game runs. Turn it off
+  under Settings → General if you'd rather tap.
+
 ## 1.5.0.22
 
 - No charge limit is no longer flagged as a problem on the Checkup. The tip stays under Show all checks and on the

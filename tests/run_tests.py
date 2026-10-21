@@ -1582,6 +1582,44 @@ r = subprocess.run(["bash", "-c", ls.install], env=dict(os.environ, HOME=str(fh)
 check(r.returncode != 0 and (plugins / "Decky LSFG-VK").exists(), "a failed download keeps the installed plugin")
 check(core.decky_version(ls, {"decky": {"decky lsfg-vk": {"dir": str(plugins / "Decky LSFG-VK"), "version": "0.14.4"}}})
       == "0.14.4", "the card shows the installed version")
+# ---- keep current (1.5.0.23): one registry for everything installed through Ally Hub ----
+_fu = core.flatpak_updates
+core.flatpak_updates = lambda: ["com.heroicgameslauncher.hgl"]
+core.GITHUB_LATEST_FILE = fh / "latest.json"
+core.GITHUB_LATEST_FILE.write_text(json.dumps({"eugeniosegala/decky-lsfg-vk-experimental": {"version": "0.15.0", "checked": 0},
+                                               "tailscale/tailscale": {"version": "1.90.0", "checked": 0}}))
+mine = plugins / "TabMaster"; mine.mkdir()
+(mine / "plugin.json").write_text('{"name": "TabMaster"}')
+kstate = {"flatpaks": {"com.heroicgameslauncher.hgl"},
+          "decky": {"decky lsfg-vk": {"dir": str(plugins / "Decky LSFG-VK"), "name": "Decky LSFG-VK", "version": "0.14.4"},
+                    "tabmaster": {"dir": str(mine), "name": "TabMaster", "version": "2.15.0"}}}
+kstore = [{"name": "TabMaster", "versions": [{"name": "2.16.0", "artifact": "https://cdn.example/t.zip", "hash": "a" * 64}]}]
+_mark = core.decky_restart_allowed
+core.decky_restart_allowed = lambda: True
+reg = core.update_registry(kstate, kstore)
+byid = {u["id"]: u for u in reg}
+check(set(byid) == {"com.heroicgameslauncher.hgl", "lsfg", "store:TabMaster"}, "registry: flatpak, GitHub plugin, store plugin")
+check(not byid["com.heroicgameslauncher.hgl"]["needs_root"] and "flatpak update --user" in byid["com.heroicgameslauncher.hgl"]["cmd"],
+      "flatpak apps never need a password")
+check(byid["lsfg"]["latest"] == "0.15.0" and not byid["lsfg"]["needs_root"] and "sudo" not in byid["lsfg"]["cmd"]
+      and "plugin_loader" in byid["lsfg"]["cmd"], "a plugin Ally Hub installed updates in place without a password")
+check(not byid["store:TabMaster"]["needs_root"] and "a" * 64 in byid["store:TabMaster"]["cmd"],
+      "store plugins keep the sha256 check on the password-free path")
+core.decky_restart_allowed = lambda: False
+reg2 = {u["id"]: u for u in core.update_registry(kstate, kstore)}
+check(reg2["lsfg"]["needs_root"] and reg2["store:TabMaster"]["needs_root"], "without the Decky restart permission everything waits for Update all")
+check(subprocess.run(["bash", "-n", "-c", core.update_all_cmd(reg)]).returncode == 0, "Update all is valid shell")
+check(core.update_registry({"flatpaks": set(), "decky": {}, "flatpak_updates": []}, []) == [], "nothing installed: nothing to update")
+# the in-place update really replaces the folder's contents and keeps the folder
+(fbin / "curl").write_text('#!/bin/sh\nwhile [ $# -gt 1 ]; do [ "$1" = -o ] && out=$2; shift; done\n[ -n "$out" ] && cp ' + str(zpath) + ' "$out"\n')
+(fbin / "sha256sum").write_text("#!/bin/sh\nexit 0\n"); (fbin / "sha256sum").chmod(0o755)
+(mine / "old.txt").write_text("old")
+cmd = core.decky_store_update_nopw_cmd("https://cdn.example/t.zip", "a" * 64, str(mine))
+r = subprocess.run(["bash", "-c", cmd], env=dict(os.environ, PATH=f"{fbin}:{os.environ['PATH']}"), capture_output=True, text=True)
+check(r.returncode == 0 and not (mine / "old.txt").exists() and (mine / "package.json").exists() and mine.exists(),
+      "in-place update: contents replaced, folder kept: " + r.stderr[-200:])
+core.decky_restart_allowed = _mark
+core.flatpak_updates = _fu
 """
 
 AGENT = r"""
