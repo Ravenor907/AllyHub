@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.5.0.21
+
+- One word per action across the app: Remove (not Uninstall), Refresh, Check again, Reinstall, Decky Loader in full.
+- Every permission button says "Allow all (one password)". Checkup's row is now called Permissions.
+- Quick Access is named the same way everywhere, and the app says "handheld" instead of "your Ally".
+- Messages that point to the log now say where it is: Activity log (Settings → General).
+- Game Boost and Save time machine use the same words in Setup and on their own pages.
+- Every "done" message ends with a check mark.
+
 ## 1.5.0.20
 
 - Lossless Scaling now installs the experimental version (decky-lsfg-vk-experimental) and replaces any older copy.

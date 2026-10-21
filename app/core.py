@@ -5510,7 +5510,7 @@ CATALOG = [
     Item(
         id="decky", name="Decky Loader", category="Essentials",
         desc="The plugin loader for Game Mode. Unlocks the Plugin Store page in Ally Hub "
-             "and the plug icon in your Quick Access menu.",
+             "and the plug icon in Quick Access.",
         monogram="D", color="#8b5cf6",
         install=fetch_run("https://github.com/SteamDeckHomebrew/decky-installer/releases/latest/download/install_release.sh"),
         uninstall=fetch_run("https://github.com/SteamDeckHomebrew/decky-installer/releases/latest/download/uninstall.sh"),
@@ -5522,14 +5522,15 @@ CATALOG = [
     # The GUI installs it (qam_install: stages the files, one password, then updates need none).
     Item(
         id="qam", name="Ally Hub in Quick Access", category="Essentials",
-        desc="Battery, temps, this game's switches, Game Boost and lighting in the ••• menu while you play.",
+        desc="Battery, temps, this game's switches, Game Boost and lighting in Quick Access (the ••• button) while you play. "
+             "Turn off or remove it under Store → Installed → Your plugins.",
         monogram="AH", color="#14b8a6", install="", uninstall=qam_uninstall_cmd(),
         check=lambda s: bool(qam_installed()), requires=("decky",), recommended=True,
     ),
     decky_plugin_item(
         "allycenter", "Ally Center",
         "Built for the ROG Ally: TDP presets, RGB effects, charge limit, battery health, "
-        "temps and a screen-off download mode, all from the Quick Access menu.",
+        "temps and a screen-off download mode, all from Quick Access.",
         "AC", "#e11d48",
         fetch_run("https://github.com/PixelAddictUnlocked/allycenter/raw/main/install.sh"),
         ("ally center", "allycenter"), recommended=True,
