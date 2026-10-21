@@ -14,6 +14,7 @@ import math
 import os
 import re
 import shlex
+import signal
 import shutil
 import socket
 import stat
@@ -116,7 +117,7 @@ DEFAULT_CONFIG = {
                  "stream_all": True,
                  "before_theme": None},           # lighting to restore when the extra theme is switched off             # one-color frames as one zone-"all" packet (1.4.1.2)
     # channel "stable" follows main; "testing" also follows the testing branch (the owner's test builds)
-    "updates": {"repo": REPO_DEFAULT, "auto_update": True, "reporting": False, "channel": "stable"},
+    "updates": {"repo": REPO_DEFAULT, "auto_update": True, "keep_current": True, "reporting": False, "channel": "stable"},
     # Tools > Performance. The tune-up itself lives in /etc, so only Game Boost's switch is here.
     "performance": {"boost": False},
     # the battery charge limit the owner picked ("" = never set through Ally Hub); the helper keeps it applied
@@ -2870,6 +2871,7 @@ class Item:
     kind: str = "install"
     decky_names: tuple = ()
     github: str = ""             # owner/repo when the plugin installs from its newest GitHub release (1.5.0.19)
+    releases: str = ""           # owner/repo only for the version check (install stays the project's own script)
 
 
 def flatpak_install_cmd(app_id: str) -> str:
@@ -2931,9 +2933,9 @@ def github_latest_cached(repo: str) -> str:
         return ""
 
 
-def github_latest_refresh(repos, force: bool = False) -> bool:
-    """Look up the newest stable release of each repo (api.github.com, already used for updates). At most every
-    6 hours per repo. True when something changed."""
+def github_latest_refresh(repos, force: bool = False, stable: bool = False) -> bool:
+    """Look up the newest release of each repo (api.github.com, already used for updates), pre-releases included
+    unless stable=True. At most every 6 hours per repo. True when something changed."""
     try:
         data = json.loads(GITHUB_LATEST_FILE.read_text())
         data = data if isinstance(data, dict) else {}
@@ -2944,12 +2946,14 @@ def github_latest_refresh(repos, force: bool = False) -> bool:
         old = data.get(repo) if isinstance(data.get(repo), dict) else {}
         if not force and time.time() - float(old.get("checked", 0) or 0) < GITHUB_LATEST_TTL_S:
             continue
-        status, body = gh_request("GET", f"/repos/{repo}/releases?per_page=1", timeout=10, auth=False)
+        status, body = gh_request("GET", f"/repos/{repo}/releases/latest" if stable else
+                                  f"/repos/{repo}/releases?per_page=1", timeout=10, auth=False)
         if status != 200:
             continue
         try:
             rel = json.loads(body)
-            tag = str((rel[0] if isinstance(rel, list) and rel else {}).get("tag_name") or "")
+            rel = rel[0] if isinstance(rel, list) and rel else rel if isinstance(rel, dict) else {}
+            tag = str(rel.get("tag_name") or "")
         except (ValueError, AttributeError):
             continue
         ver = tag.lstrip("vV")
@@ -5491,12 +5495,12 @@ def decky_version(item, state: dict) -> str:
 
 
 def decky_plugin_item(id, name, desc, monogram, color, install, names, warn="",
-                      recommended=False, github: str = "") -> Item:
+                      recommended=False, github: str = "", releases: str = "") -> Item:
     return Item(
         id=id, name=name, category="Game Mode plugins", desc=desc, monogram=monogram,
         color=color, install=install, check=lambda s, n=names: bool(decky_match(n, s)),
         uninstall="decky", warn=warn, requires=("decky",), recommended=recommended,
-        decky_names=names, github=github,
+        decky_names=names, github=github, releases=releases,
     )
 
 
@@ -5533,7 +5537,7 @@ CATALOG = [
         "temps and a screen-off download mode, all from Quick Access.",
         "AC", "#e11d48",
         fetch_run("https://github.com/PixelAddictUnlocked/allycenter/raw/main/install.sh"),
-        ("ally center", "allycenter"), recommended=True,
+        ("ally center", "allycenter"), recommended=True, releases="PixelAddictUnlocked/allycenter",
         warn="Use one TDP tool at a time: Ally Center, SimpleDeckyTDP or the SteamOS slider.",
     ),
     # Frame generation: the same builds Bazzite installs (ujust get-decky-lossless-scaling / get-framegen),
@@ -5567,7 +5571,7 @@ CATALOG = [
         "Supports the Ally X through ASUS WMI.",
         "TDP", "#f97316",
         fetch_run("https://github.com/aarron-lee/SimpleDeckyTDP/raw/main/install.sh"),
-        ("simpledeckytdp",),
+        ("simpledeckytdp",), releases="aarron-lee/SimpleDeckyTDP",
         warn="Overlaps with Ally Center and SteamOS's own TDP slider. Pick one.",
     ),
     Item(
@@ -5766,6 +5770,269 @@ def store_artifact_url(plugin: dict) -> Optional[str]:
     if not v:
         return None
     return v.get("artifact") or (DECKY_CDN.format(v["hash"]) if v.get("hash") else None)
+
+
+# ==========================================================================
+# Keep current (1.5.0.23, the owner: "timeless": nothing pinned inside, everything installed through Ally Hub
+# tracks what's current on the internet). One registry answers, for each thing: installed, newest, how to update,
+# and whether that needs the password. Nothing here downloads; `cmd` strings run in the job runner (or the agent
+# for the password-free ones).
+# ==========================================================================
+
+KEEP_CURRENT_FILE = DATA_DIR / "keep_current.json"
+KEEP_CURRENT_TTL_S = 6 * 3600
+STORE_CACHE = DATA_DIR / "store_plugins.json"          # the Decky store list, saved by whoever fetched it last
+TAILSCALE_REPO = "tailscale/tailscale"
+
+
+def store_cache_save(plugins: list) -> None:
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        STORE_CACHE.write_text(json.dumps(plugins))
+    except (OSError, TypeError):
+        pass
+
+
+def store_cache_load() -> list:
+    try:
+        data = json.loads(STORE_CACHE.read_text())
+        return data if isinstance(data, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def fetch_store_plugins(timeout: int = 15) -> list:
+    """The Decky store list (the same API the Store page reads), saved to STORE_CACHE. [] on any error."""
+    req = urllib.request.Request(DECKY_STORE_API, headers={"User-Agent": f"AllyHub/{VERSION}"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read().decode("utf-8"))
+    except Exception:
+        return []
+    if isinstance(data, dict):
+        data = data.get("plugins") or data.get("results") or []
+    if isinstance(data, list):
+        data = [p for p in data if p.get("visible", True)]       # the same filter the Store page applies
+        store_cache_save(data)
+        return data
+    return []
+
+
+def flatpak_updates() -> list:
+    """App ids with a newer build on Flathub (no network beyond flatpak's own metadata refresh)."""
+    rc, out = run_quiet(["flatpak", "remote-ls", "--user", "--updates", "--columns=application"], timeout=60)
+    if rc != 0:
+        return []
+    return [l.strip() for l in out.splitlines() if l.strip() and "." in l]
+
+
+def tailscale_installed_version() -> str:
+    if not Path(TAILSCALE_BIN).exists():
+        return ""
+    rc, out = run_quiet([TAILSCALE_BIN, "version"], timeout=5)
+    return (out.splitlines() or [""])[0].strip().lstrip("v") if rc == 0 else ""
+
+
+def _user_writable_tree(path: Path) -> bool:
+    """Every file and folder under path belongs to this user (so it can be replaced without a password)."""
+    try:
+        uid = os.getuid()
+        if path.stat().st_uid != uid:
+            return False
+        for root, dirs, files in os.walk(path):
+            for n in dirs + files:
+                if (Path(root) / n).lstat().st_uid != uid:
+                    return False
+        return True
+    except OSError:
+        return False
+
+
+def plugin_dir_user_owned(info: dict) -> bool:
+    return bool(info and info.get("dir")) and _user_writable_tree(Path(info["dir"]))
+
+
+def decky_store_update_nopw_cmd(url: str, sha256: str, dest: str) -> str:
+    """Replace the CONTENTS of a plugin folder Ally Hub installed (so it's the user's), then restart Decky through
+    the polkit rule from Allow all. No sudo anywhere: the folder itself is kept (its parent is root's)."""
+    if not str(url).startswith("https://") or not re.fullmatch(r"[0-9a-fA-F]{64}", sha256 or ""):
+        return ""
+    q, d = shlex.quote(url), shlex.quote(dest)
+    check = f'echo {shlex.quote(sha256.lower() + "  ")}"$tmp/p.zip" | sha256sum -c --quiet - && '
+    return ('tmp=$(mktemp -d) && '
+            f'curl -fL --proto =https --proto-redir =https -o "$tmp/p.zip" {q} && ' + check +
+            'python3 -m zipfile -e "$tmp/p.zip" "$tmp/out" && src=$(ls -d "$tmp/out"/*/ | head -n1) && '
+            f'[ -n "$src" ] && find {d} -mindepth 1 -delete && cp -r "$src". {d}/ && '
+            'systemctl restart plugin_loader; rc=$?; rm -rf "$tmp"; exit $rc')
+
+
+def github_update_nopw_cmd(repo: str, asset: str, dest: str) -> str:
+    """Same as above for a plugin that comes from its newest GitHub release (github.com links only)."""
+    api = shlex.quote(f"https://api.github.com/repos/{repo}/releases?per_page=1")
+    d = shlex.quote(dest)
+    return ('tmp=$(mktemp -d) && '
+            f'url=$(curl -fsSL --proto =https --max-time 20 {api} | python3 -c {shlex.quote(GITHUB_ZIP_PICK)} '
+            f'{shlex.quote(asset)}) && [ -n "$url" ] && '
+            'curl -fL --proto =https --proto-redir =https -o "$tmp/p.zip" "$url" && '
+            'python3 -m zipfile -e "$tmp/p.zip" "$tmp/out" && src=$(ls -d "$tmp/out"/*/ | head -n1) && '
+            f'[ -n "$src" ] && find {d} -mindepth 1 -delete && cp -r "$src". {d}/ && '
+            'systemctl restart plugin_loader; rc=$?; rm -rf "$tmp"; exit $rc')
+
+
+def _github_asset(item) -> str:
+    m = re.search(r"releases/latest/download/([^'\" ]+)", item.install or "")
+    return m.group(1) if m else ""
+
+
+def update_registry(state: dict = None, store: list = None, refresh: bool = False) -> list:
+    """Everything installed through Ally Hub that has a newer version somewhere, as
+    {id, name, installed, latest, cmd, needs_root, kind}. With refresh=True the GitHub release cache is renewed
+    first (network); otherwise only what is already known is used, so the GUI can call it freely."""
+    state = state if state is not None else {"flatpaks": installed_flatpaks(), "decky": installed_decky_plugins()}
+    store = store if store is not None else store_cache_load()
+    out = []
+    repos = [i.github or i.releases for i in CATALOG if i.github or i.releases]
+    if refresh:
+        github_latest_refresh(repos)
+        if Path(TAILSCALE_BIN).exists():
+            github_latest_refresh([TAILSCALE_REPO], stable=True)
+
+    # Flatpak apps: one job, never a password
+    upd = flatpak_updates() if (refresh or state.get("flatpak_updates") is None) else state["flatpak_updates"]
+    for app_id in upd:
+        item = CATALOG_BY_ID.get(app_id)
+        out.append(dict(id=app_id, name=item.name if item else app_id, installed="", latest="",
+                        cmd=f"flatpak update --user -y --noninteractive {shlex.quote(app_id)}", needs_root=False,
+                        kind="flatpak"))
+
+    # Decky plugins from GitHub (frame generation, Ally Center, SimpleDeckyTDP)
+    seen = set()
+    for item in CATALOG:
+        repo = item.github or item.releases
+        if not repo:
+            continue
+        dirs = decky_match(item.decky_names, state)
+        if not dirs:
+            continue
+        info = next((v for v in state.get("decky", {}).values() if v["dir"] == dirs[0]), None)
+        installed = (info or {}).get("version", "")
+        latest = github_latest_cached(repo)
+        if not (installed and latest and plugin_newer(latest, installed)):
+            seen.add(dirs[0])
+            continue
+        seen.add(dirs[0])
+        asset = _github_asset(item) if item.github else ""
+        nopw = plugin_dir_user_owned(info) and decky_restart_allowed() and asset
+        out.append(dict(id=item.id, name=item.name, installed=installed, latest=latest,
+                        cmd=github_update_nopw_cmd(item.github, asset, info["dir"]) if nopw else item.install,
+                        needs_root=not nopw, kind="plugin"))
+
+    # Decky store plugins (everything else in ~/homebrew/plugins that the store knows)
+    by_name = {(p.get("name") or "").lower(): p for p in store}
+    for key, info in state.get("decky", {}).items():
+        if info["dir"] in seen or info.get("name") == "Ally Hub":
+            continue
+        p = by_name.get(key)
+        latest = (store_latest_version(p) or {}) if p else {}
+        if not (p and info.get("version") and latest.get("name") and plugin_newer(latest["name"], info["version"])):
+            continue
+        url, sha = store_artifact_url(p), store_artifact_hash(p)
+        if not url:
+            continue
+        nopw = plugin_dir_user_owned(info) and decky_restart_allowed()
+        cmd = decky_store_update_nopw_cmd(url, sha, info["dir"]) if nopw else decky_store_install_cmd(url, sha)
+        out.append(dict(id="store:" + info["name"], name=info["name"], installed=info["version"],
+                        latest=latest["name"], cmd=cmd, needs_root=not (nopw and cmd), kind="plugin"))
+
+    # Tailscale (deck-tailscale installs the newest static build)
+    tv = tailscale_installed_version()
+    tl = github_latest_cached(TAILSCALE_REPO)
+    if tv and tl and plugin_newer(tl, tv):
+        out.append(dict(id="tailscale", name="Tailscale", installed=tv, latest=tl,
+                        cmd=CATALOG_BY_ID["tailscale"].install, needs_root=True, kind="tool"))
+    return [u for u in out if u["cmd"]]
+
+
+def update_all_cmd(updates: list) -> str:
+    """One job for everything in the list; sudo asks once. Each part reports on its own line and a failure
+    doesn't stop the rest."""
+    parts = [f"{{ {u['cmd']}; }} && echo {shlex.quote('Updated ' + u['name'])} || echo {shlex.quote('Could not update ' + u['name'])} >&2"
+             for u in updates]
+    return " ; ".join(parts) + " ; echo 'Done.'"
+
+
+KEEP_CURRENT_LOCK = DATA_DIR / "keep_current.lock"
+
+
+class keep_current_lock:
+    """`with keep_current_lock() as got:` the agent and the window's Update all never touch the same folders at
+    once. got is False when the other side holds it."""
+    def __enter__(self):
+        try:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            self.f = open(KEEP_CURRENT_LOCK, "w")
+            fcntl.flock(self.f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except OSError:
+            self.f = None
+            return False
+
+    def __exit__(self, *a):
+        if self.f:
+            try:
+                fcntl.flock(self.f, fcntl.LOCK_UN)
+            finally:
+                self.f.close()
+
+
+def run_job(cmd: str, timeout: int = 900) -> tuple:
+    """Run a shell command the way the window's job runner does (no LD_PRELOAD, no stdin), in its own process group
+    so a timeout kills curl/flatpak children too. Returns (rc, output)."""
+    env = {k: v for k, v in os.environ.items() if k != "LD_PRELOAD"}
+    try:
+        p = subprocess.Popen(["bash", "-c", cmd], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, text=True, env=env, start_new_session=True)
+    except OSError as e:
+        return 1, str(e)
+    try:
+        out, _ = p.communicate(timeout=timeout)
+        return p.returncode, out or ""
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        try:
+            out, _ = p.communicate(timeout=5)
+        except Exception:
+            out = ""
+        return 124, (out or "") + "\n(timed out)"
+
+
+def store_cache_refresh() -> None:
+    """Fetch the store list again when the cache is older than KEEP_CURRENT_TTL_S (or missing)."""
+    try:
+        if time.time() - STORE_CACHE.stat().st_mtime < KEEP_CURRENT_TTL_S:
+            return
+    except OSError:
+        pass
+    fetch_store_plugins()
+
+
+def keep_current_state() -> dict:
+    try:
+        d = json.loads(KEEP_CURRENT_FILE.read_text())
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def keep_current_save(d: dict) -> None:
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        KEEP_CURRENT_FILE.write_text(json.dumps(d))
+    except (OSError, TypeError):
+        pass
 
 
 # ==========================================================================
