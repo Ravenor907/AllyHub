@@ -343,7 +343,7 @@ step (`qam_permission_parts`, inside `qam_install_cmd` and `allow_all_cmd`): the
 root's (plugin.json's flags decide root backends: the user must never be able to write it; `qam_self_updatable`
 refuses if it's writable), main.py/dist/package.json become the user's, and `DECKY_POLKIT_RULE` lets the user
 restart/start plugin_loader.service only. The agent then updates an outdated panel itself when no game runs
-(`qam_update_nopw`). Checkup "Password prompts" → `Hub.allow_all` = one job for lighting, Game Boost and the panel.
+(`qam_update_nopw`). Checkup "Permissions" (was "Password prompts") → `Hub.allow_all` = one job for lighting, Game Boost and the panel.
 Security reviews: this is a deliberate, owner-approved trade-off; flag it only if plugin.json or the rule widen.
 **In-app password prompt (1.5.0.7, the owner asked: dark, higher up, keyboard by itself).** `allyhub-askpass` first
 runs `allyhub-askpass.py`, which asks the window's `AskpassServer` (QLocalServer `askpass.sock`, user-only) with the
@@ -371,6 +371,12 @@ below that the agent streams the same rainbow spiral (owner: 1.4.1.12 still didn
 **Lighting permission is remembered (1.4.1.11, the owner's call: no repeat password prompts).** `led_permission_cmd`
 also installs `allyhub-lighting-perms.service` (`LIGHT_PERMS_SCRIPT`/`LIGHT_PERMS_UNIT`), run at boot, after sleep and
 by the leds udev rule (`SYSTEMD_WANTS`). The uninstaller removes it.
+
+**Wording rules (1.5.0.21, the owner: consistent and intuitive):** Remove for anything installed (Delete only for
+files and the user's own effects); Refresh for lists, Check again for checks; "Decky Loader" in full; "Allow all (one
+password)" on every permission button; "Quick Access (the ••• button)" on first mention, then "Quick Access";
+"handheld", never "your Ally"; log pointers say "Activity log (Settings → General)"; success toasts end with ✔,
+errors never do; Setup switches use the same wording as their pages.
 
 ## SteamOS facts that shape the code
 

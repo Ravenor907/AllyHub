@@ -574,7 +574,7 @@ class GamepadNav(QObject):
             self.hub.step_page(-1 if n == 4 else 1)
         elif n == 7:                    # Menu: refresh (was Y before 1.5.0.1)
             self.hub.refresh()
-            self.hub.toast("Refreshed")
+            self.hub.toast("Refreshed ✔")
 
     def _axis(self, n, value):
         if self._sheet_open() and n in (2, 5):             # triggers wait for the pop-up (axis 3 is the pointer)
@@ -2028,7 +2028,7 @@ class ItemCard(QFrame):
         else:
             set_pill(self.pill, "NOT INSTALLED", "off")
         if self.item.kind != "run":
-            self.btn_install.setText("Update" if upd else "Reinstall / Update" if installed else "Install")
+            self.btn_install.setText("Update" if upd else "Reinstall" if installed else "Install")
             self.btn_install.setObjectName("" if installed and not upd else "primary")
             repolish(self.btn_install)
         self.btn_install.setEnabled(not queued and not missing_reqs)
@@ -2363,7 +2363,7 @@ class StorePage(QWidget):
         nl = QHBoxLayout(self.need_decky)
         nl.setContentsMargins(20, 14, 20, 14)
         nl.addWidget(label("Decky Loader isn't installed yet. Install it first.", "bannerText", wrap=True), 1)
-        nl.addWidget(button("Install Decky", lambda: hub.on_item_action("decky", "install"), "primary"))
+        nl.addWidget(button("Install Decky Loader", lambda: hub.on_item_action("decky", "install"), "primary"))
         v.addWidget(self.need_decky)
         mine, mv = titled_card("plug", "#8b5cf6", "Your plugins",
                                "Everything in Decky, however it was installed. Turn a plugin off if it misbehaves "
@@ -2928,7 +2928,7 @@ class LightingPage(QWidget):
         self.agent_banner = self._banner("Animated effects run in the background helper, which is off.",
                                          "Turn it on", hub.enable_agent)
         self.perm_banner = self._banner("Allow lighting changes without a password so effects can run.",
-                                        "Allow", self.allow_access)
+                                        "Allow all (one password)", self.allow_access)
         for b in (self.empty, self.agent_banner, self.perm_banner):
             v.addWidget(b)
 
@@ -3104,7 +3104,7 @@ class LightingPage(QWidget):
 
     def _save_lighting(self, **kw):
         update_config(lambda c: c["lighting"].update(kw))
-        self.hub.toast("Saved")
+        self.hub.toast("Saved ✔")
 
     def showEvent(self, ev):
         super().showEvent(ev)
@@ -3316,7 +3316,7 @@ class LightingPage(QWidget):
         eff = self.effect
         update_config(lambda c: c["lighting"]["custom"].__setitem__(name, eff))
         self.rebuild_custom(load_config()["lighting"]["custom"])
-        self.hub.toast(f"Saved “{name}”")
+        self.hub.toast(f"Saved “{name}” ✔")
 
     def delete_custom(self):
         name = self.custom_pick.currentText()
@@ -3360,7 +3360,7 @@ class LightingPage(QWidget):
                 writes += core.rgb_writes(led, first, min(self.brightness, led.max_brightness), enums,
                                           load_config()["lighting"].get("encoding"))
             if core.try_direct_writes(writes):
-                self.hub.toast("Lighting updated")
+                self.hub.toast("Lighting updated ✔")
             else:
                 # never a password prompt per tap: ask once for the permanent permission instead
                 self.perm_banner.show()
@@ -3648,7 +3648,7 @@ class HueSyncPage(QWidget):
         v = page_shell(self, "Lighting", "Ring lights on the ROG Ally series are handled by HueSync, "
                                          "a Decky plugin built for this hardware.")
         card, cv = titled_card("lightbulb", "#a855f7", "HueSync",
-                               'Colors, brightness and effects for the rings, right in the Quick Access menu.')
+                               'Colors, brightness and effects for the rings, right in Quick Access (the ••• button).')
         self.status = label("", "statValue", wrap=True)
         cv.addWidget(self.status)
         row = QHBoxLayout()
@@ -3899,7 +3899,7 @@ class AutomationPage(QWidget):
             self.hub.enable_agent()
             self.hub.toast("Saved. The background helper is on now.")
             return
-        self.hub.toast("Saved")
+        self.hub.toast("Saved ✔")
 
     def toggle_agent(self):
         if core.agent_running():
@@ -3964,7 +3964,7 @@ class ConnectPage(QWidget):
     def __init__(self, hub):
         super().__init__()
         self.hub = hub
-        v = page_shell(self, "Connect", "Wake your PC, stream from anywhere, and control your Ally "
+        v = page_shell(self, "Connect", "Wake your PC, stream from anywhere, and control your handheld "
                                         "from your phone.")
         grid = two_col_grid()
 
@@ -3991,7 +3991,7 @@ class ConnectPage(QWidget):
         grid.addWidget(wcard, 0, 0)
 
         tcard, tv = titled_card("globe", "#64748b", "Play from anywhere (Tailscale)",
-                                "Puts your Ally and PC on a private network so Moonlight works over "
+                                "Puts your handheld and PC on a private network so Moonlight works over "
                                 "cellular or hotel Wi-Fi. Install Tailscale on your PC too.")
         self.ts_status = label("", "cardDesc", wrap=True)
         tv.addWidget(self.ts_status)
@@ -4055,7 +4055,7 @@ class ConnectPage(QWidget):
         self.remote_enable.blockSignals(False)
         self.port.setValue(int(a.get("remote_port") or 8787))
         if a.get("remote") and a.get("remote_pin"):
-            ips = core.local_ips() or ["<your Ally's IP>"]
+            ips = core.local_ips() or ["<your handheld's IP>"]
             urls = "\n".join(f"http://{ip}:{a['remote_port']}" for ip in ips)
             running = core.agent_running()
             self.remote_info.setText(
@@ -4071,7 +4071,7 @@ class ConnectPage(QWidget):
             return
         name = self.wol_name.text().strip() or "Gaming PC"
         update_config(lambda c: c["wol"].update(name=name, mac=mac))
-        self.hub.toast("Saved")
+        self.hub.toast("Saved ✔")
         self.refresh()
 
     def wake(self):
@@ -4436,7 +4436,7 @@ class LaunchersPage(QWidget):
         row = QHBoxLayout()
         self.btn_add = button("Add to Steam", self.add, "primary")
         self.btn_hide = button("Hide from Steam", self.hide)
-        self.btn_remove = button("Uninstall", self.uninstall, "danger")
+        self.btn_remove = button("Remove", self.uninstall, "danger")
         row.addWidget(self.btn_add)
         row.addWidget(self.btn_hide)
         row.addWidget(self.btn_remove)
@@ -4470,7 +4470,7 @@ class LaunchersPage(QWidget):
         n = len(names)
         self.btn_add.setText(f"Add {n} to Steam" if n else "Add to Steam")
         self.btn_add.setEnabled(bool(n))
-        self.btn_remove.setText(f"Uninstall {n}" if n else "Uninstall")
+        self.btn_remove.setText(f"Remove {n}" if n else "Remove")
         self.btn_remove.setEnabled(bool(n))
         self.btn_hide.setEnabled(bool(n))
 
@@ -4483,8 +4483,8 @@ class LaunchersPage(QWidget):
         for name, cb in self.checks.items():
             cb.setText(f"{name}  ✔" if name in have else name)
         self.status.setText(("Installed: " + ", ".join(sorted(have)) + ". Pick one and tap Add to repair it, or "
-                             "Uninstall to remove it.") if have else
-                            "Takes a few minutes per store. Progress shows in the activity log (Settings).")
+                             "Remove to uninstall it.") if have else
+                            "Takes a few minutes per store. Progress shows in the Activity log (Settings → General).")
 
     # ---- hide / show (the launcher stays installed) ----
     def hide(self, *_args):
@@ -4531,7 +4531,7 @@ class LaunchersPage(QWidget):
         self.last_run = names
         self.hub.runner.submit(f"Adding {len(names)} launcher(s) to Steam", cmd, "nonsteamlaunchers")
         self.clear()
-        self.hub.toast("Adding launchers… progress is in the activity log (Settings)")
+        self.hub.toast("Adding launchers… progress is in the Activity log (Settings → General)")
 
     def job_done(self, ok: bool):
         """Make sure what was picked really landed: if NSL's scanner didn't add a tile, add it through Steam
@@ -4663,7 +4663,7 @@ class LaunchersPage(QWidget):
         if not isinstance(res, list):
             if not quiet:
                 msg_warn(self, APP_NAME, "Something went wrong while adding the art. Details are in the "
-                                         "activity log (Settings).")
+                                         "Activity log (Settings → General).")
             return
         live = [n for n, r in res if r.get("live")]
         saved = [n for n, r in res if not r.get("live") and r.get("files")]
@@ -4751,7 +4751,7 @@ class LaunchersPage(QWidget):
                 return
             parts = []
             if r.get("still"):
-                parts.append("Couldn't remove the files for: " + ", ".join(r["still"]) + ". Check the activity log (Settings).")
+                parts.append("Couldn't remove the files for: " + ", ".join(r["still"]) + ". Check the Activity log (Settings → General).")
             if r.get("removed") is None:
                 parts.append("Steam's connection for plugins is off, so remove the tiles yourself: select one in "
                              "your library, press the menu button, then Manage → Remove non-Steam game.")
@@ -4946,7 +4946,7 @@ class GamesPage(QWidget):
 
     def qam_done(self, ok: bool, key: str):
         if ok and key == "qam-install":
-            self.hub.toast("Ally Hub is in your Quick Access menu: press ••• and open the plug icon.")
+            self.hub.toast("Ally Hub is in Quick Access now: press ••• and open the plug icon.")
         self.hub.update_cards()
 
     # ---- one game ----
@@ -5194,7 +5194,7 @@ class SetupPage(QWidget):
         self.hub = hub
         self.step = 0
         self.essentials = {}
-        self.v = page_shell(self, "Setup", "A minute to get your Ally ready. Everything here can be changed later.")
+        self.v = page_shell(self, "Setup", "A minute to get your handheld ready. Everything here can be changed later.")
         self.dots = label("", "cardMeta")
         self.v.addWidget(self.dots)
         self.body = QVBoxLayout()
@@ -5321,7 +5321,7 @@ class SetupPage(QWidget):
                        "Pick what to install now. Nothing installs until you tap Install.")
         # the same essentials as Store > Browse > Essentials (catalog items marked recommended)
         st = self.hub.state
-        options = [("decky", "Decky Loader", "Plugins in Game Mode's ••• menu. Most Game Mode extras need it.",
+        options = [("decky", "Decky Loader", "Plugins in Quick Access (the ••• button). Most Game Mode extras need it.",
                     CATALOG_BY_ID["decky"].check(st), True)]
         options += [(i.id, i.name, i.desc, i.check(st), i.id in (core.LUDUSAVI_ID, "qam"))
                     for i in CATALOG if i.recommended and i.id != "decky"]
@@ -5356,7 +5356,7 @@ class SetupPage(QWidget):
                 self.hub.qam_after_decky = True              # the panel goes in once Decky is there
             else:
                 self.hub.games.qam_install()
-        self.hub.toast("Installing… progress is in the activity log (Settings)")
+        self.hub.toast("Installing… progress is in the Activity log (Settings → General)")
 
     def step_lighting(self):
         cv = self.card("lightbulb", "#8b5cf6", "Joystick ring lighting",
@@ -5374,11 +5374,11 @@ class SetupPage(QWidget):
         cv = self.card("rocket", "#f97316", "A few favorites",
                        "Turn on what you like. Each one has more options under Games.")
         cfg = load_config()
-        boost = QCheckBox("Game Boost: the CPU's performance setting while you play")
+        boost = QCheckBox("Game Boost: a snappier CPU while a game runs")
         boost.setChecked(bool((cfg.get("performance") or {}).get("boost")))
         boost.toggled.connect(lambda on: self.hub.performance.set_boost(on))
         cv.addWidget(boost)
-        tm = QCheckBox("Save time machine: snapshot a game's saves every time it starts")
+        tm = QCheckBox("Save time machine: snapshot a game's saves when it starts")
         tm.setChecked(bool((cfg.get("saves") or {}).get("time_machine")))
         tm.toggled.connect(lambda on: self.hub.saves.set_on(on))
         cv.addWidget(tm)
@@ -5418,7 +5418,7 @@ class SavesPage(QWidget):
                                "Snapshots a game's saves when it starts, and backs up every game on a schedule. "
                                "Uses Ludusavi.")
         self.tm_layout = cv                  # Hub.compose_sections adds the scheduled backup here
-        self.tm_cb = QCheckBox("Snapshot a game's saves every time it starts")
+        self.tm_cb = QCheckBox("Snapshot a game's saves when it starts")
         self.tm_cb.toggled.connect(self.set_on)
         cv.addWidget(self.tm_cb)
         kr = QHBoxLayout()
@@ -5446,7 +5446,7 @@ class SavesPage(QWidget):
         self.list_box.setSpacing(6)
         v.addWidget(lcard)
         row = QHBoxLayout()
-        self.btn_reload = button("Refresh list", self.load)
+        self.btn_reload = button("Refresh", self.load)
         row.addWidget(self.btn_reload)
         row.addStretch()
         v.addLayout(row)
@@ -5547,7 +5547,7 @@ class SavesPage(QWidget):
             self.hub.runner.submit(f"Restoring {title}'s saves", core.tm_restore_cmd(title, b["name"]), "tm-restore")
 
     def job_done(self, ok: bool):
-        self.hub.toast("Saves restored ✔" if ok else "The restore didn't finish. See the activity log (Settings).")
+        self.hub.toast("Saves restored ✔" if ok else "The restore didn't finish. See the Activity log (Settings → General).")
         self.load()
 
 
@@ -5670,7 +5670,7 @@ class SleepPage(QWidget):
         self._pending_nowake = None
         if ok and pending is not None:
             update_config(lambda c: c.setdefault("sleep", {}).__setitem__("no_wake", pending))
-        self.hub.toast("Saved ✔" if ok else "That didn't work. See the activity log (Settings).")
+        self.hub.toast("Saved ✔" if ok else "That didn't work. See the Activity log (Settings → General).")
         self.refresh()
 
 
@@ -5842,7 +5842,7 @@ class StoragePage(QWidget):
             QDesktopServices.openUrl(QUrl(f"steam://uninstall/{g['appid']}"))
 
     def job_done(self, ok: bool):
-        self.hub.toast("Space freed ✔" if ok else "Some files couldn't be deleted. See the activity log (Settings).")
+        self.hub.toast("Space freed ✔" if ok else "Some files couldn't be deleted. See the Activity log (Settings → General).")
         self.scan()
 
 
@@ -5916,7 +5916,7 @@ class _PerformanceRefresh:
         self.hub.toast("Lab report sent ✔" if core.lab_send_report() else "Couldn't save the report (see Activity log)")
 
     def refresh_keep(self, *_args):
-        self.hub.toast("Kept." if core.refresh_keep() else "Nothing to keep right now.")
+        self.hub.toast("Kept ✔" if core.refresh_keep() else "Nothing to keep right now.")
         self.refresh_update()
 
     def refresh_off(self, *_args):
@@ -5963,13 +5963,13 @@ class PerformancePage(QWidget, _PerformanceRefresh):
         card, cv = titled_card(
             "rocket", "#f97316", "Game Boost",
             'Snappier CPU while a game runs, a little gentler on battery. Back to normal when you quit.')
-        self.boost_cb = QCheckBox("Boost my games")
+        self.boost_cb = QCheckBox("Game Boost: a snappier CPU while a game runs")
         self.boost_cb.toggled.connect(self.set_boost)
         cv.addWidget(self.boost_cb)
         self.boost_status = label("", "cardDesc", wrap=True)
         cv.addWidget(self.boost_status)
         row = QHBoxLayout()
-        self.btn_boost_perm = button("Allow Game Boost", self.allow_boost, "primary")
+        self.btn_boost_perm = button("Allow all (one password)", self.allow_boost, "primary")
         row.addWidget(self.btn_boost_perm)
         row.addStretch()
         cv.addLayout(row)
@@ -6258,11 +6258,11 @@ class DoctorPage(QWidget):
         leds = [] if core.lighting_shelved() else core.find_leds()
         missing = core.allow_all_missing(leds)
         if missing:      # the owner (1.5.0.3): one password for everything, not one prompt per feature
-            add("warn", "Password prompts",
+            add("warn", "Permissions",
                 f"These still ask for your password: {', '.join(missing)}. One password sets them all up so they "
                 "never ask again.", "Allow all", lambda: h.allow_all(leds))
         else:
-            add("ok", "Password prompts", "Lighting, Game Boost and panel updates don't need your password.")
+            add("ok", "Permissions", "Lighting, Game Boost, the charge limit and panel updates don't need your password.")
 
         if cfg["agent"].get("enabled"):
             ok = core.agent_running()
@@ -6558,7 +6558,7 @@ class SystemPage(QWidget):
 
     def reset_boot_video(self):
         core.BOOT_VIDEO.unlink(missing_ok=True)
-        self.hub.toast("Default boot animation restored")
+        self.hub.toast("Default boot animation restored ✔")
         self.refresh()
 
     def backup(self):
@@ -6912,7 +6912,7 @@ class UpdatesPage(QWidget):
         chr_.addWidget(self.channel, 1)
         uv.addLayout(chr_)
         ur = QHBoxLayout()
-        self.btn_check = button("Check now", self.check_now, "primary")
+        self.btn_check = button("Check again", self.check_now, "primary")
         self.btn_rollback = button("Roll back", self.do_rollback, "danger")
         self.btn_restart = button("Restart Ally Hub", hub.restart_app, "primary")
         ur.addWidget(self.btn_check)
@@ -7035,7 +7035,7 @@ class UpdatesPage(QWidget):
             return
         core.save_github_token(t)
         self.token.clear()
-        self.hub.toast("Access key saved")
+        self.hub.toast("Access key saved ✔")
         self.refresh()
 
     def check_now(self):
@@ -7290,7 +7290,7 @@ class Hub(QMainWindow):
         self.progress.setRange(0, 0)
         self.progress.hide()
         self.pad_hint = None
-        self.btn_refresh = button("⟳ Refresh", self.refresh)
+        self.btn_refresh = button("Refresh", self.refresh)
         self.btn_log = button("Activity log", lambda: self.go("Activity"))
         self.btn_report = button("Report a problem", self.report_problem)
         self.btn_report.setToolTip("Report a problem")
@@ -7570,7 +7570,7 @@ class Hub(QMainWindow):
             for w in (self.pad_hint, self.hint_lb, self.hint_rb):
                 w.setVisible(self.gamepad.enabled)
 
-    FOOT_BUTTONS = (("btn_refresh", "refresh-cw", "⟳ Refresh", "Refresh"),
+    FOOT_BUTTONS = (("btn_refresh", "refresh-cw", "Refresh", "Refresh"),
                     ("btn_log", "terminal", "Activity log", "Activity log"),
                     ("btn_report", "bug", "Report a problem", "Report a problem"))
 
@@ -8682,14 +8682,14 @@ class Hub(QMainWindow):
         if not ok:
             return
         path = core.user_report(text, page)
-        self.toast("Report sent with everything attached." if path and core.LAST_QUEUE == "queued"
+        self.toast("Report sent with everything attached ✔" if path and core.LAST_QUEUE == "queued"
                    else core.report_hint() or "Couldn't save the report.", 7000)
 
     def send_reports_now(self):
         """Upload queued reports right away instead of waiting for the agent's next pass."""
         def done(r):
             if isinstance(r, tuple) and r[0]:
-                self.toast("Report sent. Thanks!", 6000)
+                self.toast("Report sent ✔ Thanks!", 6000)
             elif isinstance(r, tuple) and r[1]:
                 self.toast("Couldn't send the report. Check your access key on Settings → General.", 8000)
         BackgroundTask(self, core.upload_reports, done)
