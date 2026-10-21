@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.5.0.22
+
+- No charge limit is no longer flagged as a problem on the Checkup. The tip stays under Show all checks and on the
+  Battery page.
+
 ## 1.5.0.21
 
 - One word per action across the app: Remove (not Uninstall), Refresh, Check again, Reinstall, Decky Loader in full.

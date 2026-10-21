@@ -6249,9 +6249,10 @@ class DoctorPage(QWidget):
                 + (f", {b['cycles']} cycles." if b.get("cycles") else "."))
         if b.get("limit_file"):
             lim = b.get("limit") or "100"
-            add("ok" if lim != "100" else "warn", "Charge limit",
+            # a suggestion, not a problem (the owner, 1.5.0.22): "ok" keeps it under Show all checks
+            add("ok", "Charge limit",
                 f"Stops at {lim}%." if lim != "100" else
-                "No limit set. An 80% limit greatly extends battery lifespan.",
+                "No limit set. If the handheld lives on the charger, an 80% limit helps the battery last.",
                 None if lim != "100" else "Set it", None if lim != "100" else lambda: h.go("Battery & sleep"),
                 False)
 
