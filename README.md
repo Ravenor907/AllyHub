@@ -3,15 +3,15 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-1.5.1-e11d48?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/version-1.5.1.1-e11d48?style=flat-square">
   <img alt="SteamOS" src="https://img.shields.io/badge/SteamOS-3.8%2B-1a9fff?style=flat-square&logo=steam&logoColor=white">
   <img alt="Device" src="https://img.shields.io/badge/ROG%20Xbox%20Ally%20X-tested-8b5cf6?style=flat-square">
   <img alt="License" src="https://img.shields.io/github/license/Ravenor907/AllyHub?color=22c55e&style=flat-square">
 </p>
 
 <p align="center"><b>One app to set up, customize and look after a ROG Xbox Ally X running SteamOS.</b><br>
-Mods, plugins and apps in one tap, game performance boosts, joystick ring lighting, themes, health stats
-and a phone remote. Works in Desktop Mode, and fully in Game Mode with just the controller.</p>
+Mods, plugins and apps in one tap that stay up to date, game performance boosts, joystick ring lighting, themes
+and health stats. Works in Desktop Mode, and fully in Game Mode with just the controller.</p>
 
 <p align="center"><sub>Built and maintained with <a href="https://claude.ai">Claude</a> (Anthropic's AI) under my direction.</sub></p>
 
@@ -34,16 +34,16 @@ and a phone remote. Works in Desktop Mode, and fully in Game Mode with just the 
 | 🧩 **One store** | Essentials, mods, apps, launchers and the full Decky Plugin Store, each a section you reach with LT/RT: Decky Loader, Ally Center, Lossless Scaling and OptiScaler frame gen (Bazzite's builds), EmuDeck and more. Turn any plugin off without uninstalling it |
 | 📦 **30 curated apps** | Heroic, Greenlight (Xbox Cloud), Moonlight, ProtonPlus, Discord, Spotify and more, each with install, update and remove |
 | 🕹️ **PC launchers** | Battle.net, Epic, EA, Ubisoft, GOG and 10 more added straight to your Steam library with their own cover art, plus uninstall and a leftover cleaner |
-| 🚀 **Performance** | Game Boost while you play, a one-tap system tune-up and FSR 4 for every game, ideas from CachyOS and Bazzite, all undoable. In Advanced: experimental 144 Hz with a guided test, and a frame meter |
+| 🚀 **Performance** | Game Boost while you play, a one-tap system tune-up and FSR 4 for every game, ideas from CachyOS and Bazzite, all undoable. In Advanced: experimental 144 Hz that undoes itself if you don't keep it |
 | 🎚️ **Game settings** | Per-game switches instead of typing launch options (FSR 4, frame generation, Steam Deck mode and more), the right Proton per game, and help when a game won't start |
 | 🕰️ **Save time machine** | A snapshot of each game's saves every time it starts, restorable from Game Mode, with undo |
 | 🌙 **Sleep guardian** | Battery used per sleep, what woke the handheld and failed sleeps, with a fix for USB devices that keep waking it |
 | 💽 **Storage saver** | See each game's real size and clear what Steam leaves behind: shader caches and files of removed games, unused Proton builds, old downloads |
 | 🌈 **Ring lighting** | Smooth animated effects, a customizable RGB Spiral, battery and per-game colors, or hand the rings to HueSync |
 | 🎨 **Themes** | 8 themes, custom accent colors, interface size, and tabs on the top or as icons down the sides |
-| 🩺 **Home at a glance** | Temps, power draw and battery, a checkup that only shows what needs you (with the fix), history and drain per game |
+| 🩺 **Good to go?** | Home answers it first: battery, temperatures, battery health and storage, then live readings, history and drain per game |
 | 🤖 **Background helper** | Dock mode, Update Guardian, battery history and scheduled game save backups |
-| 📱 **Phone remote** | PIN-protected page to check battery and temps, change lighting and wake your PC |
+| 🔁 **Keeps everything current** | Apps, Decky plugins and tools installed through Ally Hub track their newest versions; one Update all, and the helper applies the password-free ones by itself |
 | 🔄 **Self-updating** | Updates itself and rolls back on its own if a new version misbehaves |
 
 ## 🚀 Install
@@ -86,11 +86,11 @@ That's it. Ally Hub keeps itself up to date from here on.
 
 | Tab | Sections |
 |---|---|
-| **Home** | Overview (battery, temps, checkup) · Battery & sleep · Storage (all cleanup) |
+| **Home** | Overview (good to go? battery, temps, health) · Battery & sleep · Storage (all cleanup) |
 | **Store** | Essentials · Mods · Apps · Decky plugins · Installed · Launchers |
 | **Games** | Game settings · Performance · Saves |
 | **Customize** | Lighting · Theme |
-| **Settings** | General (Simple / Advanced, background helper, updates, backups) · Connections (phone remote) · Activity log (Advanced) |
+| **Settings** | General (Ally Hub setup checkup, Simple / Advanced, background helper, updates, backups) · Connections (Wake my PC, Tailscale) · Activity log (Advanced) |
 
 <details>
 <summary><b>Performance</b></summary>

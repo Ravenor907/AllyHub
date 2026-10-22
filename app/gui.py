@@ -22,8 +22,7 @@ from core import (APP_NAME, CATALOG, CATALOG_BY_ID, HOME, USER, VERSION, Item, l
 from PySide6.QtCore import (QBuffer, QByteArray, QEvent, QIODevice, QObject, QPoint, QPointF, QProcess, QProcessEnvironment, QRectF, QSize,
                             QSocketNotifier, Qt, QTimer, QUrl, Signal)
 from PySide6.QtGui import (QColor, QDesktopServices, QFont, QIcon, QImage, QImageReader,
-                           QKeyEvent, QMouseEvent, QOpenGLContext, QPainter, QPainterPath, QPen, QPixmap, QSurface,
-                           QSurfaceFormat, QTextCursor, QWindow)
+                           QKeyEvent, QMouseEvent, QPainter, QPainterPath, QPen, QPixmap, QTextCursor)
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
     QAbstractButton, QAbstractItemView, QAbstractScrollArea, QAbstractSlider, QApplication, QCheckBox, QColorDialog, QComboBox,
@@ -1408,7 +1407,7 @@ class TouchScroller(QObject):
 
     def _area_for(self, w):
         while w is not None:
-            if isinstance(w, (TouchPad, FrameGraph)) or w.property("noTouchScroll"):
+            if w.property("noTouchScroll"):
                 return None
             if isinstance(w, self.KEEP) and not (isinstance(w, QPlainTextEdit) and w.isReadOnly()):
                 return None                              # the Activity log (read-only) still drags
@@ -2612,247 +2611,6 @@ class RingPreview(QWidget):
                 p.drawArc(rect, start * 16, 180 * 16)
 
 
-class FrameProbe(QWindow):
-    """A tiny OpenGL surface whose buffer swaps wait for the screen (swap interval 1), so the time between swaps is
-    the real frame time: the same idea as a browser's requestAnimationFrame, which Monitor OC measures. Embedded with
-    createWindowContainer (no separate window). Under 2 ms between swaps = the swaps don't wait: can't measure."""
-
-    def __init__(self, on_frame):
-        super().__init__()
-        self.setSurfaceType(QSurface.SurfaceType.OpenGLSurface)
-        fmt = QSurfaceFormat()
-        fmt.setSwapInterval(1)
-        fmt.setSwapBehavior(QSurfaceFormat.SwapBehavior.DoubleBuffer)
-        self.setFormat(fmt)
-        self.ctx = None
-        self.failed = False
-        self.on_frame = on_frame
-        self.flip = False
-        self.timer = QTimer()
-        self.timer.setInterval(0)
-        self.timer.timeout.connect(self.frame)
-
-    def start(self):
-        self.timer.setInterval(0)
-        self.timer.start()
-
-    def stop(self):
-        self.timer.stop()
-
-    def frame(self):
-        if self.failed:
-            self.timer.stop()
-            return
-        if not self.isExposed():
-            self.timer.setInterval(50)                   # hidden: look again later, never spin
-            return
-        try:
-            if self.ctx is None:
-                ctx = QOpenGLContext()
-                ctx.setFormat(self.requestedFormat())
-                if not ctx.create():
-                    self.failed = True
-                    self.timer.stop()
-                    return
-                self.ctx = ctx
-            if not self.ctx.makeCurrent(self):
-                self.timer.setInterval(50)
-                return
-            t0 = time.perf_counter()
-            f = self.ctx.functions()
-            self.flip = not self.flip
-            c = 0.18 if self.flip else 0.24                  # a faint flicker shows it's running
-            f.glClearColor(c, c, c, 1.0)
-            f.glClear(0x4000)                                # GL_COLOR_BUFFER_BIT
-            self.ctx.swapBuffers(self)                       # waits for the screen's next refresh
-            now = time.perf_counter()
-            # swaps that don't wait (under 2 ms) would spin the CPU: then pace at about 250 a second instead
-            self.timer.setInterval(4 if now - t0 < 0.002 else 0)
-            self.on_frame(now)
-        except Exception:
-            self.failed = True
-            self.timer.stop()
-            core.report_exception("frame-meter")
-
-
-class FrameGraph(QWidget):
-    """Frame times as a line (like Monitor OC's): dashed target, red dots on skipped frames."""
-
-    def __init__(self):
-        super().__init__()
-        self.values, self.target_ms = [], None
-        self.setMinimumHeight(110)
-
-    def set_data(self, values: list, target_ms: float):
-        self.values, self.target_ms = list(values)[-150:], target_ms
-        self.update()
-
-    def paintEvent(self, _e):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        w, h = self.width(), self.height()
-        p.fillRect(self.rect(), QColor(0, 0, 0, 60))
-        tgt = self.target_ms or (sorted(self.values)[len(self.values) // 2] if self.values else 8.3)
-        top = tgt * 2.5                                      # the graph shows 0 to 2.5x the target frame time
-        y = lambda v: h - 6 - min(v, top) / top * (h - 12)
-        pen = QPen(QColor(255, 255, 255, 110), 1, Qt.DashLine)
-        p.setPen(pen)
-        p.drawLine(0, int(y(tgt)), w, int(y(tgt)))
-        if len(self.values) >= 2:
-            step = w / (len(self.values) - 1)
-            path = QPainterPath()
-            for i, v in enumerate(self.values):
-                pt = QPointF(i * step, y(v))
-                path.moveTo(pt) if i == 0 else path.lineTo(pt)
-            p.setPen(QPen(self.palette().highlight().color(), 2))
-            p.drawPath(path)
-            p.setPen(Qt.NoPen)
-            p.setBrush(QColor("#ef4444"))
-            for i, v in enumerate(self.values):
-                if v > 1.5 * tgt:
-                    p.drawEllipse(QPointF(i * step, y(v)), 3.5, 3.5)
-        p.end()
-
-
-class FrameMeter(QWidget):
-    """Measured Hz, frame time, jitter, fastest/slowest, skipped frames and the graph. `run(seconds)` measures for a
-    while and calls `done(stats)`; `start()` runs until `stop()`."""
-
-    def __init__(self, target_hz: float = None, in_sheet: bool = False):
-        super().__init__()
-        self.target_hz = target_hz
-        self.in_sheet = in_sheet          # the lab's meters live inside a sheet; the page meter yields to sheets
-        self.times, self.intervals = [], []
-        self.done = None
-        self.until = None
-        v = QVBoxLayout(self)
-        v.setContentsMargins(0, 0, 0, 0)
-        top = QHBoxLayout()
-        self.probe = FrameProbe(self._frame)
-        box = QWidget.createWindowContainer(self.probe, self)
-        box.setFixedSize(28, 28)                             # it has to be on screen for the swaps to wait for it
-        box.setFocusPolicy(Qt.NoFocus)
-        box.setVisible(False)            # a native GL box draws over everything (sheets, toasts): only while running
-        self.box = box
-        top.addWidget(box)
-        self.big = label("–", "bigValue")
-        top.addWidget(self.big)
-        self.nums = label("Not running", "cardMeta", wrap=True)
-        top.addWidget(self.nums, 1)
-        v.addLayout(top)
-        self.graph = FrameGraph()
-        v.addWidget(self.graph)
-        self.legend = label("The line should stay flat on the dashed target. Red dots are skipped frames "
-                            "(more than 1.5x the usual frame time).", "cardMeta", wrap=True)
-        v.addWidget(self.legend)
-        self.ui = QTimer(self)
-        self.ui.setInterval(250)
-        self.ui.timeout.connect(self.refresh)
-
-    def running(self) -> bool:
-        return self.ui.isActive()
-
-    def start(self, seconds: float = None, done=None):
-        self.times, self.intervals = [], []
-        self.done = done
-        self.until = time.perf_counter() + seconds if seconds else None
-        self.box.setVisible(True)
-        self.probe.start()
-        self.ui.start()
-
-    def stop(self):
-        self.probe.stop()
-        self.ui.stop()
-        self.box.setVisible(False)
-        self.refresh()
-
-    def _finish(self):
-        """A timed run is over (or can't run): stop and report, exactly once."""
-        self.until = None
-        self.stop()
-        if self.done:
-            cb, self.done = self.done, None
-            cb(self.stats())
-
-    def stats(self) -> dict:
-        return core.frame_stats(self.intervals[2:], self.target_hz)  # the first swaps can be slow while starting
-
-    def _frame(self, t: float):
-        if self.times:
-            self.intervals.append((t - self.times[-1]) * 1000.0)
-        self.times.append(t)
-        if len(self.times) > 64:
-            self.times = self.times[-2:]
-        if self.until is None and len(self.intervals) > 6000:
-            self.intervals = self.intervals[-5000:]      # an open-ended run keeps the last ~35 s at 144 Hz
-        if self.until and t >= self.until:
-            self._finish()
-
-    def refresh(self):
-        if self.running():
-            if not self.in_sheet and _HUB is not None and getattr(_HUB, "_sheet", None) is not None:
-                self.stop()                              # a sheet opened over the page meter: it yields
-                return
-            if self.until and (time.perf_counter() > self.until + 2 or self.probe.failed):
-                self._finish()                           # no frames are coming (hidden, failed): end the run anyway
-                return
-        st = self.stats()
-        if self.probe.failed:
-            self.big.setText("–")
-            self.nums.setText("This screen setup can't be measured (no OpenGL here).")
-            return
-        if st.get("count", 0) < 2:
-            self.nums.setText("Measuring…" if self.probe.timer.isActive() else "Not running")
-            return
-        if not st["ok"]:
-            self.big.setText("–")
-            self.nums.setText("Frames aren't waiting for the screen here, so they can't be measured.")
-            return
-        self.big.setText(f"{st['hz']:.1f} Hz")
-        left = f" · {max(0, int(self.until - time.perf_counter()))} s left" if self.until else ""
-        self.nums.setText(f"Frame time {st['avg_ms']:.2f} ms · jitter ±{st['jitter_ms']:.2f} ms · fastest/slowest "
-                          f"{st['fastest_ms']:.2f}/{st['slowest_ms']:.2f} ms · skipped {st['skipped']} of "
-                          f"{st['count']}{left}")
-        if st.get("off_target"):
-            self.nums.setText(self.nums.text() + f" · not at {self.target_hz:g} Hz: set Steam's refresh slider to it")
-        self.graph.set_data(self.intervals[-150:], st["target_ms"])
-
-
-class TouchPad(QFrame):
-    """A big box that counts real finger taps (the 144 Hz lab's touch check). The controller can't press it: only a
-    touch or a pointer press reaches mousePressEvent, so a count means the touch screen works."""
-    tapped = Signal(int)
-
-    def __init__(self):
-        super().__init__()
-        self.count = 0
-        self.setObjectName("card")
-        self.setAttribute(Qt.WA_AcceptTouchEvents, True)
-        self.setAttribute(Qt.WA_StyledBackground, True)
-        self.setFocusPolicy(Qt.NoFocus)
-        self.setMinimumHeight(160)                     # a big target: a finger, not a pointer
-        lay = QVBoxLayout(self)
-        self.text = label("Tap here", "bigValue")
-        lay.addWidget(self.text, 0, Qt.AlignCenter)
-
-    def set_text(self, t: str):
-        self.text.setText(t)
-
-    def _hit(self):
-        self.count += 1
-        self.tapped.emit(self.count)
-
-    def event(self, e):
-        if e.type() == QEvent.TouchBegin:
-            self._hit()
-            e.accept()
-            return True
-        return super().event(e)
-
-    def mousePressEvent(self, e):
-        self._hit()
-
-
 class CardButton(QPushButton):
     """A QPushButton that hosts a child layout (preset cards, theme cards).
 
@@ -3733,7 +3491,7 @@ class AutomationPage(QWidget):
         self._anim = QTimer(self)          # animates the per-game previews while they're on screen
         self._anim.timeout.connect(self._tick_previews)     # started by Hub.on_page_shown on Lighting
         card, cv = titled_card("bot", core.THEMES["ROG Crimson"]["accent"], "Background helper",
-                               'Runs quietly, in Game Mode too. Lighting, Game Boost, saves, the panel and the phone remote need it.')
+                               'Runs quietly, in Game Mode too. Lighting, Game Boost, saves, updates and the panel need it.')
         self.agent_status = label("", "cardDesc", wrap=True)
         cv.addWidget(self.agent_status)
         row = QHBoxLayout()
@@ -3957,15 +3715,14 @@ class AutomationPage(QWidget):
 
 
 # ==========================================================================
-# Connect (Wake my PC, Tailscale, phone remote)
+# Connect (Wake my PC, Tailscale)
 # ==========================================================================
 
 class ConnectPage(QWidget):
     def __init__(self, hub):
         super().__init__()
         self.hub = hub
-        v = page_shell(self, "Connect", "Wake your PC, stream from anywhere, and control your handheld "
-                                        "from your phone.")
+        v = page_shell(self, "Connect", "Wake your PC and stream from anywhere.")
         grid = two_col_grid()
 
         wcard, wv = titled_card("power", "#22c55e", "Wake my PC",
@@ -4007,25 +3764,6 @@ class ConnectPage(QWidget):
         grid.addWidget(tcard, 0, 1)
         v.addLayout(grid)
 
-        rcard, rv = titled_card("smartphone", "#a855f7", "Phone remote",
-                                'Battery, temps, ring colors and Wake my PC from your phone. Home Wi-Fi or Tailscale, PIN protected.')
-        self.remote_enable = QCheckBox("Enable phone remote")
-        self.remote_enable.toggled.connect(self.toggle_remote)
-        rv.addWidget(self.remote_enable)
-        rr = QHBoxLayout()
-        rr.addWidget(label("Port", "cardDesc"))
-        self.port = QSpinBox()
-        self.port.setRange(1024, 65535)
-        self.port.editingFinished.connect(
-            lambda: update_config(lambda c: c["agent"].__setitem__("remote_port", self.port.value())))
-        rr.addWidget(self.port)
-        rr.addWidget(button("New PIN", self.new_pin))
-        rr.addStretch()
-        rv.addLayout(rr)
-        self.remote_info = label("", "statValue", wrap=True)
-        self.remote_info.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        rv.addWidget(self.remote_info)
-        v.addWidget(rcard)
         v.addStretch()
 
     def refresh(self):
@@ -4048,21 +3786,6 @@ class ConnectPage(QWidget):
             "Not installed." if not installed else
             f"✔ Connected. This Ally's Tailscale address: {ip}" if ip else
             "Installed but not logged in. Tap Log in, then follow the link in the Activity log.")
-
-        a = cfg["agent"]
-        self.remote_enable.blockSignals(True)
-        self.remote_enable.setChecked(bool(a.get("remote")))
-        self.remote_enable.blockSignals(False)
-        self.port.setValue(int(a.get("remote_port") or 8787))
-        if a.get("remote") and a.get("remote_pin"):
-            ips = core.local_ips() or ["<your handheld's IP>"]
-            urls = "\n".join(f"http://{ip}:{a['remote_port']}" for ip in ips)
-            running = core.agent_running()
-            self.remote_info.setText(
-                f"On your phone, open:\n{urls}\nPIN: {a['remote_pin']}"
-                + ("" if running else "\n(The background helper is off: turn it on in Settings → General)"))
-        else:
-            self.remote_info.setText("")
 
     def save_wol(self):
         mac = self.wol_mac.text().strip()
@@ -4094,19 +3817,6 @@ class ConnectPage(QWidget):
     def ts_logout(self):
         self.hub.runner.submit("Tailscale logout", f"sudo {core.TAILSCALE_BIN} logout", "tailscale-logout")
 
-    def toggle_remote(self, on):
-        def fn(c):
-            c["agent"]["remote"] = on
-            if on and not c["agent"].get("remote_pin"):
-                c["agent"]["remote_pin"] = f"{secrets.randbelow(10**6):06d}"
-        update_config(fn)
-        if on and not core.agent_running():
-            self.hub.enable_agent()
-        QTimer.singleShot(1500, self.refresh)
-
-    def new_pin(self):
-        update_config(lambda c: c["agent"].__setitem__("remote_pin", f"{secrets.randbelow(10**6):06d}"))
-        self.refresh()
 
 
 # ==========================================================================
@@ -4198,6 +3908,7 @@ class HealthPage(QWidget):
         bl.addWidget(label("History needs the background helper with Battery history on.", "bannerText", wrap=True), 1)
         bl.addWidget(button("Set up", lambda: hub.go("General"), "primary"))
         v.addWidget(self.banner)
+        self.slot = v.count()          # "Good to go?" goes here, first (Hub puts it in)
         grid = QGridLayout()
         grid.setSpacing(16)
         self.live = {k: StatTile(k, big=True) for k in
@@ -4205,7 +3916,6 @@ class HealthPage(QWidget):
         for n, t in enumerate(self.live.values()):
             grid.addWidget(t, n // 3, n % 3)
         v.addLayout(grid)
-        self.slot = v.count()          # the Checkup goes here (Hub puts it in)
         v.addWidget(label("HISTORY", "section"))
         chips = QHBoxLayout()
         self.series_chips, self.range_chips = {}, {}
@@ -5897,46 +5607,6 @@ class _PerformanceRefresh:
         core.refresh_request(hz)
         self.hub.toast("Restarting your handheld…", 5000)
 
-    def toggle_meter(self, *_args):
-        if self.meter.running():
-            self.meter.stop()
-            self.btn_meter.setText("Start")
-        else:
-            self.meter.start()
-            self.btn_meter.setText("Stop")
-
-    def lab_start(self, *_args):
-        if not GAMEMODE:
-            msg_info(self, APP_NAME, "The 144 Hz lab runs in Game Mode. Switch to Game Mode and start it there.")
-            return
-        if not core.agent_running():
-            msg_warn(self, APP_NAME, "The background helper has to be on (Settings → General): it runs the restarts "
-                                     "and undoes a step if the screen goes black.")
-            return
-        if core.refresh_busy():
-            msg_info(self, APP_NAME, "A 144 Hz test is already running. Finish it first.")
-            return
-        if not ask(self, "Run the 144 Hz test?\n\n"
-                         "What happens: your handheld restarts up to 3 times, once per screen setting. After each "
-                         "restart Ally Hub opens by itself and walks you through a few quick checks, one screen at a "
-                         "time (about 3 minutes): set 144 Hz, look at the picture, tap a box, and a 30 second frame "
-                         "test with VRR off and on.\n\n"
-                         "After each round it tells you what it found. At the end, keep the best setting or go back "
-                         "to before, and the results are sent as a report.\n\n"
-                         "Save your game first. If anything goes wrong, do nothing: it undoes itself."):
-            return
-        if core.lab_start():
-            self.hub.toast("Restarting into round 1…", 5000)
-
-    def lab_report(self, *_args):
-        if not core.lab_state().get("results"):
-            msg_info(self, APP_NAME, "No lab results yet. Run the 144 Hz lab in Game Mode first.")
-            return
-        if core.lab_report_sent() and not ask(self, "These results were already sent when the lab ended. Send them "
-                                                    "again?"):
-            return
-        self.hub.toast("Lab report sent ✔" if core.lab_send_report() else "Couldn't save the report (see Activity log)")
-
     def refresh_keep(self, *_args):
         self.hub.toast("Kept ✔" if core.refresh_keep() else "Nothing to keep right now.")
         self.refresh_update()
@@ -5954,14 +5624,7 @@ class _PerformanceRefresh:
         self.btn_refresh_off.setVisible(bool(have) and not trial)
         self.btn_refresh_try.setEnabled(not trial and st.get("status") != "pending")
         self.btn_refresh_try.setVisible(not have or trial)
-        lab, busy = core.lab_state(), core.lab_active()
-        self.btn_refresh_try.setEnabled(self.btn_refresh_try.isEnabled() and not busy)   # never with the lab
-        self.btn_refresh_off.setEnabled(not busy)
-        self.btn_lab.setEnabled(not trial and not busy and st.get("status") != "pending")
-        self.btn_lab_report.setVisible(bool(lab.get("results")))
-        if core.lab_active():
-            text = "The 144 Hz lab is running: Ally Hub opens with the next checks after each restart."
-        elif trial and core.refresh_left() is None:
+        if trial and core.refresh_left() is None:
             text = "Restarting to load 144 Hz…"
         elif trial:
             text = f"Testing {st.get('max')} Hz: going back in {core.refresh_left()} s unless you keep it."
@@ -6011,30 +5674,10 @@ class PerformancePage(QWidget, _PerformanceRefresh):
             rr.addWidget(b)
         rr.addStretch()
         rv.addLayout(rr)
-        lr = QHBoxLayout()
-        self.btn_lab = button("Run the 144 Hz test", self.lab_start)
-        self.btn_lab_report = button("Send lab report", self.lab_report)
-        lr.addWidget(self.btn_lab)
-        lr.addWidget(self.btn_lab_report)
-        lr.addStretch()
-        rv.addLayout(lr)
         self.refresh_status = label("", "cardMeta", wrap=True)
         rv.addWidget(self.refresh_status)
         rv.addWidget(label("⚠ " + core.REFRESH_DISCLAIMER, "cardWarn", wrap=True))   # shown in both modes
         v.addWidget(adv(rcard))
-
-        # the owner (1.4.1.16): a frame time counter and graph like Monitor OC's, built in
-        mcard, mv = titled_card("activity", "#22c55e", "Frame meter",
-                                "Counts every screen refresh: measured Hz, frame time, jitter and skipped frames, with "
-                                "a live graph. Leave it running while you change Steam's refresh rate or VRR.")
-        self.meter = FrameMeter()
-        mv.addWidget(self.meter)
-        mr = QHBoxLayout()
-        self.btn_meter = button("Start", self.toggle_meter, "primary")
-        mr.addWidget(self.btn_meter)
-        mr.addStretch()
-        mv.addLayout(mr)
-        v.addWidget(adv(mcard))                          # experimental tools stay in Advanced (the owner, 1.5.0)
 
         tune_head = label("TUNE-UP", "section")
         tcard, tv = titled_card(
@@ -6066,9 +5709,6 @@ class PerformancePage(QWidget, _PerformanceRefresh):
         super().hideEvent(ev)
         if hasattr(self, "_timer"):
             self._timer.stop()
-        if getattr(self, "meter", None) is not None and self.meter.running():
-            self.meter.stop()                            # never keep swapping frames on a page nobody sees
-            self.btn_meter.setText("Start")
 
     def refresh(self):
         self.refresh_update()
@@ -6176,13 +5816,20 @@ class PerformancePage(QWidget, _PerformanceRefresh):
 
 
 class DoctorPage(QWidget):
-    """Home > Overview's Checkup since 1.4.0 (it was the Ally Doctor page): only problems show, with their fix;
-    everything that's fine folds into one line."""
+    """Two checkups (1.5.1.1, the owner: Home is "is my device good to go"; everything else lives elsewhere).
+    area "device" (Home → Overview, top): battery, temperatures, battery health, storage. area "app" (Settings →
+    General, top): Decky, permissions, updates, the helper, Flathub, tune-up, Update Guardian. Both read one
+    check_list; each shows its own rows. The device one also says, in one row, when the app one needs you.
+    Only problems show, with their fix; everything that's fine folds into one line."""
 
-    def __init__(self, hub):
+    DEVICE = {"Battery", "Temperatures", "Battery health", "Charge limit", "Storage space", "Shader cache"}
+
+    def __init__(self, hub, area: str = "device"):
         super().__init__()
         self.hub = hub
-        card, cv = titled_card("stethoscope", "#22c55e", "Checkup")
+        self.area = area
+        card, cv = titled_card("stethoscope" if area == "device" else "wrench", "#22c55e",
+                               "Good to go?" if area == "device" else "Ally Hub setup")
         self.summary = label("Checking…", "cardDesc", wrap=True)
         cv.addWidget(self.summary)
         self.box = QVBoxLayout()
@@ -6194,7 +5841,7 @@ class DoctorPage(QWidget):
         row.addWidget(button("Check again", self.run_checks))
         self.btn_all = button("Show all checks", self.toggle_all)
         row.addWidget(self.btn_all)
-        if not GAMEMODE:                    # was a Quick fix; only makes sense in Desktop Mode
+        if not GAMEMODE and area == "app":  # was a Quick fix; only makes sense in Desktop Mode
             row.addWidget(button("Return to Game Mode", hub.return_to_game_mode))
         row.addStretch()
         cv.addLayout(row)
@@ -6202,6 +5849,7 @@ class DoctorPage(QWidget):
         self.fixes = []
         self.ran = False
         self.show_all = False
+        self.probe = {}
 
     def toggle_all(self, *_args):
         self.show_all = not self.show_all
@@ -6265,6 +5913,23 @@ class DoctorPage(QWidget):
                 "Clear" if big else None, h.system.clear_shaders if big else None, False)
 
         b = core.battery_info()
+        try:
+            cap = int(b.get("capacity") or 0)
+        except ValueError:
+            cap = 0
+        if b.get("capacity"):
+            plugged = (b.get("status") or "").lower() in ("charging", "full", "not charging")
+            add("fail" if cap <= 10 and not plugged else "warn" if cap <= 20 and not plugged else "ok", "Battery",
+                f"{cap}%" + (", charging." if (b.get("status") or "").lower() == "charging" else
+                             ", plugged in." if plugged else f", about {core.time_left_text()} left."
+                             if core.time_left_text() not in ("", "n/a") else "."))
+        sens = core.sensors()
+        hot = [f"{n} {t:.0f}°C" for n, t in (("CPU", sens.get("cpu_temp")), ("GPU", sens.get("gpu_temp"))) if t]
+        top = max([t for t in (sens.get("cpu_temp"), sens.get("gpu_temp")) if t] or [0])
+        if hot:
+            add("fail" if top >= 95 else "warn" if top >= 90 else "ok", "Temperatures",
+                ", ".join(hot) + (". Very hot: let it cool, and check the vents aren't blocked." if top >= 95 else
+                                  ". Running hot." if top >= 90 else ". Normal."))
         if b.get("health"):
             add("ok" if b["health"] >= 80 else "warn", "Battery health",
                 f"{b['health']}% of original capacity"
@@ -6322,9 +5987,10 @@ class DoctorPage(QWidget):
                 lambda _=False, i=a.get("id"): h.dismiss_alert(i), False)
         return out
 
-    @staticmethod
-    def _probe() -> dict:
-        """The slow checks (network, walking the shader cache, flatpak), run off the UI thread."""
+    def _probe(self) -> dict:
+        """The slow checks, run off the UI thread: the shader cache for the device, network for the app."""
+        if self.area == "device":
+            return {"shader": core.dir_size(core.SHADER_CACHE) if core.SHADER_CACHE.exists() else None}
         net = core.internet_ok()
         return {"net": net,
                 "shader": core.dir_size(core.SHADER_CACHE) if core.SHADER_CACHE.exists() else None,
@@ -6333,6 +5999,9 @@ class DoctorPage(QWidget):
 
     def run_checks(self, *_args):
         self.ran = True
+        other = getattr(self.hub, "doctor_app", None)
+        if self.area == "device" and other is not None and other is not self:
+            other.run_checks()                         # the device checkup counts the app checkup's problems
         if getattr(self, "_probing", False):
             return
         self._probing = True
@@ -6346,7 +6015,16 @@ class DoctorPage(QWidget):
         self.fixes = []
         icons = {"ok": ("✔", "on"), "warn": ("!", "warn"), "fail": ("✖", "fail")}
         problems = 0
-        checks = self.check_list()
+        everything = self.check_list()
+        checks = [c for c in everything if (c["title"] in self.DEVICE) == (self.area == "device")]
+        if self.area == "device":
+            other = getattr(self.hub, "doctor_app", None)
+            n = other.problem_count() if other is not None and other.ran else 0
+            if n:
+                checks.append(dict(status="warn", title="Ally Hub setup",
+                                   detail=f"{n} thing{'s' if n != 1 else ''} in Settings → General "
+                                          f"need{'s' if n == 1 else ''} you (apps, plugins, permissions).",
+                                   fix_label="Open", fix=lambda: self.hub.go("General"), auto=False))
         for c in checks:
             if c["status"] != "ok":
                 problems += 1
@@ -6371,9 +6049,21 @@ class DoctorPage(QWidget):
                 h.addWidget(button(c["fix_label"], c["fix"],
                                    "primary" if c["status"] == "fail" else ""))
             self.box.addWidget(card)
-        self.summary.setText(f"✔ Everything looks good ({len(checks)} checks)." if problems == 0 else
-                             f"{problems} thing{'s' if problems != 1 else ''} to look at.")
+        if self.area == "device":
+            self.summary.setText("✔ Good to go." if problems == 0 else
+                                 f"{problems} thing{'s' if problems != 1 else ''} to look at.")
+        else:
+            self.summary.setText(f"✔ Everything looks good ({len(checks)} checks)." if problems == 0 else
+                                 f"{problems} thing{'s' if problems != 1 else ''} to look at.")
         self.btn_fix_all.setVisible(bool(self.fixes))
+        if self.area == "app":
+            dev = getattr(self.hub, "doctor", None)
+            if dev is not None and dev is not self and dev.ran and not getattr(dev, "_probing", False):
+                dev.show_results(getattr(dev, "probe", None))   # refresh its "Ally Hub setup" row, no new checks
+
+    def problem_count(self) -> int:
+        return sum(1 for c in self.check_list() if c["status"] != "ok"
+                   and (c["title"] in self.DEVICE) == (self.area == "device"))
 
     def fix_all(self, *_args):
         for f in self.fixes:
@@ -7301,7 +6991,8 @@ class Hub(QMainWindow):
         self.saves = SavesPage(self)
         self.sleep = SleepPage(self)
         self.setup = SetupPage(self)
-        self.doctor = DoctorPage(self)
+        self.doctor = DoctorPage(self)                     # Home: is the handheld good to go
+        self.doctor_app = DoctorPage(self, "app")           # Settings → General: apps, plugins, permissions
         self.appearance = AppearancePage(self)
         self.updates = UpdatesPage(self)
         self.activity = ActivityPage()
@@ -7367,16 +7058,14 @@ class Hub(QMainWindow):
         QTimer.singleShot(1500, core.mark_gui_open)      # the 144 Hz countdowns start when the window is up
         self._refresh_timer = QTimer(self)             # the 144 Hz test's countdown, wherever you are in the app
         self._refresh_timer.timeout.connect(self.check_refresh)
-        self._refresh_timer.timeout.connect(self.check_lab)
         self._refresh_timer.start(1000)
         self._refresh_sheet = False
-        self._lab_sheet = False
 
     # ---- sections built from blocks (1.4.0) ----
     def compose_sections(self):
         """Put each block on the page the owner's map gives it. The objects that built the blocks keep their logic
         (self.system, self.automation, self.doctor, self.launchers); only where the blocks show changed."""
-        retitle(self.health, "Overview", "How your handheld is doing, and anything that needs you.")
+        retitle(self.health, "Overview", "Is your handheld good to go: battery, temperatures and health.")
         self.health._shell.insertWidget(self.health.slot, self.doctor.block)
         retitle(self.sleep, "Battery & sleep", "Battery care, and what every sleep cost and what woke the handheld.")
         add_block(self.sleep, self.system.card_battery, 0)
@@ -7404,8 +7093,8 @@ class Hub(QMainWindow):
         mr.addStretch()
         mv.addLayout(mr)
         add_block(self.updates, block(mcard, self.automation.block_general), 0)
-        retitle(self.connect_page, "Connections", "Wake your PC, play from anywhere, and control your handheld "
-                                                  "from your phone.")
+        add_block(self.updates, self.doctor_app.block, 0)    # the app checkup sits at the top of General
+        retitle(self.connect_page, "Connections", "Wake your PC and play from anywhere.")
         add_block(self.connect_page, adv(self.system.card_ssh))
         # 1.3.7.10: backups live with the other app settings, not in a section of their own
         add_block(self.updates, block(self.system.card_profile, self.system.card_backup, heading="Backups"))
@@ -7685,262 +7374,6 @@ class Hub(QMainWindow):
         if core.normalize_effect(self.lighting.effect) == core.normalize_effect(core.THEME_LIGHTING):
             self.lighting.set_effect(before)
 
-    def check_lab(self):
-        """The 144 Hz lab's checks for the step that just loaded (Game Mode, right after its restart)."""
-        if self._lab_sheet or self._sheet is not None or not core.lab_step_ready():
-            return
-        cur = core.lab_current()
-        if not cur:
-            return
-        self._lab_sheet = True
-        try:
-            self._run_lab_sheet(*cur)
-        finally:
-            self._lab_sheet = False
-            if getattr(self, "performance", None) is not None:
-                self.performance.refresh_update()
-
-    def _run_lab_sheet(self, hz: int, method: str):
-        """One clear question per screen (the owner: "what am I supposed to be doing"): a progress row on top, a
-        big question, numbered instructions only where something has to be done outside Ally Hub, and the frame
-        meter confirming the rate by itself."""
-        st = core.lab_state()
-        n, total = int(st.get("i", 0)) + 1, len(st.get("plan") or [])
-        res = {"picture": "-", "touch": "-", "taps": 0, "irq": "n/a", "frames_off": "-", "frames_on": "-"}
-        meters = {}
-        dev = core.touch_device()
-        dlg = QDialog(self)
-        dlg.setWindowTitle("144 Hz test")
-        dv = QVBoxLayout(dlg)
-        dv.setContentsMargins(28, 22, 28, 20)
-        dv.setSpacing(10)
-        dv.addWidget(label(f"144 Hz test · round {n} of {total}", "pageTitle"))
-        dv.addWidget(label(f"This round tries screen setting {method.upper()} at {hz} Hz.", "cardMeta"))
-        steps = [("see", "Check"), ("rate", f"Set {hz} Hz"), ("picture", "Picture"), ("touch", "Touch"),
-                 ("off", "VRR off"), ("on", "VRR on"), ("end", "Result")]
-        prog = QHBoxLayout()
-        chips = {}
-        for key, name in steps:
-            c = label(name, "pill")
-            c.setProperty("state", "off")
-            chips[key] = c
-            prog.addWidget(c)
-        prog.addStretch()
-        dv.addLayout(prog)
-        stack = QStackedWidget()
-        dv.addWidget(stack, 1)
-        pages = {}
-
-        def page(key, question, detail=""):
-            w = QWidget()
-            v = QVBoxLayout(w)
-            v.setContentsMargins(0, 6, 0, 0)
-            v.setSpacing(10)
-            v.addWidget(label(question, "cardTitle", wrap=True))
-            if detail:
-                v.addWidget(label(detail, "cardDesc", wrap=True))
-            pages[key] = (stack.addWidget(w), v)
-            return v
-
-        def go(key):
-            for k, m in meters.items():                 # a meter only runs on its own page
-                if k != key:
-                    m.stop()
-            stack.setCurrentIndex(pages[key][0])
-            seen = True
-            for k, c in chips.items():                   # done = on, current = busy, later = off
-                c.setProperty("state", "busy" if k == key else "on" if seen else "off")
-                if k == key:
-                    seen = False
-                c.style().unpolish(c)
-                c.style().polish(c)
-            if key == "rate":
-                meters["rate"].start()
-            if key == "touch":
-                res["_irq0"] = core.touch_irq_count(dev)
-            if key == "end":
-                finish_step()
-            # the controller's focus follows the page (the old page's buttons are hidden now)
-            QTimer.singleShot(0, dlg, lambda: next((b.setFocus() for b in stack.currentWidget().findChildren(QPushButton)
-                                                    if b.isVisible() and b.isEnabled()), None))
-
-        def row(v, *btns):
-            r = QHBoxLayout()
-            for text, fn, kind in btns:
-                r.addWidget(button(text, fn, kind))
-            r.addStretch()
-            v.addLayout(r)
-
-        def pick(key, value, nxt):
-            res[key] = value
-            core.lab_ping()                              # an answer: push the 10-minute idle undo back
-            go(nxt)
-
-        # 1. safety: nothing pressed = the step undoes itself (black screen)
-        v = page("see", "Can you read this?",
-                 "Press Yes. If the screen is black, flickering badly or unreadable, do nothing: this round "
-                 "undoes itself.")
-        count = label("", "cardMeta")
-        v.addWidget(count)
-        row(v, ("Yes", lambda *_: (core.lab_confirm(), go("rate")), "primary"),
-            ("No, undo it", lambda *_: (core.lab_finish(None), dlg.reject()), ""))
-
-        # 2. the rate: Steam's slider, confirmed by the meter
-        v = page("rate", f"Set the screen to {hz} Hz",
-                 "1.  Press the ••• button.\n"
-                 "2.  Open Performance (the battery icon).\n"
-                 f"3.  Move Refresh rate all the way to the right ({hz}).\n"
-                 "4.  Press ••• again to come back here.")
-        rate_m = FrameMeter(target_hz=hz, in_sheet=True)
-        meters["rate"] = rate_m
-        v.addWidget(rate_m)
-        rate_ok = label(f"Waiting for {hz} Hz…", "cardMeta")
-        v.addWidget(rate_ok)
-        row(v, ("Next", lambda *_: pick("rate", "set", "picture"), "primary"),
-            (f"It won't go to {hz}", lambda *_: pick("rate", f"slider stops below {hz}", "picture"), ""))
-
-        def watch_rate():
-            if stack.currentIndex() != pages["rate"][0] or not rate_m.running():
-                return
-            s2 = core.frame_stats(rate_m.intervals[2:][-120:], hz)
-            if s2.get("ok") and s2.get("count", 0) >= 100 and not s2.get("off_target"):
-                rate_ok.setText(f"✔ The screen is at {1000 / s2['median_ms']:.0f} Hz. Moving on…")
-                res["rate"] = "set"
-                core.lab_ping()                          # time in Steam's menu isn't idle time
-                QTimer.singleShot(1500, dlg, lambda: go("picture") if stack.currentIndex() == pages["rate"][0] else None)
-                rate_m.stop()
-            elif s2.get("ok") and s2.get("count", 0) >= 60:
-                rate_ok.setText(f"The screen is at {1000 / s2['median_ms']:.0f} Hz. Move the slider to {hz}.")
-        rate_watch = QTimer(dlg)
-        rate_watch.timeout.connect(watch_rate)
-        rate_watch.start(500)
-
-        # 3. picture
-        v = page("picture", "Does the screen look normal?", "Look for flicker, lines, shaking or odd colors.")
-        row(v, ("Looks normal", lambda *_: pick("picture", "good", "touch"), "primary"),
-            ("Flickers or glitches", lambda *_: pick("picture", "glitches", "touch"), ""),
-            ("Can't use it", lambda *_: pick("picture", "unusable", "end"), ""))
-
-        # 4. touch: counted automatically
-        v = page("touch", "Tap the box 5 times with your finger",
-                 "It moves on by itself after 5 taps. Nothing happens when you tap? Use the controller.")
-        pad = TouchPad()
-        v.addWidget(pad, 1)
-
-        def touch_answer(value):
-            if res.get("_touch_done") or stack.currentIndex() != pages["touch"][0]:
-                return                                   # answered once already (taps keep coming)
-            res["_touch_done"] = True
-            i0, i1 = res.pop("_irq0", None), core.touch_irq_count(dev)
-            res["irq"] = (i1 - i0) if i0 is not None and i1 is not None else "n/a"
-            res["taps"] = pad.count
-            pick("touch", value, "off")
-
-        def tapped(c):
-            pad.set_text(f"{min(c, 5)} of 5")
-            if c == 5:                                   # the 5 taps asked for; extra taps change nothing
-                QTimer.singleShot(600, dlg, lambda: touch_answer("works"))
-        pad.tapped.connect(tapped)
-        row(v, ("Tapping does nothing", lambda *_: touch_answer("none"), ""),
-            ("Taps land in the wrong spot", lambda *_: touch_answer("off target"), ""))
-
-        # 5 and 6. frames, measured by Ally Hub
-        frames = (("0 skipped", "0"), ("A few", "a few"), ("Many", "many"))
-
-        def frame_page(key, vrr, nxt):
-            v = page(key, f"Turn VRR {vrr}, then press Start",
-                     "1.  Press the ••• button and open Performance.\n"
-                     f"2.  Turn {'off' if vrr == 'off' else 'on'} VRR (variable refresh rate).\n"
-                     "3.  Press ••• again, then Start below. Keep still for 30 seconds.")
-            m = FrameMeter(target_hz=hz, in_sheet=True)
-            meters[key] = m
-            v.addWidget(m)
-            status = label("", "cardMeta", wrap=True)
-            v.addWidget(status)
-            manual = QWidget()
-            mv = QVBoxLayout(manual)
-            mv.setContentsMargins(0, 0, 0, 0)
-            mv.addWidget(label("Couldn't measure here. If you have Monitor OC, how many skipped frames did it show?",
-                               "cardMeta", wrap=True))
-            row(mv, *[(t, (lambda *_, val=val: pick(f"frames_{key}", val, nxt)), "") for t, val in frames])
-            manual.hide()
-
-            def measured(st, key=key, nxt=nxt):
-                res[f"frames_{key}_stats"] = st
-                if not st.get("ok"):
-                    status.setText("")
-                    manual.show()
-                    return
-                word = core._frames_word({"x_stats": st}, "x")
-                res[f"frames_{key}"] = word
-                status.setText(f"✔ {core.frame_summary(st)}: {word}. Moving on…")
-                QTimer.singleShot(2500, dlg, lambda: go(nxt) if stack.currentIndex() == pages[key][0] else None)
-
-            def measure(*_):
-                core.lab_ping()
-                status.setText("Measuring… 30 seconds. Don't touch anything.")
-                m.start(30, done=measured)
-            row(v, ("Start", measure, "primary"), ("Skip", lambda *_: pick(f"frames_{key}", "-", nxt), ""))
-            v.addWidget(manual)
-
-        frame_page("off", "off", "on")
-        frame_page("on", "on", "end")
-
-        # 7. what it found
-        v = page("end", "What this round found")
-        summary = label("", "cardDesc", wrap=True)
-        v.addWidget(summary)
-        actions = QHBoxLayout()
-        v.addLayout(actions)
-
-        def finish_step():
-            if res.get("_recorded"):
-                return
-            res["_recorded"] = True
-            for k in ("_irq0", "_touch_done"):
-                res.pop(k, None)
-            clean = {k: v for k, v in res.items() if not k.startswith("_")}
-            core.lab_record(clean)                      # logs: the agent adds them
-            more = core.lab_has_next()
-            text = "• " + "\n• ".join(core.lab_verdict(clean))
-            if not more:                                 # the last round: what the whole test shows
-                text += "\n\nOverall:\n• " + "\n• ".join(core.lab_conclusion(core.lab_state().get("results") or []))
-            else:
-                text += "\n\nNext round: a different screen setting, to compare. The handheld restarts."
-            summary.setText(text)
-            if more:
-                actions.addWidget(button("Next round", lambda *_: (core.lab_next() or core.lab_finish(None),
-                                                                   dlg.accept()), "primary"))
-            if res.get("picture") == "good":
-                actions.addWidget(button("Keep this one and finish", lambda *_: (core.lab_finish((hz, method)),
-                                                                               dlg.accept()), "" if more else "primary"))
-            actions.addWidget(button("Finish and go back to before", lambda *_: (core.lab_finish(None), dlg.accept())))
-            actions.addStretch()
-
-        dv.addWidget(label("⚠ Experimental. If anything goes wrong, do nothing: Ally Hub undoes it by itself.",
-                           "cardWarn", wrap=True))
-        tick = QTimer(dlg)
-
-        def update():
-            s = core.lab_state()
-            if s.get("status") != "step":
-                dlg.reject()
-                return
-            left = core.lab_left()
-            count.setText(f"Undoing this round in {left} s if there's no answer" if left is not None else "")
-        tick.timeout.connect(update)
-        tick.start(500)
-        go("rate" if st.get("confirmed") else "see")
-        update()
-        try:
-            run_dialog(dlg)
-        finally:
-            tick.stop()
-            rate_watch.stop()
-            pad.tapped.disconnect()
-            for m in meters.values():
-                m.stop()
-
     def check_refresh(self):
         """While a 144 Hz test runs: a panel with a live countdown, Keep and Undo now (in Game Mode, right after the
         restart: the agent reopens Ally Hub)."""
@@ -8124,7 +7557,8 @@ class Hub(QMainWindow):
         owners = {self.health: [], self.sleep: [self.system.refresh],
                   self.storage: [self.system.refresh], self.saves: [self.automation.refresh],
                   self.lighting_section: [self.automation.refresh], self.appearance: [self.system.refresh],
-                  self.updates: [self.automation.refresh], self.connect_page: [self.system.refresh]}
+                  self.updates: [self.automation.refresh, self.doctor_app.run_checks],
+                  self.connect_page: [self.system.refresh]}
         try:
             if page is self.health:
                 self.health.refresh()
@@ -8304,8 +7738,8 @@ class Hub(QMainWindow):
     def on_idle(self):
         self.progress.hide()
         self.update_cards()
-        if self.doctor.ran and self.current_page() is self.health:
-            self.doctor.run_checks()          # a fix just finished: the Checkup shouldn't show it as a problem
+        if self.doctor.ran and self.current_page() in (self.health, self.updates):
+            self.doctor.run_checks()          # a fix just finished (this re-checks the app checkup too)
 
     # ---- actions ----
     # ---- sudo password ----

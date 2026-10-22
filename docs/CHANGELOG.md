@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.5.1.1
+
+- **Home answers "is my handheld good to go?" first:** battery, temperatures, battery health and storage at the top,
+  then live readings, history and drain per game. Everything about apps, plugins, permissions and updates moved to
+  its own checkup at the top of Settings → General; Home shows one line when that needs you.
+- **The phone remote is gone.** Nothing in Ally Hub listens on your network anymore.
+- **144 Hz is simpler:** "Turn on 144 Hz" stays (Advanced), with its countdown and undo. The 144 Hz test, the frame
+  meter and lab reports are gone. If a test was running when this update arrives, the old screen setting comes back.
+- About 1,450 lines of code removed.
+
 ## 1.5.1
 
 **Keeps itself current.** Everything installed through Ally Hub tracks what's current on the internet: apps from

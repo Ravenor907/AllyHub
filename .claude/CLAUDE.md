@@ -16,15 +16,19 @@ move VERSION without making sure installed copies can still update.
 |---|---|---|
 | `app/allyhub.py` | Entry point: `--agent`, `--apply-rgb`, `--gamemode`, `--fullscreen` | Keep tiny |
 | `app/core.py` | Everything without Qt: config, system info, LEDs, catalog, profiles, themes, GitHub updates and error reports | **Standard library only** |
-| `app/agent.py` | Background systemd user service: lighting, dock mode, health log, Update Guardian, save backups, phone remote, report upload, daily auto-update | **Standard library only** |
+| `app/agent.py` | Background systemd user service: lighting, dock mode, health log, Update Guardian, save backups, keep current, report upload, daily auto-update | **Standard library only** |
 | `app/gui.py` | PySide6 GUI. No sidebar: `Hub.TABS` defines 5 top tabs (LB/RB), each a `GroupPage` with section chips (LT/RT). Layout since 1.4.0: see "Layout" below. No shortcut tiles on Home (the owner's call). Navigate in code with `hub.go("Section name")` (old names still work through `Hub.ALIASES`) | Only `PySide6-Essentials` modules (QtCore, QtGui, QtWidgets, QtNetwork). No QtCharts, no extra pip packages |
 | `scripts/install.sh` / `scripts/uninstall.sh` | User-level install into `~/.local/share/allyhub` with a venv | No sudo in install.sh |
 | `tests/run_tests.py` | Full test suite, runs without Qt or hardware | Must pass before any push |
 
 **Layout (1.4.0, the owner's call: "simple up front, complex under the hood", intuitive at a glance, customizable
 without feeling overwhelming).** `Hub.TABS`:
-- **Home:** Overview (`HealthPage`: live tiles, then the Checkup (`DoctorPage.block`: only problems show,
-  "Show all checks" for the rest; Update Guardian alerts show here only), then history) · Battery & sleep
+- **Home (1.5.1.1, the owner: "is my device good to go" first, everything else in other folders):** Overview
+  (`HealthPage`: FIRST the device checkup "Good to go?" (`Hub.doctor`, `DoctorPage(area="device")`: battery level,
+  temperatures, battery health, charge limit tip, storage, shader cache; one "Ally Hub setup" row when the app
+  checkup needs you), then live tiles, history, drain per game). The app checkup (`Hub.doctor_app`, area "app":
+  Decky, Permissions, Updates, helper, Flathub, tune-up, Game Mode library, Update Guardian alerts) sits at the top
+  of Settings → General. Both read one `check_list`; `DoctorPage.DEVICE` decides which rows are the device's. · Battery & sleep
   (`SleepPage` + `SystemPage.card_battery`) · Storage (`StoragePage` + `card_storage` "More cleanup": shader cache,
   unused app runtimes, launcher leftovers) · Setup (chip only until setup is done).
 - **Store (1.3.7.10):** Essentials · Mods · Apps · Decky plugins · Installed are sections that show ONE `BrowsePage`
@@ -36,7 +40,10 @@ without feeling overwhelming).** `Hub.TABS`:
 - **Customize:** Lighting (studio gets `AutomationPage.block_lighting`) · Theme (`AppearancePage` + `card_boot`).
 - **Settings:** General (`UpdatesPage` with the Simple/Advanced card and `AutomationPage.block_general` on top,
   Backups (profile, settings backup) at the end, "What's new" instead of the full changelog) · Connections
-  (`ConnectPage` + SSH) · Activity log (Advanced only).
+  (`ConnectPage`: Wake my PC, Tailscale, SSH) · Activity log (Advanced only).
+**Phone remote: removed in 1.5.1.1 (the owner).** No network listener in the agent; `remote_action`/`status` stay
+for the Quick Access panel. Old `agent.remote*` config keys stay in `DEFAULT_CONFIG` (never removed) and are ignored;
+`scrub` still hides an old PIN. Don't bring a network server back without the owner.
 **One place per job (1.3.7.10, the owner):** an installed plugin is turned off or removed only under Your plugins;
 other cards show a check and say where it's managed. Quick fixes are gone: each fix lives where it belongs.
 How it's built: a section is one existing page; blocks from other objects are added with `add_block` / `retitle`
@@ -318,6 +325,9 @@ people to turn VRR off) shows on the card, the confirm,
 the countdown sheet and the ••• panel. Owner's Monitor OC test: VRR on skipped frames, VRR off was clean (the
 panel's VRR range stays 48-120). Touch stops working at 144 Hz (owner, 1.4.1.13): suspected the panel's
 touch controller timing its scans to the display's blanking, which the faster clock shortens; unconfirmed.
+**The lab, frame meter and lab reports were REMOVED in 1.5.1.1 (the owner: reduce the 144 Hz scope).** Only "Turn on
+144 Hz" (`refresh_lua`, the sped-up 120 Hz timing = old method "a") with the trial/undo above remains; `retire_lab`
+(agent, first tick) winds down a lab caught mid-run. History of the lab, for context:
 **144 Hz lab (1.4.1.15, the owner: goal 144 Hz + VRR + touch, no dropped frames; Game Mode only).** `refresh_lua(hz,
 method)`: a = clock sped up, b = keep the 120 Hz vblank time (more lines, faster clock), c = halve h porches (lower
 clock). Stock Ally profile = fixed clock, VFP only (vfp 54 = 120 Hz), so >120 must raise the clock. The lua logs

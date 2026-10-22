@@ -6,7 +6,7 @@ Ally Hub test suite. Runs without Qt or a real handheld:
 
 - compile: every module and shell script parses
 - core:    scrubbing, versions, reports, profiles, LED writes, catalog commands
-- agent:   game detection, lighting decisions, health log, phone remote (real HTTP)
+- agent:   game detection, lighting decisions, health log, the panel's status and actions
 - update:  install from a fake GitHub tarball, crash-loop rollback, bad-version skip
 - gui:     builds every page and drives every action through a stand-in Qt (tests/mockqt)
 
@@ -1224,116 +1224,18 @@ check(len(set(_z)) > 1, "Ally Hub's copy of the chip spiral is still a rainbow a
 check(core.led_dim(255) == 1.0 and core.led_dim(0) == 0 and core.led_dim(128) < 0.25 and core.led_dim("x") == 1.0
       and core.led_gamma((255, 0, 0), core.led_dim(3)) == (1, 0, 0),
       "the brightness slider follows the eye (half = much dimmer), and very low stays on")
-# ---- 144 Hz lab (1.4.1.15) ----
-for _m in "abc":
-    _l = core.refresh_lua(144, _m)
-    check(f'local METHOD = "{_m}"' in _l and _l.count("(") == _l.count(")") and "[allyhub-lab]" in _l, f"lab method {_m} profile")
-check('METHOD = "a"' in core.refresh_lua(144, "zz"), "an unknown method falls back to the plain one")
-_inp = Path(HOME) / "input-devices"
-_inp.write_text('I: Bus=0011\nN: Name="AT Translated Set 2 keyboard"\nB: PROP=0\nB: EV=120013\n\n'
-                'I: Bus=0018 Vendor=04f3\nN: Name="ELAN9008:00 04F3:2E2E"\n'
-                'S: Sysfs=/devices/pci0000:00/0000:00:15.1/i2c_designware.1/i2c-1/i2c-ELAN9008:00/0018:04F3:2E2E.0001/input/input7\n'
-                'B: PROP=2\nB: EV=1b\nB: ABS=3273800000000003\n')
-_irq = Path(HOME) / "interrupts"
-_irq.write_text("           CPU0       CPU1\n  1:          0          5  IR-IO-APIC    1-edge      i8042\n"
-                " 87:        120         30  amd_gpio   9  ELAN9008:00\n")
-core.INPUT_DEVICES, core.INTERRUPTS = str(_inp), str(_irq)
-_dev = core.touch_device()
-check(_dev.get("client") == "ELAN9008:00" and "ELAN" in _dev.get("name", "") and core.touch_irq_count(_dev) == 150,
-      "finds the touch screen and counts its touch signals")
-_g3 = (core.reboot_device, core.boot_id, core.launch_self, core.game_mode_active, core.queue_report, core.lab_logs)
-_rb, _qr, _boot = [], [], ["L1"]
-core.reboot_device = lambda delay=3.0: _rb.append(delay)
-core.boot_id = lambda: _boot[0]
-core.launch_self = lambda: True
-core.steam_ui_ready = lambda: True
-core.game_mode_active = lambda: True
-core.queue_report = lambda *a, **k: (_qr.append((a, k)), Path("/x"))[1]
-core.lab_logs = lambda: {"kernel": "k", "gamescope": "g"}
-core.REFRESH_SCRIPT.unlink(missing_ok=True)
-core.lab_start()
-check(core.lab_step(_t0) == "started" and core.refresh_method() == "a" and core.refresh_installed() == 144 and _rb,
-      "step 1 loads 144 Hz method A and restarts")
-check(not core.lab_step_ready() and core.lab_step(_t0 + 5) == "", "no checks before the restart")
-_boot[0] = "L2"
-core.lab_step(_t0 + 100)
-check(core.lab_step(_t0 + 101) == "back" and core.lab_step_ready() and core.lab_left(_t0 + 110) is not None,
-      "after the restart Ally Hub opens with the checks and a safety countdown")
-_g_mono = core._mono
-core._mono = lambda: _t0 + 101
-core.lab_confirm()
-check(core.lab_left(_t0 + 9999) is None and core.lab_step(_t0 + 101 + 500) == "",
-      "once the picture is confirmed, the black-screen countdown stops")
-core.lab_record({"picture": "good", "touch": "none", "taps": 0, "irq": 0, "frames_off": "0", "frames_on": "many"})
-check(core.lab_has_next() and core.lab_next() and core.lab_step(_t0) == "started" and core.refresh_method() == "b",
-      "next step: method B")
-_boot[0] = "L3"
-core.lab_step(_t0 + 1); core.lab_step(_t0 + 2); _gui[0] = _t0 + 2   # Ally Hub opened, nobody answers
-_n = len(_rb)
-check(core.lab_step(_t0 + 2 + core.REFRESH_CONFIRM_S + 5) == "aborted" and core.refresh_installed() is None
-      and len(_rb) == _n + 1 and _qr and _qr[-1][1].get("force"),
-      "no answer (black screen): the old profile comes back, it restarts and the report goes out")
-check("no answer" in core.lab_report_text() and "| 1 | 144 Hz | a | good | none |" in core.lab_report_text(),
-      "the report has a row per step")
-core.lab_start(); core.lab_step(_t0); _boot[0] = "L4"; core.lab_step(_t0 + 1); core.lab_step(_t0 + 2); core.lab_confirm()
-for _m in "abc":
-    core.lab_record({"picture": "good", "touch": "none"})
-    if _m != "c":
-        core.lab_next(); core.lab_step(_t0); _boot[0] += "x"; core.lab_step(_t0 + 1); core.lab_step(_t0 + 2); core.lab_confirm()
-check(core.lab_has_next() and core.lab_next() and core.lab_state()["plan"][-1] == [138, "a"],
-      "no 144 Hz method kept touch: it steps down to 138 Hz")
-core.lab_step(_t0); _boot[0] = "L5"; core.lab_step(_t0 + 1); core.lab_step(_t0 + 2); core.lab_confirm()
-core.lab_record({"picture": "good", "touch": "works"})
-check(not core.lab_has_next(), "the first rate that keeps touch ends the step-down")
-core.lab_finish((138, "a"))
-check(core.lab_step(_t0 + 3) == "done" and core.refresh_installed() == 138 and core.refresh_state()["status"] == "kept"
-      and not core.lab_active(), "keep: that rate and method stay, it restarts and the report goes out")
-core.lab_start(); core.lab_step(_t0); _boot[0] = "L6"; core.lab_step(_t0 + 1); core.lab_step(_t0 + 2); core.lab_confirm()
-check(core.lab_step(_t0 + 101 + core.LAB_IDLE_S + 1) == "aborted" and core.refresh_installed() == 138,
-      "no answer for 10 minutes after confirming: it undoes the step (unreadable screen)")
-core.lab_start(); core.lab_step(_t0); _boot[0] = "L7"; core.lab_step(_t0 + 1); core.lab_step(_t0 + 2); core.lab_confirm()
-_boot[0] = "L8"
-check(core.lab_step(_t0 + 3) == "aborted" and core.refresh_installed() == 138, "restarted by hand mid-step: undone")
-core.lab_start(); core.lab_step(_t0); _boot[0] = "L9"; core.lab_step(_t0 + 1); core.lab_step(_t0 + 2)
-core.lab_confirm(); core.lab_record({"picture": "good", "touch": "works"})
-core.refresh_request(144)
-core.refresh_request_off()
-check(core.refresh_state().get("status") not in ("pending", "remove") and not core.lab_start(),
-      "the lab and the older 144 Hz trial never run together")
-core.lab_finish(None); core.lab_step(_t0 + 5)
-check(core.lab_report_sent() and core.lab_state()["status"] == "done", "an ended lab has sent its report")
-core.lab_finish((144, "a"))
-check(core.lab_state()["status"] == "done", "finishing twice never starts a second ending")
-core._mono = _g_mono
-core.reboot_device, core.boot_id, core.launch_self, core.game_mode_active, core.queue_report, core.lab_logs = _g3
-core.gui_opened_at = _g_gui
-core.REFRESH_SCRIPT.unlink(missing_ok=True); core.REFRESH_STATE.unlink(missing_ok=True); core.LAB_STATE.unlink(missing_ok=True)
-# ---- frame meter math and the lab's plain-language findings (1.4.1.16) ----
-_fs = core.frame_stats([6.94] * 400, 144)
-check(_fs["ok"] and _fs["skipped"] == 0 and 143.5 < _fs["hz"] < 144.5 and _fs["jitter_ms"] < 0.01, "smooth 144 Hz measures as smooth")
-_fs2 = core.frame_stats([6.94] * 380 + [13.88] * 20, 144)
-check(_fs2["skipped"] == 20 and core._frames_word({"x_stats": _fs2}, "x") == "many", "doubled frames count as skipped")
-check(core.frame_stats([8.333] * 400, 126)["off_target"] and not core.frame_stats([6.96] * 400, 144)["off_target"]
-      and core.frame_stats([7.25] * 400, 144)["off_target"], "120 Hz never passes as 126, nor 138 as 144")
-check(core._frames_word({"x_stats": core.frame_stats([8.33] * 400, 144)}, "x") == "not at the target rate",
-      "a screen still at 120 Hz never counts as smooth 144 Hz")
-check(not core.frame_stats([0.5] * 50)["ok"] and not core.frame_stats([])["ok"],
-      "swaps that don't wait for the screen can't be measured (no fake numbers)")
-_r = {"hz": 144, "method": "a", "picture": "good", "touch": "none", "irq": 40, "taps": 0,
-      "frames_off_stats": _fs, "frames_on_stats": _fs2}
-_v = " ".join(core.lab_verdict(_r))
-check("software" in _v and "VRR" in _v and "smooth" in _v, "a step explains touch signals without taps and VRR-only skips")
-check("hardware" in " ".join(core.lab_verdict(dict(_r, irq=0))), "no touch signals at all reads as a hardware limit")
-_c = " ".join(core.lab_conclusion([dict(_r, touch="works"), dict(_r, method="b", irq=0)]))
-check("Closest: 144 Hz with method A" in _c and "VRR range" in _c, "the overall finding names the best method and the next step")
-check(core._frames_word({"x_stats": core.frame_stats([6.944] * 4305 + [13.9], 144)}, "x") == "smooth",
-      "1 skip in a 30 s run is smooth (reports #13, #17 called it 'a few' and failed every method)")
-_c13 = " ".join(core.lab_conclusion([dict(_r, touch="works", irq=60, frames_on_stats=_fs),
-                                      dict(_r, method="b", touch="none", irq=0), dict(_r, method="c", touch="works", irq=80)]))
-check("method B" in _c13 and "worked with method A, C" in _c13 and "every method" not in _c13,
-      "the summary names the method where touch went silent (report #13 said 'every method')")
-check(core.refresh_lua(144) == core.refresh_lua(144, core.REFRESH_BASELINE) and core.REFRESH_BASELINE == "a",
-      "Turn on 144 Hz uses the lab-verified baseline (method A)")
+# ---- 144 Hz: the lab is retired (1.5.1.1); Turn on 144 Hz keeps method A ----
+_l = core.refresh_lua(144)
+check(_l.count("(") == _l.count(")") and "METHOD" not in _l and "calc_max_clock" in _l, "144 Hz profile is the plain sped-up timing")
+core.LAB_STATE.write_text(json.dumps({"status": "step", "prev_lua": ""}))
+core.REFRESH_SCRIPT.parent.mkdir(parents=True, exist_ok=True); core.REFRESH_SCRIPT.write_text(core.refresh_lua(144))
+check(core.retire_lab() and not core.LAB_STATE.exists() and core.refresh_installed() is None,
+      "a lab caught mid-run puts the old profile back and is gone")
+core.REFRESH_SCRIPT.write_text(core.refresh_lua(138))
+core.LAB_STATE.write_text(json.dumps({"status": "done"}))
+check(core.retire_lab() and core.refresh_installed() == 138, "a profile the owner kept from the lab stays")
+check(not core.retire_lab(), "nothing to retire twice")
+core.REFRESH_SCRIPT.unlink(missing_ok=True); core.REFRESH_STATE.unlink(missing_ok=True)
 # ---- Decky leftovers and the launch watch (1.5.0.1) ----
 _du = core.DECKY_UNITS
 core.DECKY_UNITS = (Path(HOME) / "no-plugin_loader.service",)
@@ -1768,62 +1670,14 @@ check(st2.get("game") == "1240440", "the Decky plugin's backend reads status fro
 check(_aio.run(qam.Plugin().action("boost", {"on": False})).get("ok"), "and sends actions")
 qam.SOCK = "/nonexistent/agent.sock"
 check(_aio.run(qam.Plugin().status()) == {"error": "agent"}, "agent off: the plugin says so instead of hanging")
-base = "http://127.0.0.1:18911"
-check(b"password" in urllib.request.urlopen(base + "/").read(), "remote shows PIN page")
-try:
-    urllib.request.urlopen(base + "/api/status"); check(False, "status should be locked")
-except urllib.error.HTTPError as e:
-    check(e.code == 403, "remote API locked without PIN")
-import http.cookiejar as _cj
-_jar = _cj.CookieJar()
-op = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(_jar))
-check(b"password" in op.open(base + "/?pin=4321").read(), "a PIN in the address no longer unlocks (it lands in browser history)")
-try:
-    op.open(base + "/login", data=b"pin=1111"); check(False, "wrong PIN should fail")
-except urllib.error.HTTPError as e:
-    check(e.code == 403 and b"Wrong PIN" in e.read(), "a wrong PIN is refused")
-op.open(base + "/login", data=b"pin=4321")
-check([c.name for c in _jar] == ["ahs"] and all(len(c.value) > 20 and "4321" not in c.value for c in _jar),
-      "the cookie is a random session, not the PIN")
-_codes = []
-for _pin in ["0000"] * 5 + ["4321"]:
-    try:
-        urllib.request.urlopen(base + "/login", data=f"pin={_pin}".encode()); _codes.append(200)
-    except urllib.error.HTTPError as e:
-        _codes.append(e.code)
-check(_codes == [403] * 5 + [429], "five wrong PINs, then even the right one waits: " + str(_codes))
-# security review 1.4.1.8: the lockout can't be raced, all addresses together are capped, -1 lengths don't hang
-import threading as _th, types as _ty, socket as _so
-_H = agent.make_handler(a)
-def _who(ip):
-    return _ty.SimpleNamespace(client_address=(ip, 1), _pin=lambda: "4321")
-_res = []
-_ts = [_th.Thread(target=lambda: _res.append(_H._login(_who("10.9.9.9"), "0000"))) for _ in range(60)]
-[t.start() for t in _ts]; [t.join() for t in _ts]
-check(_res.count(0) <= agent.REMOTE_TRIES and _H._login(_who("10.9.9.9"), "4321") == -1,
-      "60 guesses at once from one address: only 5 are checked, then even the right PIN waits")
-_H = agent.make_handler(a)
-for _i in range(agent.REMOTE_GLOBAL_TRIES):
-    _H._login(_who(f"10.1.{_i}.1"), "0000")
-check(_H._login(_who("10.2.2.2"), "4321") == -1, "many addresses guessing together are stopped too")
-_s = _so.create_connection(("127.0.0.1", 18911), timeout=5)
-_s.sendall(b"POST /login HTTP/1.1\r\nHost: 127.0.0.1:18911\r\nContent-Length: -1\r\n\r\n")
-_s.settimeout(5)
-try:
-    _got = _s.recv(64)
-except OSError:
-    _got = b""
-_s.close()
-check(_got.startswith(b"HTTP/"), "a negative Content-Length is answered right away instead of reading forever")
-_rq = urllib.request.Request(base + "/api/status", headers={"Host": "evil.example.com"})
-try:
-    op.open(_rq); check(False, "foreign host should be refused")
-except urllib.error.HTTPError as e:
-    check(e.code == 403, "another domain pointed at the handheld gets nothing (DNS rebinding)")
-check(agent.remote_host_ok("192.168.1.20:8787") and agent.remote_host_ok("steamdeck.local") and agent.remote_host_ok("[fe80::1]:8787")
-      and not agent.remote_host_ok("attacker.com") and not agent.remote_host_ok(""), "remote host check")
-st = json.loads(op.open(base + "/api/status").read())
-check(st["game_name"] == "Halo Infinite", "remote status works after PIN")
+# 1.5.1.1: the phone remote is gone (the owner); nothing listens on the network any more
+import socket as _so
+_free = _so.socket(); _free.settimeout(1)
+check(_free.connect_ex(("127.0.0.1", 18911)) != 0 and not hasattr(agent, "make_handler"),
+      "no phone remote server, even with old remote settings in the config")
+_free.close()
+st = a.status()
+check(st["game_name"] == "Halo Infinite", "status works (the Quick Access panel reads it)")
 (bat / "capacity").write_text("10"); time.sleep(2.2)
 check(a.led_reason == "low battery", "low battery flash overrides")
 core.update_config(lambda c: (c["agent"].update(low_battery_flash=False, battery_rings=False),
@@ -1835,9 +1689,7 @@ for _ in range(15):
 check(a.led_reason == "game lighting" and len(seen) > 3, "per-game effect animates the rings")
 game.kill(); time.sleep(4)
 check(a.game is None, "game exit detected")
-r = json.loads(op.open(urllib.request.Request(base + "/api/preset", data=json.dumps({"name": "Synthwave"}).encode(),
-               headers={"Content-Type": "application/json"})).read())
-check(r["message"] == "Synthwave on", "remote preset button works")
+check(a.remote_action("preset", {"name": "Synthwave"}) == "Synthwave on", "preset action works (the panel uses it)")
 time.sleep(2)
 check(core.load_config()["lighting"]["effect"]["type"] == "wave" and a.led_reason == "your lighting", "remote preset becomes your lighting")
 # the rings' USB device comes back under a new path after sleep: the agent must find it again
@@ -1854,8 +1706,6 @@ time.sleep(1.5)
 core.effect_frame = orig_frame
 time.sleep(2)
 check(a.animator.is_alive() and a.animator.ok, "a crashing frame doesn't kill the lights")
-page = op.open(base + "/").read().decode()
-check("Aurora" in page and "&quot;Aurora&quot;" in page, "remote lists presets safely")
 def boom():
     raise RuntimeError("feature exploded")
 core.update_config(lambda c: c["updates"].__setitem__("reporting", True))
@@ -2110,8 +1960,8 @@ check(gui.readable_on("#fff7a0", "#ffe14d", "#ffffff") == "#000000" and gui.read
       and all(gui.readable_on(t["accent"], t["accent2"], t["on_accent"]) for t in core.THEMES.values()),
       "button text stays readable on light accent colors (the lab's unreadable button)")
 _psrc = _insp.getsource(gui.PerformancePage.__init__)
-check("adv(rcard)" in _psrc and "adv(mcard)" in _psrc,
-      "experimental 144 Hz, its lab and the frame meter only show in Advanced (the owner's rule for Stable)")
+check("adv(rcard)" in _psrc and "FrameMeter" not in _psrc and not hasattr(gui, "FrameMeter"),
+      "experimental 144 Hz only shows in Advanced; the lab and frame meter are gone")
 from PySide6.QtWidgets import QApplication
 gui.ask = lambda *a: True
 class C:
@@ -2370,7 +2220,13 @@ tryit("doctor", lambda: (hub.doctor.run_checks(), hub.doctor.show_results({"net"
 check(hub.doctor.btn_all is not None and hub.doctor.probe.get("net") is False, "the Checkup uses the slow checks made off the UI thread")
 _io_, _rq_ = core.internet_ok, core.run_quiet
 core.internet_ok, core.run_quiet = (lambda timeout=2.0: True), (lambda cmd, timeout=8: (0, "flathub"))
-check(gui.DoctorPage._probe()["flathub"] is True and gui.DoctorPage._probe()["net"] is True, "the slow checks run as one background step")
+check(hub.doctor_app._probe()["flathub"] is True and hub.doctor_app._probe()["net"] is True
+      and set(hub.doctor._probe()) == {"shader"}, "the slow checks run as one background step, per checkup")
+_rows = {c["title"] for c in hub.doctor.check_list()}
+hub.doctor.show_results({"shader": 1})
+_shown = [hub.doctor.box.itemAt(i) for i in range(hub.doctor.box.count())] if hasattr(hub.doctor.box, "count") else []
+check({"Battery health", "Storage space"} <= gui.DoctorPage.DEVICE and "Permissions" in _rows and "Updates" not in gui.DoctorPage.DEVICE,
+      "Home's checkup is the device; permissions, updates and plugins live in Settings → General")
 core.internet_ok, core.run_quiet = _io_, _rq_
 hub.doctor.show_results({})
 check(any(c["title"] == "Internet" and c["status"] == "warn" for c in hub.doctor.check_list()),
@@ -2379,8 +2235,7 @@ tryit("appearance", lambda: ([hub.appearance.set_preset(t) for t in core.THEMES]
                              hub.appearance.save_scale(), hub.appearance.save_nav(1)))
 tryit("automation", lambda: ([hub.automation.set_feature(k, False) for k, _, _ in hub.automation.FEATURES],
                              hub.automation.set_dock_lights(0), hub.automation.refresh(), hub.automation.backup_now()))
-tryit("connect", lambda: (hub.connect_page.refresh(), hub.connect_page.wake(), hub.connect_page.new_pin(),
-                          hub.connect_page.toggle_remote(False)))
+tryit("connect", lambda: (hub.connect_page.refresh(), hub.connect_page.wake()))
 gui.QColorDialog.getColor = staticmethod(lambda *a, **k: C(10, 200, 30))
 gui.ask_color = lambda *a, **k: C(10, 200, 30)
 gui.ask_text = lambda *a, **k: ("Night Drive", True)
