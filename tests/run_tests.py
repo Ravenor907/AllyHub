@@ -2222,14 +2222,16 @@ _io_, _rq_ = core.internet_ok, core.run_quiet
 core.internet_ok, core.run_quiet = (lambda timeout=2.0: True), (lambda cmd, timeout=8: (0, "flathub"))
 check(hub.doctor_app._probe()["flathub"] is True and hub.doctor_app._probe()["net"] is True
       and set(hub.doctor._probe()) == {"shader"}, "the slow checks run as one background step, per checkup")
-_rows = {c["title"] for c in hub.doctor.check_list()}
+_rows = {c["title"] for c in hub.doctor_app.check_list()}
+_drows = {c["title"] for c in hub.doctor.check_list()}
+check(_drows <= gui.DoctorPage.DEVICE and not (_rows & gui.DoctorPage.DEVICE), "each checkup builds only its own rows")
 hub.doctor.show_results({"shader": 1})
 _shown = [hub.doctor.box.itemAt(i) for i in range(hub.doctor.box.count())] if hasattr(hub.doctor.box, "count") else []
 check({"Battery health", "Storage space"} <= gui.DoctorPage.DEVICE and "Permissions" in _rows and "Updates" not in gui.DoctorPage.DEVICE,
       "Home's checkup is the device; permissions, updates and plugins live in Settings → General")
 core.internet_ok, core.run_quiet = _io_, _rq_
-hub.doctor.show_results({})
-check(any(c["title"] == "Internet" and c["status"] == "warn" for c in hub.doctor.check_list()),
+hub.doctor_app.show_results({})
+check(any(c["title"] == "Internet" and c["status"] == "warn" for c in hub.doctor_app.check_list()),
       "a check that didn't finish says so instead of 'fine'")
 tryit("appearance", lambda: ([hub.appearance.set_preset(t) for t in core.THEMES], hub.appearance.reset_accents(),
                              hub.appearance.save_scale(), hub.appearance.save_nav(1)))
