@@ -3907,8 +3907,8 @@ class HealthPage(QWidget):
         bl.setContentsMargins(20, 12, 20, 12)
         bl.addWidget(label("History needs the background helper with Battery history on.", "bannerText", wrap=True), 1)
         bl.addWidget(button("Set up", lambda: hub.go("General"), "primary"))
+        self.slot = v.count()          # "Good to go?" goes here, first (Hub puts it in), above the banner too
         v.addWidget(self.banner)
-        self.slot = v.count()          # "Good to go?" goes here, first (Hub puts it in)
         grid = QGridLayout()
         grid.setSpacing(16)
         self.live = {k: StatTile(k, big=True) for k in
@@ -5850,6 +5850,7 @@ class DoctorPage(QWidget):
         self.ran = False
         self.show_all = False
         self.probe = {}
+        self.problems = None             # set once results are in (the device row reads the app's, no recount)
 
     def toggle_all(self, *_args):
         self.show_all = not self.show_all
@@ -5857,6 +5858,7 @@ class DoctorPage(QWidget):
         self.show_results(getattr(self, "probe", None))       # just a different view: no new checks
 
     def check_list(self) -> list:
+        """This checkup's rows only (1.5.1.1 review: the device list never pays for the app checks)."""
         h = self.hub
         st = h.state
         cfg = load_config()
@@ -5867,6 +5869,50 @@ class DoctorPage(QWidget):
                             fix_label=fix_label, fix=fix, auto=auto))
 
         probe = getattr(self, "probe", None) or {}
+        if self.area == "device":
+            ratio = core.disk_free_ratio(str(HOME))
+            add("ok" if ratio > 0.2 else "warn" if ratio > 0.1 else "fail", "Storage space",
+                f"{core.disk_usage(str(HOME))}.",
+                None if ratio > 0.2 else "Open Storage", None if ratio > 0.2 else lambda: h.go("Storage"), False)
+
+            if probe.get("shader") is not None:
+                size = probe["shader"]
+                big = size > 5 * 1024 ** 3
+                add("warn" if big else "ok", "Shader cache", f"{core.human_size(size)}."
+                    + (" Clearing it frees space; Steam rebuilds what it needs." if big else ""),
+                    "Clear" if big else None, h.system.clear_shaders if big else None, False)
+
+            b = core.battery_info()
+            try:
+                cap = int(b.get("capacity") or 0)
+            except ValueError:
+                cap = 0
+            if b.get("capacity"):
+                plugged = (b.get("status") or "").lower() in ("charging", "full", "not charging")
+                add("fail" if cap <= 10 and not plugged else "warn" if cap <= 20 and not plugged else "ok", "Battery",
+                    f"{cap}%" + (", charging." if (b.get("status") or "").lower() == "charging" else
+                                 ", plugged in." if plugged else f", about {core.time_left_text()} left."
+                                 if core.time_left_text() not in ("", "n/a") else "."))
+            sens = core.sensors()
+            hot = [f"{n} {t:.0f}°C" for n, t in (("CPU", sens.get("cpu_temp")), ("GPU", sens.get("gpu_temp"))) if t]
+            top = max([t for t in (sens.get("cpu_temp"), sens.get("gpu_temp")) if t] or [0])
+            if hot:
+                add("fail" if top >= 95 else "warn" if top >= 90 else "ok", "Temperatures",
+                    ", ".join(hot) + (". Very hot: let it cool, and check the vents aren't blocked." if top >= 95 else
+                                      ". Running hot." if top >= 90 else ". Normal."))
+            if b.get("health"):
+                add("ok" if b["health"] >= 80 else "warn", "Battery health",
+                    f"{b['health']}% of original capacity"
+                    + (f", {b['cycles']} cycles." if b.get("cycles") else "."))
+            if b.get("limit_file"):
+                lim = b.get("limit") or "100"
+                # a suggestion, not a problem (the owner, 1.5.0.22): "ok" keeps it under Show all checks
+                add("ok", "Charge limit",
+                    f"Stops at {lim}%." if lim != "100" else
+                    "No limit set. If the handheld lives on the charger, an 80% limit helps the battery last.",
+                    None if lim != "100" else "Set it", None if lim != "100" else lambda: h.go("Battery & sleep"),
+                    False)
+            return out
         pw = st.get("password")
         add("ok" if pw else "fail" if pw is False else "warn", "Sudo password",
             "Set." if pw else "Not set. Decky, plugins and system tweaks need one.",
@@ -5899,49 +5945,6 @@ class DoctorPage(QWidget):
         add("ok" if net else "warn" if net is None else "fail", "Internet",
             "Connected." if net else "Couldn't check." if net is None else
             "No connection. Installs and the plugin store won't work.")
-
-        ratio = core.disk_free_ratio(str(HOME))
-        add("ok" if ratio > 0.2 else "warn" if ratio > 0.1 else "fail", "Storage space",
-            f"{core.disk_usage(str(HOME))}.",
-            None if ratio > 0.2 else "Open Storage", None if ratio > 0.2 else lambda: h.go("Storage"), False)
-
-        if probe.get("shader") is not None:
-            size = probe["shader"]
-            big = size > 5 * 1024 ** 3
-            add("warn" if big else "ok", "Shader cache", f"{core.human_size(size)}."
-                + (" Clearing it frees space; Steam rebuilds what it needs." if big else ""),
-                "Clear" if big else None, h.system.clear_shaders if big else None, False)
-
-        b = core.battery_info()
-        try:
-            cap = int(b.get("capacity") or 0)
-        except ValueError:
-            cap = 0
-        if b.get("capacity"):
-            plugged = (b.get("status") or "").lower() in ("charging", "full", "not charging")
-            add("fail" if cap <= 10 and not plugged else "warn" if cap <= 20 and not plugged else "ok", "Battery",
-                f"{cap}%" + (", charging." if (b.get("status") or "").lower() == "charging" else
-                             ", plugged in." if plugged else f", about {core.time_left_text()} left."
-                             if core.time_left_text() not in ("", "n/a") else "."))
-        sens = core.sensors()
-        hot = [f"{n} {t:.0f}°C" for n, t in (("CPU", sens.get("cpu_temp")), ("GPU", sens.get("gpu_temp"))) if t]
-        top = max([t for t in (sens.get("cpu_temp"), sens.get("gpu_temp")) if t] or [0])
-        if hot:
-            add("fail" if top >= 95 else "warn" if top >= 90 else "ok", "Temperatures",
-                ", ".join(hot) + (". Very hot: let it cool, and check the vents aren't blocked." if top >= 95 else
-                                  ". Running hot." if top >= 90 else ". Normal."))
-        if b.get("health"):
-            add("ok" if b["health"] >= 80 else "warn", "Battery health",
-                f"{b['health']}% of original capacity"
-                + (f", {b['cycles']} cycles." if b.get("cycles") else "."))
-        if b.get("limit_file"):
-            lim = b.get("limit") or "100"
-            # a suggestion, not a problem (the owner, 1.5.0.22): "ok" keeps it under Show all checks
-            add("ok", "Charge limit",
-                f"Stops at {lim}%." if lim != "100" else
-                "No limit set. If the handheld lives on the charger, an 80% limit helps the battery last.",
-                None if lim != "100" else "Set it", None if lim != "100" else lambda: h.go("Battery & sleep"),
-                False)
 
         leds = [] if core.lighting_shelved() else core.find_leds()
         missing = core.allow_all_missing(leds)
@@ -5993,7 +5996,6 @@ class DoctorPage(QWidget):
             return {"shader": core.dir_size(core.SHADER_CACHE) if core.SHADER_CACHE.exists() else None}
         net = core.internet_ok()
         return {"net": net,
-                "shader": core.dir_size(core.SHADER_CACHE) if core.SHADER_CACHE.exists() else None,
                 "flathub": "flathub" in core.run_quiet(["flatpak", "remotes", "--columns=name"])[1].split(),
                 "updates": core.update_registry(refresh=net) if net else []}
 
@@ -6015,11 +6017,13 @@ class DoctorPage(QWidget):
         self.fixes = []
         icons = {"ok": ("✔", "on"), "warn": ("!", "warn"), "fail": ("✖", "fail")}
         problems = 0
-        everything = self.check_list()
-        checks = [c for c in everything if (c["title"] in self.DEVICE) == (self.area == "device")]
+        focus = QApplication.focusWidget()
+        had_focus = focus is not None and self.block.isAncestorOf(focus)
+        checks = self.check_list()
+        own = sum(1 for c in checks if c["status"] != "ok")
         if self.area == "device":
             other = getattr(self.hub, "doctor_app", None)
-            n = other.problem_count() if other is not None and other.ran else 0
+            n = (other.problems or 0) if other is not None else 0
             if n:
                 checks.append(dict(status="warn", title="Ally Hub setup",
                                    detail=f"{n} thing{'s' if n != 1 else ''} in Settings → General "
@@ -6056,14 +6060,19 @@ class DoctorPage(QWidget):
             self.summary.setText(f"✔ Everything looks good ({len(checks)} checks)." if problems == 0 else
                                  f"{problems} thing{'s' if problems != 1 else ''} to look at.")
         self.btn_fix_all.setVisible(bool(self.fixes))
-        if self.area == "app":
+        if had_focus:                                   # the rows were rebuilt: never leave the controller lost
+            first = next((self.box.itemAt(i).widget().findChild(QPushButton) for i in range(self.box.count())
+                          if self.box.itemAt(i).widget() is not None
+                          and self.box.itemAt(i).widget().findChild(QPushButton) is not None), None)
+            (first or self.btn_all).setFocus()
+        changed, self.problems = self.problems != own, own
+        if self.area == "app" and changed:
             dev = getattr(self.hub, "doctor", None)
             if dev is not None and dev is not self and dev.ran and not getattr(dev, "_probing", False):
                 dev.show_results(getattr(dev, "probe", None))   # refresh its "Ally Hub setup" row, no new checks
 
     def problem_count(self) -> int:
-        return sum(1 for c in self.check_list() if c["status"] != "ok"
-                   and (c["title"] in self.DEVICE) == (self.area == "device"))
+        return self.problems or 0
 
     def fix_all(self, *_args):
         for f in self.fixes:
@@ -7636,8 +7645,8 @@ class Hub(QMainWindow):
         alerts = core.read_json(core.DATA_DIR / "alerts.json", []) or []
         core.write_json(core.DATA_DIR / "alerts.json", [a for a in alerts if a.get("id") != alert_id])
         self.health.refresh_notices(self.state)
-        if self.doctor.ran:
-            self.doctor.run_checks()
+        if self.doctor_app.ran:
+            self.doctor_app.run_checks()          # Update Guardian alerts live in the app checkup
 
     # ---- job events ----
     def on_job_started(self, text: str):
@@ -7738,8 +7747,11 @@ class Hub(QMainWindow):
     def on_idle(self):
         self.progress.hide()
         self.update_cards()
-        if self.doctor.ran and self.current_page() in (self.health, self.updates):
+        cur = self.current_page()
+        if cur is self.health and self.doctor.ran:
             self.doctor.run_checks()          # a fix just finished (this re-checks the app checkup too)
+        elif cur is self.updates and self.doctor_app.ran:
+            self.doctor_app.run_checks()
 
     # ---- actions ----
     # ---- sudo password ----

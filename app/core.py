@@ -349,7 +349,7 @@ GAME_MODE_UNIT = "gamescope-session.service"
 
 # Baseline (the owner, 1.4.1.16): method "a". Lab runs on his Ally X (issues #9, #10): a = picture good, touch works
 # (taps and touch-chip signals both arrive); b = touch chip silent (hardware limit); c = touch lands off target.
-# "Turn on 144 Hz" always uses the baseline; the lab stays for testing other units and panels.
+# "Turn on 144 Hz" uses the baseline; the lab itself was retired in 1.5.1.1.
 def refresh_lua(max_hz: int) -> str:
     """The stock Ally profile keeps the pixel clock fixed and only stretches the vertical front porch (vfp 54 =
     120 Hz), so above 120 the clock rises: the 120 Hz timing, sped up (the lab's method "a", the one that kept
@@ -623,8 +623,11 @@ def retire_lab() -> bool:
         return False
     if st.get("status") in ("pending", "step", "finishing"):
         _write_refresh_lua(st.get("prev_lua") or "")
-        write_json(REFRESH_STATE, {"status": "off"} if not st.get("prev_lua") else refresh_state())
-        app_log("refresh", "144 Hz lab retired mid-run: the previous screen profile is back after the next restart")
+        if not st.get("prev_lua"):
+            write_json(REFRESH_STATE, {"status": "off"})
+        app_log("refresh", "144 Hz lab retired mid-run: the previous screen profile comes back")
+        if st.get("status") == "step" and st.get("seen"):
+            reboot_device(20.0)       # a lab profile is loaded right now (touch may not work): restart, like its undo
     try:
         LAB_STATE.unlink()
     except OSError:
@@ -2347,7 +2350,7 @@ THEMES = {
 
 def theme_palette(theme_cfg: dict) -> dict:
     pal = dict(THEMES.get(theme_cfg.get("preset"), THEMES["ROG Crimson"]))
-    # only plain #rrggbb: these go into the stylesheet and the phone remote's page, so anything else could inject
+    # only plain #rrggbb: these go into the stylesheet, so anything else could inject
     # markup (a shared profile could carry it; security review 1.4.1.8)
     if _valid_hex(theme_cfg.get("accent")):
         pal["accent"] = theme_cfg["accent"]

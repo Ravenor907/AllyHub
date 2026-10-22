@@ -910,6 +910,7 @@ class Agent:
         self.safely("boost", self.recover_boost)
         self.safely("lighting", core.migrate_chip_spiral)
         self.safely("lighting", core.migrate_color_spirals)
+        self.safely("refresh", core.retire_lab)          # 1.5.1.1: a lab caught mid-run winds down once
         self.safely("privacy", core.secure_data_dir)
         self.safely("rescue", core.sync_testing_rescue)      # Testing: a way out that works without the app
         self.safely("menu", core.tidy_menu_entry)
@@ -935,8 +936,6 @@ class Agent:
             self.safely("saves", self.save_backups, battery)
             self.safely("sleep", self.update_sleep, battery)
             self.safely("lighting", self.update_lighting, battery)
-            if self.tick == 1:
-                self.safely("refresh", core.retire_lab)       # 1.5.1.1: a lab caught mid-run winds down once
             self.safely("refresh", core.refresh_step)          # the higher-refresh trial and its undo
             self.safely("state", self.write_state)
             if not self.healthy and time.time() - self.started > core.HEALTHY_AFTER_S:
