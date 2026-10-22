@@ -9,14 +9,11 @@ Desktop and Game Mode.
 - Update Guardian: notices SteamOS updates and a missing Decky Loader,
   takes a daily snapshot of your settings
 - Auto save backups through Ludusavi
-- Phone remote: a small PIN-protected web page on your home network
 """
 
-import html
 import json
 import math
 import os
-import secrets
 import shutil
 import signal
 import socket
@@ -25,10 +22,7 @@ import sys
 import tarfile
 import threading
 import time
-from http.cookies import SimpleCookie
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
 
 import core
 
@@ -268,229 +262,6 @@ class Animator(threading.Thread):
 
 
 # --------------------------------------------------------------------------
-# Phone remote
-# --------------------------------------------------------------------------
-
-REMOTE_HTML = """<!doctype html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Ally Hub Remote</title><style>
-:root{--bg:%(bg)s;--card:%(surface)s;--b:%(border)s;--t:%(text)s;--m:%(muted)s;--a:%(accent)s;--a2:%(accent2)s}
-*{box-sizing:border-box;font-family:system-ui,sans-serif}body{margin:0;background:var(--bg);color:var(--t);padding:16px}
-h1{font-size:24px;margin:4px 0 2px}.sub{color:var(--m);margin-bottom:16px}
-.card{background:var(--card);border:1px solid var(--b);border-radius:16px;padding:16px;margin-bottom:14px}
-.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}.k{color:var(--m);font-size:13px}.v{font-size:20px;font-weight:700}
-button{width:100%%;padding:14px;border-radius:12px;border:1px solid var(--b);background:var(--card);color:var(--t);font-size:16px;font-weight:600;margin-top:8px}
-button.p{background:linear-gradient(90deg,var(--a),var(--a2));border:none;color:#fff}
-input[type=color]{width:100%%;height:56px;border:none;border-radius:12px;background:none}
-input[type=range]{width:100%%}.row{display:flex;gap:10px}.row button{flex:1}
-input[type=password]{width:100%%;padding:14px;border-radius:12px;border:1px solid var(--b);background:var(--card);color:var(--t);font-size:18px}
-#msg{color:var(--m);text-align:center;min-height:20px}</style></head><body>
-%(body)s</body></html>"""
-
-REMOTE_LOGIN = """<h1>Ally Hub Remote</h1><div class="sub">Enter the PIN shown in Ally Hub &gt; Settings &gt; Connections.</div>
-<form method="post" action="/login" class="card"><input type="password" name="pin" inputmode="numeric" autofocus>
-<button class="p">Unlock</button></form><div id="msg">%(note)s</div>"""
-
-REMOTE_TRIES = 5          # wrong PINs from one address before it has to wait
-REMOTE_LOCK_S = 300       # how long it waits
-REMOTE_GLOBAL_TRIES = 20  # wrong PINs from all addresses together (in REMOTE_LOCK_S) before everyone waits
-
-
-def remote_host_ok(host: str) -> bool:
-    """Only answer to the handheld's own address or its .local name. A web page that points some other
-    domain at the handheld (DNS rebinding) gets nothing."""
-    import ipaddress
-    h = (host or "").strip().lower()
-    if h.startswith("["):
-        h = h[1:h.find("]")] if "]" in h else h
-    elif h.count(":") == 1:
-        h = h.split(":")[0]
-    if not h:
-        return False
-    if h == "localhost" or h.endswith(".local") or h == socket.gethostname().lower():
-        return True
-    try:
-        ipaddress.ip_address(h)
-        return True
-    except ValueError:
-        return False
-
-REMOTE_MAIN = """<h1>%(device)s</h1><div class="sub">Ally Hub Remote</div>
-<div class="card grid">
-<div><div class="k">Battery</div><div class="v" id="bat">…</div></div>
-<div><div class="k">Time left</div><div class="v" id="left">…</div></div>
-<div><div class="k">CPU / GPU</div><div class="v" id="temp">…</div></div>
-<div><div class="k">Playing</div><div class="v" id="game">…</div></div></div>
-<div style="display:%(light_display)s"><div class="card"><div class="k">Ring color</div><input type="color" id="color" value="%(color)s">
-<div class="k" style="margin-top:10px">Brightness</div><input type="range" id="bright" min="0" max="255" value="%(bright)s">
-<div class="row"><button class="p" onclick="setColor()">Apply</button><button onclick="post('lights',{on:false})">Lights off</button></div>
-<button onclick="post('game_color',{hex:document.getElementById('color').value})">Use this color for the current game</button>
-<button id="br" onclick="post('battery_rings',{on:!window.rings})">Battery rings</button></div>
-<div class="card"><div class="k">Effects</div><div class="grid" style="margin-top:4px">%(presets)s</div></div></div>
-<div class="card"><button class="p" id="wol" onclick="post('wol',{})">Wake %(wol_name)s</button></div>
-<div id="msg"></div>
-<script>
-async function post(p,d){const r=await fetch('/api/'+p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(d)});
-const j=await r.json();document.getElementById('msg').textContent=j.message||'';refresh();}
-function setColor(){post('rgb',{hex:document.getElementById('color').value,brightness:+document.getElementById('bright').value})}
-async function refresh(){const s=await (await fetch('/api/status')).json();
-bat.textContent=s.battery;left.textContent=s.time_left;temp.textContent=(s.cpu?Math.round(s.cpu)+'°':'?')+' / '+(s.gpu?Math.round(s.gpu)+'°':'?');
-game.textContent=s.game_name||'Nothing';window.rings=s.battery_rings;br.textContent='Battery rings: '+(s.battery_rings?'ON':'OFF');
-wol.style.display=s.wol?'block':'none';}
-refresh();setInterval(refresh,5000);</script>"""
-
-
-def make_handler(agent):
-    sessions = {}         # random session token -> the PIN it was opened with (a new PIN logs everyone out)
-    fails = {}            # address -> [wrong tries, locked until]
-    lock = threading.Lock()
-
-    class Handler(BaseHTTPRequestHandler):
-        timeout = 15      # idle connections from the network can't pile up threads
-
-        def log_message(self, *args):
-            pass
-
-        def _pin(self) -> str:
-            return agent.cfg["agent"].get("remote_pin") or ""
-
-        def _authed(self) -> bool:
-            pin = self._pin()
-            if not pin:
-                return False
-            c = SimpleCookie(self.headers.get("Cookie", ""))
-            tok = c["ahs"].value if "ahs" in c else ""
-            with lock:
-                opened = sessions.get(tok)
-            return bool(tok) and opened is not None and secrets.compare_digest(opened, pin)
-
-        def _locked_out(self) -> int:
-            """Seconds this address still has to wait after too many wrong PINs (0 = may try)."""
-            with lock:
-                n, until = fails.get(self.client_address[0], [0, 0.0])
-            return max(0, int(until - time.time())) if n >= REMOTE_TRIES else 0
-
-        def _login(self, pin: str) -> int:
-            """1 = right PIN; 0 = wrong; -1 = locked out. The lockout check, the PIN check and the count happen in one
-            step under the lock, so many connections opened at once can't each squeeze in a guess (security review,
-            1.4.1.8). Wrong guesses from ALL addresses together are capped too (REMOTE_GLOBAL_TRIES)."""
-            ip = self.client_address[0]
-            now = time.time()
-            with lock:
-                n, until = fails.get(ip, [0, 0.0])
-                g = fails.get("*", [0, 0.0, now])
-                if until > now or g[1] > now:
-                    return -1
-                good = bool(pin) and bool(self._pin()) and secrets.compare_digest(pin, self._pin())
-                if good:
-                    fails.pop(ip, None)
-                    return 1
-                n = 1 if n >= REMOTE_TRIES else n + 1     # after a lockout ends, counting starts over
-                fails[ip] = [n, now + REMOTE_LOCK_S if n >= REMOTE_TRIES else 0.0]
-                if now - g[2] > REMOTE_LOCK_S:           # a fresh window for the global count
-                    g = [0, 0.0, now]
-                g[0] += 1
-                if g[0] >= REMOTE_GLOBAL_TRIES:
-                    g = [0, now + REMOTE_LOCK_S, now]
-                fails["*"] = g
-            return 0
-
-        def _host_ok(self) -> bool:
-            if remote_host_ok(self.headers.get("Host", "")):
-                return True
-            self._send(403, "Open the remote by the handheld's address.", "text/plain")
-            return False
-
-        def _send(self, code: int, body: str, ctype: str = "text/html", cookie: str = ""):
-            data = body.encode()
-            self.send_response(code)
-            self.send_header("Content-Type", f"{ctype}; charset=utf-8")
-            self.send_header("Content-Length", str(len(data)))
-            self.send_header("Cache-Control", "no-store")
-            if cookie:
-                self.send_header("Set-Cookie", f"ahs={cookie}; Path=/; SameSite=Strict; HttpOnly")
-            self.end_headers()
-            self.wfile.write(data)
-
-        def _page(self, body: str) -> str:
-            pal = core.theme_palette(agent.cfg["theme"])
-            return REMOTE_HTML % dict(pal, body=body)
-
-        def _login_page(self, note: str = "") -> str:
-            return self._page(REMOTE_LOGIN % {"note": html.escape(note)})
-
-        def do_GET(self):
-            if not self._host_ok():
-                return
-            url = urlparse(self.path)
-            if url.path == "/":
-                if not self._authed():
-                    return self._send(200, self._login_page())
-                rgb = agent.cfg.get("rgb") or {}
-                names = list(core.PRESETS) + list((agent.cfg.get("lighting") or {}).get("custom") or {})
-                presets = "".join(
-                    f'<button onclick="post(\'preset\',{{name:{html.escape(json.dumps(n))}}})">{html.escape(n)}</button>'
-                    for n in names)
-                body = REMOTE_MAIN % {
-                    "light_display": "none" if core.lighting_shelved(agent.cfg) else "block",
-                    "presets": presets,
-                    "device": html.escape(core.device_name()),
-                    "color": core.rgb_to_hex(rgb.get("rgb", (225, 29, 72))),
-                    "bright": int(rgb.get("brightness", 255)),
-                    "wol_name": html.escape(agent.cfg["wol"].get("name") or "my PC"),
-                }
-                return self._send(200, self._page(body))
-            if url.path == "/api/status":
-                if not self._authed():
-                    return self._send(403, '{"message":"locked"}', "application/json")
-                return self._send(200, json.dumps(agent.status()), "application/json")
-            self._send(404, "not found", "text/plain")
-
-        def do_POST(self):
-            if not self._host_ok():
-                return
-            if urlparse(self.path).path == "/login":
-                wait = self._locked_out()
-                if wait:
-                    return self._send(429, self._login_page(f"Too many wrong PINs. Try again in {wait // 60 + 1} min."))
-                try:
-                    n = max(0, min(int(self.headers.get("Content-Length", 0)), 512))     # -1 would read forever
-                    pin = parse_qs(self.rfile.read(n).decode("utf-8", "replace")).get("pin", [""])[0].strip()
-                except (ValueError, UnicodeError):
-                    pin = ""
-                res = self._login(pin)
-                if res < 0:
-                    wait = max(self._locked_out(), 60)
-                    return self._send(429, self._login_page(f"Too many wrong PINs. Try again in {wait // 60 + 1} min."))
-                if res == 0:
-                    return self._send(403, self._login_page("Wrong PIN."))
-                tok = secrets.token_urlsafe(24)
-                with lock:
-                    if len(sessions) > 50:             # old phones' sessions; they just log in again
-                        sessions.clear()
-                    sessions[tok] = self._pin()
-                self.send_response(303)
-                self.send_header("Location", "/")
-                self.send_header("Set-Cookie", f"ahs={tok}; Path=/; SameSite=Strict; HttpOnly")
-                self.send_header("Content-Length", "0")
-                self.end_headers()
-                return
-            if not self._authed():
-                return self._send(403, '{"message":"locked"}', "application/json")
-            try:
-                n = max(0, min(int(self.headers.get("Content-Length", 0)), 4096))
-                data = json.loads(self.rfile.read(n) or b"{}")
-            except ValueError:
-                data = {}
-            msg = agent.remote_action(urlparse(self.path).path.rsplit("/", 1)[-1], data)
-            self._send(200, json.dumps({"message": msg}), "application/json")
-
-    return Handler
-
-
-# --------------------------------------------------------------------------
-# Agent
-# --------------------------------------------------------------------------
 
 class Agent:
     def __init__(self):
@@ -508,8 +279,6 @@ class Agent:
         self.last_trim = 0.0
         self.last_guard = 0.0
         self.save_proc = None
-        self.server = None
-        self.server_port = None
         self.seen = core.read_json(SEEN_FILE, {}) or {}
         self.state_cache = {}
         self.started = time.time()
@@ -543,7 +312,7 @@ class Agent:
             return True
         return False
 
-    # ---- remote API ----
+    # ---- status and quick actions (the Quick Access panel) ----
     def status(self) -> dict:
         b = core.battery_info()
         s = core.sensors()
@@ -615,26 +384,6 @@ class Agent:
         self.last_led = None
         self.wake.set()
         return msg
-
-    def ensure_server(self):
-        a = self.cfg["agent"]
-        want = a.get("remote") and a.get("remote_pin")
-        port = int(a.get("remote_port") or 8787)
-        if self.server and (not want or port != self.server_port):
-            self.server.shutdown()
-            self.server.server_close()
-            self.server = None
-            log("remote stopped")
-        if want and not self.server:
-            try:
-                self.server = ThreadingHTTPServer(("0.0.0.0", port), make_handler(self))
-                self.server.daemon_threads = True
-                self.server_port = port
-                threading.Thread(target=self.server.serve_forever, daemon=True).start()
-                log(f"remote listening on :{port}")
-            except OSError as e:
-                log(f"remote failed: {e}")
-                self.server = None
 
     # ---- Sleep guardian: a gap between boottime and monotonic time is a sleep ----
     def update_sleep(self, battery: dict):
@@ -1105,7 +854,7 @@ class Agent:
         st = {"ts": time.time(), "game": self.game,
               "game_name": self.seen.get(self.game) if self.game else None,
               "docked": bool(self.docked), "led": self.led_reason,
-              "remote_port": self.server_port if self.server else None, "pid": os.getpid(),
+              "pid": os.getpid(),
               "boost": self.boost_note}
         changed = {k: v for k, v in st.items() if k != "ts"} != self.state_cache
         if changed or self.tick % 10 == 0:
@@ -1170,7 +919,6 @@ class Agent:
                 self.safely("boost", self.end_boost, "agent stopped")
                 log("agent disabled in config, exiting")
                 return
-            self.safely("remote", self.ensure_server)
             if self.control is None and self.tick % 30 == 0:
                 self.safely("control", self.serve_control)
             battery = core.battery_info()
@@ -1187,8 +935,9 @@ class Agent:
             self.safely("saves", self.save_backups, battery)
             self.safely("sleep", self.update_sleep, battery)
             self.safely("lighting", self.update_lighting, battery)
+            if self.tick == 1:
+                self.safely("refresh", core.retire_lab)       # 1.5.1.1: a lab caught mid-run winds down once
             self.safely("refresh", core.refresh_step)          # the higher-refresh trial and its undo
-            self.safely("refresh-lab", core.lab_step)          # the 144 Hz lab: restarts between its steps
             self.safely("state", self.write_state)
             if not self.healthy and time.time() - self.started > core.HEALTHY_AFTER_S:
                 self.healthy = True
