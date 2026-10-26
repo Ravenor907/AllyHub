@@ -198,12 +198,15 @@ def huginn_qss(p: dict, fs) -> str:
     a dark gold fill with a gold edge and gold text, controller focus as a thick light edge (border+padding totals
     stay the same as the base rules, so focus never cuts text off)."""
     a, t, m, bd = p["accent"], p["text"], p["muted"], p["border"]
+    fams = p.get("fonts") or set()
+    body = '"Barlow", ' if "Barlow" in fams else ""            # only families that loaded (see load_theme_fonts)
+    carved = '"Cinzel", ' if "Cinzel" in fams else ""
     r, g, b = (int(a[i:i + 2], 16) for i in (1, 3, 5))
     fill = "#%02x%02x%02x" % tuple(round(c * 0.25 + 0.06 * 255) for c in (r, g, b))
     focus = "#%02x%02x%02x" % tuple(round(c * 0.12 + 0.11 * 255) for c in (r, g, b))
     return f"""
-* {{ font-family: "Barlow", "Noto Sans", sans-serif; }}
-#pageTitle, #heroTitle, #section, #cardTitle, #brandSmall {{ font-family: "Cinzel", "Barlow", serif; }}
+* {{ font-family: {body}"Noto Sans", sans-serif; }}
+#pageTitle, #heroTitle, #section, #cardTitle, #brandSmall {{ font-family: {carved}{body}"Noto Serif", serif; }}
 #pageTitle {{ font-size: {fs(26)}px; }}
 #section {{ color: {m}; font-size: {fs(13)}px; }}
 #card, #hero, #sheet, #banner, #toastPop, #statPill, QPlainTextEdit#log, #thumb {{ border-radius: 3px; }}
@@ -221,7 +224,7 @@ QPushButton#danger:focus {{ border: 3px solid #d9a79e; }}
 QPushButton#chip {{ border-radius: 3px; }}
 QPushButton#chip:checked {{ background: {fill}; border: 1px solid {a}; color: {a}; }}
 QPushButton#chip:checked:focus {{ border: 3px solid {t}; }}
-QPushButton#tab {{ border-radius: 3px; font-family: "Cinzel", "Barlow", serif; }}
+QPushButton#tab {{ border-radius: 3px; font-family: {carved}{body}"Noto Serif", serif; }}
 QPushButton#tab:checked {{ background: {fill}; color: {a}; }}
 QPushButton#themeCard, QPushButton#presetCard {{ border-radius: 3px; }}
 QLineEdit, QSpinBox, QComboBox {{ border-radius: 3px; }}
@@ -1009,21 +1012,25 @@ def label(text: str, obj: str = "", wrap: bool = False) -> QLabel:
 # the family and size, which Qt merges with these). Switching themes calls carve_all, which also undoes it.
 CARVED = {"pageTitle": 4, "section": 3, "cardTitle": 1, "heroTitle": 4, "brandSmall": 3}
 THEME_STYLE = {"style": ""}
-_THEME_FONTS = {"loaded": False}
+_THEME_FONTS = {"files": set(), "families": set()}
 
 
-def load_theme_fonts():
-    """Huginn's typefaces from the app folder, once. Missing files are fine: system fonts stand in."""
-    if _THEME_FONTS["loaded"]:
-        return
-    _THEME_FONTS["loaded"] = True
+def load_theme_fonts() -> set:
+    """Huginn's typefaces from the app folder (each file once). Returns the families that really loaded: the stylesheet
+    only names those, because naming a family that isn't there made Qt hunt for it on every redraw (1.5.1.2 crawled
+    on the owner's handheld, where the fonts hadn't arrived)."""
     for f in ("Cinzel.ttf", "Barlow-Regular.ttf", "Barlow-SemiBold.ttf", "NotoSansRunic-Regular.ttf"):
         path = core.APP_DIR / f
-        if path.exists():
-            try:
-                QFontDatabase.addApplicationFont(str(path))
-            except Exception:
-                pass
+        if f in _THEME_FONTS["files"] or not path.exists():
+            continue
+        try:
+            fid = QFontDatabase.addApplicationFont(str(path))
+            fams = QFontDatabase.applicationFontFamilies(fid) if isinstance(fid, int) and fid >= 0 else []
+            _THEME_FONTS["families"].update(str(x) for x in fams if isinstance(x, str))
+            _THEME_FONTS["files"].add(f)
+        except Exception:
+            pass
+    return set(_THEME_FONTS["families"])
 
 
 def carve(lb: QLabel):
@@ -7435,7 +7442,11 @@ class Hub(QMainWindow):
         scale = int(core.theme_size(t, "scale", GAMEMODE) or 100)
         THEME_STYLE["style"] = pal.get("style", "")
         if THEME_STYLE["style"] == "huginn":
-            load_theme_fonts()
+            pal["fonts"] = load_theme_fonts()
+            if not all((core.APP_DIR / f).exists() for f in core.THEME_FILES) and not getattr(self, "_fetching", False):
+                self._fetching = True             # an older build's updater skipped them: fetch, then restyle
+                BackgroundTask(self, core.ensure_theme_files,
+                               lambda got: (setattr(self, "_fetching", False), got and self.apply_theme()))
         self.app.setStyleSheet(build_qss(pal, int(scale)))
         carve_all(self)
         if getattr(self, "bars", "top") == "sides":

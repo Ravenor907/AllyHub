@@ -403,7 +403,9 @@ everything else waits for the Checkup "Updates" row → `Hub.update_all` (one jo
 `AppearancePage.update_extras`). `huginn_qss` layers squared corners, flat gold-edged accent buttons and Cinzel/Barlow
 on the base stylesheet; `carve`/`carve_all` give `CARVED` title labels capitals + letter spacing through their font
 (QSS can't). Fonts (OFL, license texts beside them) and `raven-gold.png` are `THEME_FILES` in `app/`, part of
-`APP_FILES` and install.sh; all optional (system fonts stand in, the first update from an older build skips them).
+`APP_FILES` and install.sh; all optional. An update run by an OLDER build skips files it doesn't know (1.5.1.2: no raven,
+no fonts, theme crawled): `ensure_theme_files` fetches missing ones (agent network pass + GUI when Huginn is on), and
+`huginn_qss` only names families `load_theme_fonts` really loaded. Any new app file needs the same self-heal.
 Keep it visually in step with github.com/Ravenor907/Huginn (`qml/Theme.qml`, `HButton.qml`, `PageHeader.qml`).
 
 **Wording rules (1.5.0.21, the owner: consistent and intuitive):** Remove for anything installed (Delete only for
