@@ -21,7 +21,7 @@ from core import (APP_NAME, CATALOG, CATALOG_BY_ID, HOME, USER, VERSION, Item, l
 
 from PySide6.QtCore import (QBuffer, QByteArray, QEvent, QIODevice, QObject, QPoint, QPointF, QProcess, QProcessEnvironment, QRectF, QSize,
                             QSocketNotifier, Qt, QTimer, QUrl, Signal)
-from PySide6.QtGui import (QColor, QDesktopServices, QFont, QIcon, QImage, QImageReader,
+from PySide6.QtGui import (QColor, QDesktopServices, QFont, QFontDatabase, QIcon, QImage, QImageReader,
                            QKeyEvent, QMouseEvent, QPainter, QPainterPath, QPen, QPixmap, QTextCursor)
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
@@ -190,6 +190,52 @@ QPushButton#presetCard:focus {{ border: 3px solid {a2}; }}
 #keyText {{ color: {p['muted']}; font-size: {fs(13)}px; }}
 #footInfo {{ color: {p['muted']}; font-size: {fs(13)}px; }}
 QMessageBox QLabel {{ font-size: {fs(15)}px; }}
+""" + (huginn_qss(p, fs) if p.get("style") == "huginn" else "")
+
+
+def huginn_qss(p: dict, fs) -> str:
+    """Huginn's look on top of the base stylesheet: squared 3 px corners, flat buttons, gold accent buttons drawn as
+    a dark gold fill with a gold edge and gold text, controller focus as a thick light edge (border+padding totals
+    stay the same as the base rules, so focus never cuts text off)."""
+    a, t, m, bd = p["accent"], p["text"], p["muted"], p["border"]
+    r, g, b = (int(a[i:i + 2], 16) for i in (1, 3, 5))
+    fill = "#%02x%02x%02x" % tuple(round(c * 0.25 + 0.06 * 255) for c in (r, g, b))
+    focus = "#%02x%02x%02x" % tuple(round(c * 0.12 + 0.11 * 255) for c in (r, g, b))
+    return f"""
+* {{ font-family: "Barlow", "Noto Sans", sans-serif; }}
+#pageTitle, #heroTitle, #section, #cardTitle, #brandSmall {{ font-family: "Cinzel", "Barlow", serif; }}
+#pageTitle {{ font-size: {fs(26)}px; }}
+#section {{ color: {m}; font-size: {fs(13)}px; }}
+#card, #hero, #sheet, #banner, #toastPop, #statPill, QPlainTextEdit#log, #thumb {{ border-radius: 3px; }}
+#hero {{ background: {p['surface']}; }}
+#sheet {{ border: 1px solid {bd}; }}
+#pill {{ border-radius: 3px; }}
+QPushButton {{ border-radius: 3px; font-weight: 600; background: {p['surface2']}; border: 1px solid #45484d; }}
+QPushButton:hover {{ border: 1px solid {a}; }}
+QPushButton:focus {{ border: 3px solid {t}; background: {focus}; }}
+QPushButton#primary {{ background: {fill}; border: 3px solid transparent; color: {a}; }}
+QPushButton#primary {{ border: 1px solid {a}; padding: {fs(9) + 2}px {fs(18) + 2}px; }}
+QPushButton#primary:focus {{ border: 3px solid {t}; padding: {fs(9)}px {fs(18)}px; }}
+QPushButton#danger {{ background: #1e1716; border: 1px solid #5a3a34; color: #d9a79e; }}
+QPushButton#danger:focus {{ border: 3px solid #d9a79e; }}
+QPushButton#chip {{ border-radius: 3px; }}
+QPushButton#chip:checked {{ background: {fill}; border: 1px solid {a}; color: {a}; }}
+QPushButton#chip:checked:focus {{ border: 3px solid {t}; }}
+QPushButton#tab {{ border-radius: 3px; font-family: "Cinzel", "Barlow", serif; }}
+QPushButton#tab:checked {{ background: {fill}; color: {a}; }}
+QPushButton#themeCard, QPushButton#presetCard {{ border-radius: 3px; }}
+QLineEdit, QSpinBox, QComboBox {{ border-radius: 3px; }}
+QCheckBox {{ border-radius: 3px; }}
+QCheckBox:focus {{ border-radius: 3px; border: 2px solid {t}; }}
+QCheckBox::indicator {{ border-radius: 3px; }}
+QCheckBox::indicator:checked {{ background: {a}; }}
+QProgressBar, QProgressBar::chunk {{ border-radius: 0; }}
+QProgressBar::chunk, QSlider::sub-page:horizontal {{ background: {a}; }}
+QSlider::handle:horizontal {{ border-radius: 3px; }}
+QScrollBar:vertical {{ border-radius: 3px; }}
+QScrollBar::handle:vertical {{ border-radius: 3px; background: #45484d; }}
+QScrollBar::handle:vertical:hover, QScrollBar::handle:vertical:pressed {{ background: {a}; }}
+#key, #hint {{ border-radius: 3px; }}
 """
 
 
@@ -952,8 +998,46 @@ def label(text: str, obj: str = "", wrap: bool = False) -> QLabel:
     lb = QLabel(text)
     if obj:
         lb.setObjectName(obj)
+        if obj in CARVED:
+            carve(lb)
     lb.setWordWrap(wrap)
     return lb
+
+
+# ---- Huginn theme (1.5.1.2): Cinzel capitals for titles, Barlow for text, Huginn's raven ----
+# Stylesheets can't set capitals or letter spacing, so titles get them through their font (the stylesheet only sets
+# the family and size, which Qt merges with these). Switching themes calls carve_all, which also undoes it.
+CARVED = {"pageTitle": 4, "section": 3, "cardTitle": 1, "heroTitle": 4, "brandSmall": 3}
+THEME_STYLE = {"style": ""}
+_THEME_FONTS = {"loaded": False}
+
+
+def load_theme_fonts():
+    """Huginn's typefaces from the app folder, once. Missing files are fine: system fonts stand in."""
+    if _THEME_FONTS["loaded"]:
+        return
+    _THEME_FONTS["loaded"] = True
+    for f in ("Cinzel.ttf", "Barlow-Regular.ttf", "Barlow-SemiBold.ttf", "NotoSansRunic-Regular.ttf"):
+        path = core.APP_DIR / f
+        if path.exists():
+            try:
+                QFontDatabase.addApplicationFont(str(path))
+            except Exception:
+                pass
+
+
+def carve(lb: QLabel):
+    on = THEME_STYLE["style"] == "huginn"
+    f = lb.font()
+    f.setCapitalization(QFont.AllUppercase if on else QFont.MixedCase)
+    f.setLetterSpacing(QFont.AbsoluteSpacing, CARVED.get(lb.objectName(), 0) if on else 0)
+    lb.setFont(f)
+
+
+def carve_all(root: QWidget):
+    for lb in root.findChildren(QLabel):
+        if lb.objectName() in CARVED:
+            carve(lb)
 
 
 # Line icons from Lucide (https://lucide.dev). ISC License, Copyright (c) Lucide Icons and Contributors.
@@ -6368,8 +6452,8 @@ class AppearancePage(QWidget):
             b.clicked.connect(lambda _=False, t=name: self.set_preset(t))
             self.theme_btns[name] = b
             grid.addWidget(b, n // 4, n % 4)
-            if name in core.EXTRA_THEMES:
-                b.hide()                    # shown by update_extras (turned on + Advanced)
+            if name in core.EXTRA_THEMES or name in core.ADVANCED_THEMES:
+                b.hide()                    # shown by update_extras (Advanced; extra themes also once turned on)
         v.addLayout(grid)
 
         self.sound_row = QWidget()                 # the extra theme's sound (shown with that theme, update_extras)
@@ -6456,6 +6540,10 @@ class AppearancePage(QWidget):
             b = self.theme_btns.get(name)
             if b is not None and b.parentWidget() is not None:      # never show a parentless widget (own window)
                 b.setVisible(show or t.get("preset") == name)
+        for name in core.ADVANCED_THEMES:                           # Huginn: Advanced only, for now (the owner)
+            b = self.theme_btns.get(name)
+            if b is not None and b.parentWidget() is not None:
+                b.setVisible(advanced_mode() or t.get("preset") == name)
         row = getattr(self, "sound_row", None)
         if row is not None and row.parentWidget() is not None:
             row.setVisible(show or t.get("preset") in core.EXTRA_THEMES)
@@ -6968,6 +7056,7 @@ class Hub(QMainWindow):
         self.top_frame = QFrame()
         self.top_frame.setObjectName("topBar")
         self.brand_badge = brand_icon(38)
+        self._badge_default = self.brand_badge.pixmap()   # put back when leaving the Huginn theme
         self.brand_label = label(APP_NAME, "brandSmall")
         self._has_logo = False                         # the Ally Hub theme shows the wordmark (update_brand)
         self._taps = IconTaps(self)
@@ -7344,7 +7433,11 @@ class Hub(QMainWindow):
         t = load_config()["theme"]
         pal = core.theme_palette(t)
         scale = int(core.theme_size(t, "scale", GAMEMODE) or 100)
+        THEME_STYLE["style"] = pal.get("style", "")
+        if THEME_STYLE["style"] == "huginn":
+            load_theme_fonts()
         self.app.setStyleSheet(build_qss(pal, int(scale)))
+        carve_all(self)
         if getattr(self, "bars", "top") == "sides":
             self._label_buttons(True)               # re-tint the side icons for the new theme
         mode = t.get("controller_nav", "auto")
@@ -7424,14 +7517,26 @@ class Hub(QMainWindow):
 
     def update_brand(self):
         """The Ally Hub theme puts the owner's wordmark in the top bar instead of icon + name."""
-        logo = brand_logo(36) if load_config()["theme"].get("preset") in core.EXTRA_THEMES else None
+        preset = load_config()["theme"].get("preset")
+        logo = brand_logo(36) if preset in core.EXTRA_THEMES else None
         self._has_logo = logo is not None
+        huginn = THEME_STYLE["style"] == "huginn"
         if logo is not None:
             self.brand_label.setPixmap(logo)
             self.brand_label.setToolTip(APP_NAME)
+        elif huginn:                                     # Huginn's header: the name in capitals, in runes below
+            self.brand_label.setText(f"{APP_NAME}<br><span style='font-family: \"Noto Sans Runic\"; "
+                                     f"font-size: 11px; color: #8e897f;'>ᚨᛚᛚᛁ ᚺᚢᛒ</span>")
+            self.brand_label.setToolTip("")
         else:
             self.brand_label.setText(APP_NAME)          # setText clears a pixmap
             self.brand_label.setToolTip("")
+        raven = core.APP_DIR / "raven-gold.png"
+        pm = QPixmap(str(raven)) if huginn and raven.exists() else None
+        if pm is not None and not pm.isNull():
+            self.brand_badge.setPixmap(pm.scaled(38, 38, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        elif getattr(self, "_badge_default", None) is not None:
+            self.brand_badge.setPixmap(self._badge_default)
         self.brand_badge.setVisible(getattr(self, "bars", "top") == "sides" or not self._has_logo)
 
     def activate_extra_theme(self):

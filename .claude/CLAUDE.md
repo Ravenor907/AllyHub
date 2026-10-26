@@ -398,6 +398,14 @@ everything else waits for the Checkup "Updates" row → `Hub.update_all` (one jo
 `keep_current` applies the password-free ones daily when no game runs (`config.updates.keep_current`, default on;
 `KEEP_CURRENT_FILE`). Store → Installed has the same Update all. Add every new install source to the registry.
 
+**Huginn theme (1.5.1.2, the owner: Huginn's look in Ally Hub, Advanced only for now; the apps will merge):**
+`THEMES["Huginn"]` (`style="huginn"`, palette from Huginn's Theme.qml) is listed only in Advanced (`ADVANCED_THEMES`,
+`AppearancePage.update_extras`). `huginn_qss` layers squared corners, flat gold-edged accent buttons and Cinzel/Barlow
+on the base stylesheet; `carve`/`carve_all` give `CARVED` title labels capitals + letter spacing through their font
+(QSS can't). Fonts (OFL, license texts beside them) and `raven-gold.png` are `THEME_FILES` in `app/`, part of
+`APP_FILES` and install.sh; all optional (system fonts stand in, the first update from an older build skips them).
+Keep it visually in step with github.com/Ravenor907/Huginn (`qml/Theme.qml`, `HButton.qml`, `PageHeader.qml`).
+
 **Wording rules (1.5.0.21, the owner: consistent and intuitive):** Remove for anything installed (Delete only for
 files and the user's own effects); Refresh for lists, Check again for checks; "Decky Loader" in full; "Allow all (one
 password)" on every permission button; "Quick Access (the ••• button)" on first mention, then "Quick Access";

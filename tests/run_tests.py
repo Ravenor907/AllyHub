@@ -88,7 +88,8 @@ finally:
     os.remove(tmp_sh)
 inst_dir = os.path.join(HOME, ".local/share/allyhub")
 want = ["allyhub.py", "core.py", "agent.py", "gui.py", "allyhub.svg", "VERSION", "CHANGELOG.md", "README.md",
-        "install.sh", "uninstall.sh"]
+        "install.sh", "uninstall.sh", "Cinzel.ttf", "Barlow-Regular.ttf", "Barlow-SemiBold.ttf",
+        "NotoSansRunic-Regular.ttf", "OFL-Cinzel.txt", "OFL-Barlow.txt", "OFL-NotoSansRunic.txt", "raven-gold.png"]
 check(sorted(os.listdir(inst_dir)) == sorted(want), "install.sh copies every file flat from the folders")
 rd = open(os.path.join({root!r}, "README.md")).read()
 check("scripts/install.sh" in rd, "README install command points at scripts/install.sh")
@@ -1960,6 +1961,13 @@ check(gui.readable_on("#fff7a0", "#ffe14d", "#ffffff") == "#000000" and gui.read
       and all(gui.readable_on(t["accent"], t["accent2"], t["on_accent"]) for t in core.THEMES.values()),
       "button text stays readable on light accent colors (the lab's unreadable button)")
 _psrc = _insp.getsource(gui.PerformancePage.__init__)
+_hq = gui.build_qss(core.theme_palette({"preset": "Huginn"}), 100)
+check(_hq.count("{") == _hq.count("}") and "Cinzel" in _hq and "border-radius: 3px" in _hq
+      and "Cinzel" not in gui.build_qss(core.theme_palette({"preset": "ROG Crimson"}), 100),
+      "the Huginn theme styles only itself: squared corners, Cinzel titles")
+check("Huginn" in core.ADVANCED_THEMES and set(core.THEME_FILES) <= set(core.APP_FILES)
+      and all(os.path.exists(os.path.join(os.path.dirname(gui.__file__), f)) for f in core.THEME_FILES),
+      "Huginn is Advanced only, and its fonts and raven ship with every install and update")
 check("adv(rcard)" in _psrc and "FrameMeter" not in _psrc and not hasattr(gui, "FrameMeter"),
       "experimental 144 Hz only shows in Advanced; the lab and frame meter are gone")
 from PySide6.QtWidgets import QApplication

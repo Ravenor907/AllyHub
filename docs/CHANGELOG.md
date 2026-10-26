@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.5.1.2
+
+- **New Huginn theme** (Advanced, Customize → Theme): Huginn's stone, iron and aged gold, squared corners, carved
+  capitals for titles, flat gold buttons, and Huginn's raven with the name in runes in the top bar.
+
 ## 1.5.1.1
 
 - **Home answers "is my handheld good to go?" first:** battery, temperatures, battery health and storage at the top,
