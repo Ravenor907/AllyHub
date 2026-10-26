@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.5.1.3
+
+- Fixed: the Huginn theme was slow and had no raven. The update from 1.5.1.1 didn't bring the theme's fonts and raven
+  along; Ally Hub now fetches them by itself, and until they're there the theme uses system fonts instead of
+  searching for missing ones on every redraw.
+
 ## 1.5.1.2
 
 - **New Huginn theme** (Advanced, Customize → Theme): Huginn's stone, iron and aged gold, squared corners, carved

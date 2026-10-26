@@ -6861,6 +6861,33 @@ def version_label(v: str = None) -> str:
 LAST_REMOTE_STATUS = {}
 
 
+def ensure_theme_files() -> list:
+    """Fetch any missing THEME_FILES (Huginn's fonts and raven) from the same place updates come from. An update
+    installed by an OLDER build copies only the files that build knew about (1.5.1.2 on the owner's handheld: no raven,
+    no fonts, and the theme crawled looking for typefaces that weren't there). Returns the files it added."""
+    missing = [f for f in THEME_FILES if not (APP_DIR / f).exists()]
+    if not missing:
+        return []
+    branch = update_state().get("branch") or ("testing" if load_config()["updates"].get("channel") == "testing"
+                                              else "main")
+    got = []
+    for f in missing:
+        status, body = gh_request("GET", f"/repos/{repo_name()}/contents/app/{f}?ref={branch}",
+                                  accept="application/vnd.github.raw+json", timeout=30)
+        if status != 200 or not body:
+            continue
+        tmp = APP_DIR / (f + ".part")
+        try:
+            tmp.write_bytes(body)
+            os.replace(tmp, APP_DIR / f)
+            got.append(f)
+        except OSError:
+            tmp.unlink(missing_ok=True)
+    if got:
+        app_log("update", "added theme files: " + ", ".join(got))
+    return got
+
+
 def remote_version(branch: str = "main") -> Optional[str]:
     status, body = gh_request("GET", f"/repos/{repo_name()}/contents/VERSION?ref={branch}",
                               accept="application/vnd.github.raw+json")

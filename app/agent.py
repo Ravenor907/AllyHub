@@ -867,6 +867,7 @@ class Agent:
             return
         try:
             now = time.time()
+            core.ensure_theme_files()           # files an older build's updater didn't know to copy (1.5.1.3)
             if core.pending_reports() and now - self.last_upload > 50:   # a small POST: fine even mid-game
                 self.last_upload = now
                 sent, failed = core.upload_reports()

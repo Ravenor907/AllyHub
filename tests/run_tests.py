@@ -1508,6 +1508,21 @@ _stale = core.stale_nsl_shortcuts()
 check([p.name for p in _stale] == ["Gone.desktop"], "only shortcuts whose program is gone count as leftovers")
 check(core.nsl_clean_cmd(_stale) and "Gone.desktop" in core.nsl_clean_cmd(_stale)
       and core.nsl_clean_cmd([fh / "Other.txt"]) is None, "cleanup deletes stale shortcuts and nothing else")
+# ---- theme files an older build's updater skipped are fetched (1.5.1.3) ----
+_gh0, _seen_paths = core.gh_request, []
+def _fake_gh(method, path, *a_, **k_):
+    _seen_paths.append(path)
+    return 200, b"FONTDATA"
+core.gh_request = _fake_gh
+_app0, core.APP_DIR = core.APP_DIR, Path(HOME) / "app-copy"      # never touch the real app folder
+core.APP_DIR.mkdir(exist_ok=True)
+_got = core.ensure_theme_files()
+check(sorted(_got) == sorted(core.THEME_FILES) and all((core.APP_DIR / f).read_bytes() == b"FONTDATA" for f in _got)
+      and all(p.startswith(f"/repos/{core.repo_name()}/contents/app/") for p in _seen_paths),
+      "missing fonts and raven come from the update source")
+_seen_paths.clear()
+check(core.ensure_theme_files() == [] and not _seen_paths, "nothing missing: no network")
+core.gh_request, core.APP_DIR = _gh0, _app0
 # ---- keep current (1.5.0.23): one registry for everything installed through Ally Hub ----
 _fu = core.flatpak_updates
 core.flatpak_updates = lambda: ["com.heroicgameslauncher.hgl"]
@@ -1961,7 +1976,10 @@ check(gui.readable_on("#fff7a0", "#ffe14d", "#ffffff") == "#000000" and gui.read
       and all(gui.readable_on(t["accent"], t["accent2"], t["on_accent"]) for t in core.THEMES.values()),
       "button text stays readable on light accent colors (the lab's unreadable button)")
 _psrc = _insp.getsource(gui.PerformancePage.__init__)
-_hq = gui.build_qss(core.theme_palette({"preset": "Huginn"}), 100)
+_hp = dict(core.theme_palette({"preset": "Huginn"}), fonts={"Cinzel", "Barlow"})
+_hq = gui.build_qss(_hp, 100)
+check("Cinzel" not in gui.build_qss(core.theme_palette({"preset": "Huginn"}), 100),
+      "fonts that didn't load are never named (Qt hunted for them on every redraw: 1.5.1.2 crawled)")
 check(_hq.count("{") == _hq.count("}") and "Cinzel" in _hq and "border-radius: 3px" in _hq
       and "Cinzel" not in gui.build_qss(core.theme_palette({"preset": "ROG Crimson"}), 100),
       "the Huginn theme styles only itself: squared corners, Cinzel titles")
