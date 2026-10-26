@@ -1682,6 +1682,10 @@ def migrate_color_spirals() -> bool:
 
 
 EXTRA_THEMES = ("Ally Hub",)
+ADVANCED_THEMES = ("Huginn",)    # listed only in Advanced (or while in use)
+# Huginn's typefaces (SIL Open Font License, texts beside them) and its raven; optional: system fonts stand in
+THEME_FILES = ("Cinzel.ttf", "Barlow-Regular.ttf", "Barlow-SemiBold.ttf", "NotoSansRunic-Regular.ttf",
+               "OFL-Cinzel.txt", "OFL-Barlow.txt", "OFL-NotoSansRunic.txt", "raven-gold.png")
 # the rings while the extra theme is on (Ally Hub lighting only); the effect before it comes back when it's switched off
 THEME_LIGHTING = {"type": "breathe", "colors": ["#ff8a00"], "speed": 0.6, "param": 0.45}
 
@@ -2340,6 +2344,12 @@ THEMES = {
                         border="#d5d9e5", text="#151826", muted="#5d6479",
                         accent="#6366f1", accent2="#ec4899",
                         hero=("#e0e3ff", "#f3e1f5", "#dff1ff"), on_accent="#ffffff"),
+    # Huginn (1.5.1.2, the owner: Huginn's look in Ally Hub, Advanced only for now; the two apps will merge): stone,
+    # iron and aged gold, squared corners, carved capitals for titles (Cinzel), Barlow for text, flat gold buttons.
+    "Huginn": dict(bg="#101112", side="#0c0d0e", surface="#17191b", surface2="#1d1e20",
+                   border="#2c2f33", text="#e4e1da", muted="#9c978d",
+                   accent="#c2a25e", accent2="#c2a25e",
+                   hero=("#17191b", "#141617", "#101112"), on_accent="#101112", style="huginn"),
     # extra theme (EXTRA_THEMES)
     "Ally Hub": dict(bg="#050505", side="#0b0b0b", surface="#121212", surface2="#1c1c1c",
                      border="#2e2418", text="#f5f5f5", muted="#a39a90",
@@ -2357,6 +2367,8 @@ def theme_palette(theme_cfg: dict) -> dict:
     if _valid_hex(theme_cfg.get("accent2")):
         pal["accent2"] = theme_cfg["accent2"]
     pal["light"] = theme_cfg.get("preset") == "Frost Light"
+    if pal.get("style") == "huginn" and _valid_hex(theme_cfg.get("accent")):
+        pal["accent2"] = pal["accent"]           # Huginn is one metal: the accent is the gold
     return pal
 
 
@@ -6330,7 +6342,7 @@ REPORT_SENT = DATA_DIR / "reports_sent.json"
 PREV_DIR = DATA_DIR / "previous"
 APP_LOG = DATA_DIR / "allyhub.log"
 APP_FILES = ("allyhub.py", "core.py", "agent.py", "gui.py", "allyhub.svg", "install.sh",
-             "uninstall.sh", "README.md", "CHANGELOG.md", "VERSION")
+             "uninstall.sh", "README.md", "CHANGELOG.md", "VERSION") + THEME_FILES   # optional extras last
 REQUIRED_FILES = ("allyhub.py", "core.py", "agent.py", "gui.py", "VERSION")
 # Where a file can sit: the repo keeps its files in folders (app/, scripts/, docs/), the install on the
 # device is flat.

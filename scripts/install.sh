@@ -12,7 +12,9 @@ ROOT="$SRC"
 
 echo "==> Installing Ally Hub to $APP_DIR"
 mkdir -p "$APP_DIR" "$BIN_DIR" "$(dirname "$DESKTOP_FILE")"
-for f in allyhub.py core.py agent.py gui.py allyhub.svg VERSION CHANGELOG.md README.md install.sh uninstall.sh; do
+for f in allyhub.py core.py agent.py gui.py allyhub.svg VERSION CHANGELOG.md README.md install.sh uninstall.sh \
+         Cinzel.ttf Barlow-Regular.ttf Barlow-SemiBold.ttf NotoSansRunic-Regular.ttf OFL-Cinzel.txt OFL-Barlow.txt \
+         OFL-NotoSansRunic.txt raven-gold.png; do
     for d in "$ROOT/app" "$ROOT/scripts" "$ROOT/docs" "$ROOT"; do
         if [ -f "$d/$f" ]; then
             [ "$d/$f" -ef "$APP_DIR/$f" ] || cp "$d/$f" "$APP_DIR/$f"
