@@ -2068,6 +2068,15 @@ def ask_password(parent, task: str):
     return pw if ok and pw else None
 
 
+def _safe_focus(w):
+    """Focus a widget a timer pointed at, unless it was deleted meanwhile (a list redrawn twice in one pass)."""
+    try:
+        if w.isVisible():
+            w.setFocus(Qt.TabFocusReason)
+    except RuntimeError:
+        pass
+
+
 def file_dialog_options():
     """Game Mode can't drive the desktop's own file picker; Qt's picker works with the controller."""
     return QFileDialog.DontUseNativeDialog if GAMEMODE else QFileDialog.Option(0)
@@ -2186,7 +2195,8 @@ class ItemCard(QFrame):
         nr.addStretch()
         titles.addLayout(nr)
         desc = item.desc.split(". ")[0].rstrip(".")
-        self.desc = label(desc if len(desc) <= 90 else desc[:87].rstrip() + "…", "cardDesc")
+        self.desc = label(desc if len(desc) <= 90 else desc[:87].rstrip() + "…", "cardDesc", wrap=True)
+        self.desc.setMinimumWidth(0)       # wrapping, so a long line can never force the card wider than its column
         self.desc.setToolTip(item.desc + (("\n\n⚠ " + item.warn) if item.warn else ""))
         titles.addWidget(self.desc)
         top.addLayout(titles, 1)
@@ -2356,15 +2366,16 @@ class BrowsePage(QWidget):
 
     def _place_curated(self):
         """Plugins: the hand-picked ones as cards above the full Decky store."""
+        self._take_cards(self.store_page.curated_box)      # refresh runs this again: never stack grids
         items = self.groups("plugins")[0][1]
         grid = two_col_grid()
+        self.store_page.curated_box.addLayout(grid)        # in place first, so the cards get their new parent
         for n, item in enumerate(items):
             card = self.cards[item.id]
             grid.addWidget(card, n // 2, n % 2)
             card.manage = False
             card.apply_manage()
             card.show()
-        self.store_page.curated_box.addLayout(grid)
         self.store_page.curated_title.setVisible(bool(items))
 
     def rebuild(self):
@@ -4856,6 +4867,7 @@ class GamesPage(QWidget):
         self.games, self.live, self.show_all = [], True, False
         self.game, self.settings = None, None
         self.checks, self.other = {}, ""
+        self._saving, self._pending, self._warned_save = False, None, False
         self.v = page_shell(self, "Game settings",
                             "Switches instead of launch options, Proton per game, and help when a game won't start.")
         # every game first, then one game (1.5.0.17: upscaling for all games moved here from Performance)
@@ -4987,15 +4999,17 @@ class GamesPage(QWidget):
             grid.setColumnStretch(c, 1)
         for n, g in enumerate(shown):
             tags = core.game_tags(g.get("options", ""))
-            b = button(g["name"] + ("\n" + " · ".join(tags) if tags else ""), lambda _=False, g=g: self.open_game(g))
+            name = g["name"] if len(g["name"]) <= 26 else g["name"][:25].rstrip() + "…"
+            b = button(name + ("\n" + " · ".join(tags) if tags else ""), lambda _=False, g=g: self.open_game(g))
             b.setToolTip(g["name"])
+            b.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)   # a long name never widens the grid
             grid.addWidget(b, n // 3, n % 3)
             first = first or b
         self.body.addLayout(grid)
         if not self.show_all and len(games) > self.LIST_SIZE:
             self.body.addWidget(button(f"Show all {len(games) + (1 if now else 0)} games", self.expand))
         if first is not None:
-            QTimer.singleShot(0, lambda w=first: w.setFocus(Qt.TabFocusReason))
+            QTimer.singleShot(0, lambda w=first: _safe_focus(w))
 
     def expand(self, *_args):
         self.show_all = True
@@ -5209,42 +5223,51 @@ class GamesPage(QWidget):
         g, s = self.game, self.settings
         if g is None or s is None:
             return
-        if getattr(self, "_saving", False):            # one write at a time; the newest state goes next
-            self._save_again = True
-            return
         opts = self.new_options()
         tool = self.chosen_tool()
         tool_arg = tool if tool != s.get("tool", "") else None
         if opts == s.get("options", "") and tool_arg is None and not note:
             return                                      # nothing changed: Steam isn't touched
+        if getattr(self, "_saving", False):
+            # one write at a time: the newest state is captured now and written next, even if you've left the game
+            self._pending = (g, opts, tool, tool_arg, note)
+            return
+        self._start_save(g, opts, tool, tool_arg, note)
+
+    def _start_save(self, g, opts, tool, tool_arg, note):
         self._saving = True
-        if hasattr(self, "save_state"):
+        if self.game is g and hasattr(self, "save_state"):
             self.save_state.setText("Saving…")
         BackgroundTask(self, lambda: core.apply_game_settings(g["appid"], opts, tool_arg),
                        lambda done: self._saved(g, opts, tool, done, note))
 
     def _saved(self, g: dict, opts: str, tool: str, done, note: str = ""):
         self._saving = False
+        ok = isinstance(done, list) and "options" in done
+        pend, self._pending = getattr(self, "_pending", None), None
         if self.game is g and hasattr(self, "save_state"):
-            self.save_state.setText("Saved ✔" if isinstance(done, list) and "options" in done else "")
-        if getattr(self, "_save_again", False):
-            self._save_again = False
-            if self.game is g:
-                QTimer.singleShot(0, self.save)
-        if isinstance(done, list) and "options" in done:
+            self.save_state.setText("Saved ✔" if ok else "Couldn't save: Steam didn't take the change.")
+        if pend is not None:
+            self._start_save(*pend)
+        if ok and pend is not None and pend[0] is g:
+            g["options"] = opts
+            return                                      # the newer change is on its way; its result reports
+        if ok:
             g["options"] = opts                     # the grid's tags follow without re-reading Steam's files
             if self.game is g:
                 self.settings = dict(self.settings or {}, options=opts, tool=tool if "tool" in done else
                                      (self.settings or {}).get("tool", ""))
                 self.flags0 = core.launch_flags(opts) if core.launch_parseable(opts) else set()
-                self.other = core.set_launch_flags(opts, set()) if core.launch_parseable(opts) else opts
-                self.other_edited = False
+                if not (self.other_edited and self.new_options() != opts):   # keep an edit made during the write
+                    self.other = core.set_launch_flags(opts, set()) if core.launch_parseable(opts) else opts
+                    self.other_edited = False
             if note:
                 msg_info(self, APP_NAME, note)
             else:
                 self.hub.toast(f"Saved. Applies next time you start {g['name']} ✔")
             core.app_log("games", f"{g['name']} ({g['appid']}): launch options set ({len(opts)} chars)")
-        else:
+        elif not getattr(self, "_warned_save", False):     # once, not a pop-up per flipped switch
+            self._warned_save = True
             msg_warn(self, APP_NAME, "Steam didn't take the change. Make sure Decky Loader is running, then try "
                                      "again.")
 
@@ -6260,6 +6283,7 @@ class DoctorPage(QWidget):
         self.show_all = False
         self.probe = {}
         self.problems = None             # set once results are in (the device row reads the app's, no recount)
+        self.problem_checks, self._last_titles, self.verdict_state = [], None, None
 
     def toggle_all(self, *_args):
         self.show_all = not self.show_all
@@ -6499,7 +6523,9 @@ class DoctorPage(QWidget):
             self.problem_checks = [c for c in checks if c["status"] != "ok"]
             if "updates" in (self.probe or {}):        # Store → Installed shows how many updates wait (1.5.1.5)
                 self.hub.set_section_badge("Installed", len(self.probe.get("updates") or []))
-        changed, self.problems = self.problems != own, own
+        titles = [c["title"] + c["detail"] for c in checks if c["status"] != "ok"]
+        changed = self.problems != own or titles != getattr(self, "_last_titles", None)
+        self._last_titles, self.problems = titles, own
         if self.area == "app" and changed:
             dev = getattr(self.hub, "doctor", None)
             if dev is not None and dev is not self and dev.ran and not getattr(dev, "_probing", False):
@@ -7378,6 +7404,8 @@ class Hub(QMainWindow):
         global _HUB
         _HUB = self
         self._sheet = None
+        self._closing, self._set_n = False, 0
+        self._legend_on = bool(load_config()["theme"].get("legend", True))
         self._decky_after = {}             # job key -> callback(ok) for Decky on/off jobs
         self.qam_after_decky = False       # setup: add the Quick Access panel once Decky is installed
         self.glyphs_after_decky = False    # Customize > Theme: CSS Loader goes in once Decky is installed
@@ -7765,11 +7793,11 @@ class Hub(QMainWindow):
 
     def legend_wanted(self) -> bool:
         return (getattr(self, "bars", "top") != "sides" and not getattr(self, "footer_on", False)
-                and bool(load_config()["theme"].get("legend", True))
-                and (not hasattr(self, "gamepad") or self.gamepad.enabled))
+                and self._legend_on and (not hasattr(self, "gamepad") or self.gamepad.enabled))
 
     def toggle_legend(self):
         on = not bool(load_config()["theme"].get("legend", True))
+        self._legend_on = on
         update_config(lambda c: c["theme"].__setitem__("legend", on))
         self.update_legend()
         self.toast("Button hints on ✔" if on else "Button hints hidden. View brings them back ✔")
@@ -7794,8 +7822,14 @@ class Hub(QMainWindow):
 
     def update_legend(self, *_args):
         lf = getattr(self, "legend_frame", None)
-        if lf is None or not hasattr(self, "_legend"):
+        if lf is None or not hasattr(self, "_legend") or getattr(self, "_closing", False):
             return
+        try:
+            self._update_legend(lf)
+        except RuntimeError:                       # widgets going away (quitting): nothing to show
+            pass
+
+    def _update_legend(self, lf):
         want = self.legend_wanted()
         lf.setVisible(want)
         if not want:
@@ -8232,12 +8266,17 @@ class Hub(QMainWindow):
         self.state = core.gather_state()
         self.refresh_password()            # always fresh: a stale "no password" reopened passwd in a loop
         item = CATALOG_BY_ID.get(key)
-        name = item.name if item else JOB_NAMES.get(key, key.split(":", 1)[-1])
+        name = item.name if item else JOB_NAMES.get(key) or (
+            JOB_NAMES.get(key.split(":", 1)[0]) if key.startswith("install-set") else None) or key.split(":", 1)[-1]
         failed_msg = None
         installed_anyway = (code != 0 and item is not None and item.kind == "install" and key in self.installing
                             and item.check(self.state))
         if installed_anyway:   # the installer complained but the app is there (Decky on the owner's Ally Z1E)
             core.app_log("gui", f"job {key} exited {code}, but {name} is installed: counting it as done")
+        if key == "update-all" and code == 75:            # the helper holds the lock: not a failure
+            self.toast("The background helper is updating right now. Try again in a few minutes.", 6000)
+            self.installing.discard(key)
+            return
         if code != 0 and key != "nonsteamlaunchers" and not installed_anyway:   # Launchers page reports its own
             failed_msg = f"“{name}” failed (exit code {code})."
         elif item and item.kind == "install" and key in self.installing and not item.check(self.state):
@@ -8527,6 +8566,9 @@ class Hub(QMainWindow):
         root = [i for i in items if i.id in ("decky", "qam", "tailscale") or i.decky_names]
         if root and self.needs_password():
             return
+        if any(k == "decky" or k.startswith("install-set") for k in self.runner.pending_keys()):
+            self.toast("Already installing. Try again when it's done.")
+            return
         if any(i.id == core.LUDUSAVI_ID for i in items):
             update_config(lambda c: c.setdefault("saves", {}).__setitem__("time_machine", True))
         decky = next((i for i in items if i.id == "decky"), None)
@@ -8546,7 +8588,8 @@ class Hub(QMainWindow):
                 parts.append(f"( {allow} )")
             body = " ; ".join(parts) + " ; true" if parts else "true"
             cmd = f"( {decky.install} ) && {{ {body} ; }}" if decky is not None else body
-            key = "decky" if decky is not None else "install-set"
+            self._set_n = getattr(self, "_set_n", 0) + 1
+            key = "decky" if decky is not None else f"install-set:{self._set_n}"
             ids_in = [i.id for i in ([decky] if decky else []) + chain]
             self.installing.update(ids_in)
             names = [i.name for i in ([decky] if decky else []) + chain] + (["Quick Access panel"] if want_qam else [])
@@ -8725,7 +8768,14 @@ class Hub(QMainWindow):
             if not ask(self, "HueSync is installed too, and the two would fight over the rings.\n\nSwitch to Ally "
                              "Hub lighting and turn HueSync off? You can turn it back on under Store → Installed."):
                 return
-            self.toggle_decky(hs_names, True, "huesync")
+            # the switch happens only once HueSync is really off: both driving the rings is never allowed
+            self.toggle_decky(hs_names, True, "huesync", confirm=False,
+                              after=lambda ok: self._allyhub_lighting_on() if ok else msg_warn(
+                                  self, APP_NAME, "HueSync couldn't be turned off, so HueSync keeps the rings."))
+            return
+        self._allyhub_lighting_on()
+
+    def _allyhub_lighting_on(self):
         update_config(lambda c: c["lighting"].__setitem__("controller", "allyhub"))
         self.lighting_section.show_current()
         self.lighting.refresh()
@@ -8847,7 +8897,7 @@ class Hub(QMainWindow):
         if (load_config().get("performance") or {}).get("boost"):
             update_config(lambda c: c.setdefault("performance", {}).__setitem__("boost", False))
             did.append("Game Boost is off")
-        if not core.lighting_shelved() and ((load_config().get("rgb") or {}).get("brightness") or 255) > 0:
+        if not core.lighting_shelved() and (load_config().get("rgb") or {}).get("brightness", 255) != 0:
             def off(c):                       # the helper picks the change up from the file, like Quick Access
                 old = c.get("rgb") or {"rgb": [225, 29, 72], "enums": {}}
                 old["brightness"] = 0
@@ -8892,6 +8942,11 @@ class Hub(QMainWindow):
             ev.ignore()
             return
         core.mark_healthy("gui")          # opened and closed normally: not a failed start, however quick
+        self._closing = True
+        try:
+            QApplication.instance().focusChanged.disconnect(self.update_legend)
+        except (RuntimeError, TypeError):
+            pass
         ev.accept()
 
 

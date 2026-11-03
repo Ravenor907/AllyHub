@@ -567,11 +567,16 @@ def reboot_device(delay: float = 3.0) -> None:
     threading.Timer(delay, go).start()
 
 
+EDID_FLAG = CONFIG_DIR / "edid-144"
+
+
 def refresh_step(now: float = None) -> str:
     """One look by the agent (every second). The profile only takes effect after a full restart (the owner's test),
     so a try restarts the handheld; after the restart Ally Hub opens with a countdown, and without Keep the old
     profile comes back with another restart. Returns what it did: "", "started", "back", "reverted", "removed"."""
     now = now or time.monotonic()      # within-boot timers (each boot compares only its own times)
+    if EDID_FLAG.exists():             # 1.4.1.12's Desktop Mode 144 Hz is retired: its boot service acts only on this
+        EDID_FLAG.unlink(missing_ok=True)
     st = refresh_state()
     status = st.get("status")
     if status == "pending":
@@ -3614,9 +3619,10 @@ def _du(path: Path) -> int:
         return 0
 
 
-def nsl_leftovers() -> list:
+def nsl_leftovers(sizes: bool = True) -> list:
     """What uninstalled launchers left behind. Each: {label, path, size, warn}. Never anything a still
-    installed launcher (or the games inside it) needs."""
+    installed launcher (or the games inside it) needs. sizes=False skips measuring (the delete-time re-check)."""
+    _du = globals()["_du"] if sizes else (lambda p: 0)
     out = []
     installed = [n for n in NSL_STORES if nsl_installed(n)]
     # own prefixes ("separate" mode) whose launcher is gone
@@ -3688,7 +3694,7 @@ def nsl_clean_cmd(paths: list) -> Optional[str]:
     delete time: it must be one nsl_leftovers lists right now, with no `..` (1.5.1.5: a string prefix check
     alone let `compatdata/../..` through)."""
     home = str(HOME) + "/"
-    allowed = {str(x["path"]) for x in nsl_leftovers()}
+    allowed = {str(x["path"]) for x in nsl_leftovers(sizes=False)}
     paths = [p for p in paths if str(p) in allowed and ".." not in Path(str(p)).parts]
     safe = [str(p) for p in paths if str(p).startswith(home) and str(p) != str(HOME)
             and (str(p).startswith(str(COMPATDATA) + "/") or str(p).startswith(str(NSL_USER_DIR) + "/")
@@ -5829,14 +5835,15 @@ def _profile_clean(key: str, v):
             out = {"rgb": list(v["rgb"]), "enums": {}}
             b = v.get("brightness")
             if isinstance(b, (int, float)) and not isinstance(b, bool) and math.isfinite(b):
-                out["brightness"] = max(0, min(100, b))
+                out["brightness"] = max(0, min(255, b))
             return out
         return None
     if not isinstance(v, dict):
         return None
     v = {kk: vv for kk, vv in v.items() if kk not in PROFILE_PRIVATE.get(key, ())}
     if key == "game_colors":
-        return {str(g)[:40]: c for g, c in list(v.items())[:200] if _valid_hex(c)}
+        return {str(g)[:40]: c for g, c in list(v.items())[:200]
+                if _valid_hex(c) or (isinstance(c, str) and c.startswith("preset:") and len(c) <= 200)} or None
     out = {}
     for kk, dvv in dv.items():
         if kk not in v:
@@ -5927,7 +5934,7 @@ def apply_profile_config(conf: dict) -> None:
             if k == "rgb":
                 cfg[k] = v
             elif k == "game_colors":
-                cfg[k] = v
+                cfg[k] = {**(cfg.get(k) if isinstance(cfg.get(k), dict) else {}), **v}   # merged, never wiped
             else:
                 cfg[k] = {**(cfg.get(k) if isinstance(cfg.get(k), dict) else {}), **v}
     update_config(fn)
@@ -7013,6 +7020,7 @@ LAST_REMOTE_STATUS = {}
 
 
 THEME_FILES_RETRY_S = 6 * 3600
+THEME_FILES_FAILED = DATA_DIR / "theme_files_failed"
 
 
 def ensure_theme_files() -> list:
@@ -7022,8 +7030,7 @@ def ensure_theme_files() -> list:
     missing = [f for f in THEME_FILES if not (APP_DIR / f).exists()]
     if not missing:
         return []
-    st = update_state()
-    if time.time() - float(st.get("theme_files_failed", 0) or 0) < THEME_FILES_RETRY_S:
+    if time.time() - float(read_text(THEME_FILES_FAILED) or 0) < THEME_FILES_RETRY_S:
         return []          # tried and failed lately: never hammer GitHub once a minute (1.5.1.5)
     branch = update_state().get("branch") or ("testing" if load_config()["updates"].get("channel") == "testing"
                                               else "main")
@@ -7042,13 +7049,11 @@ def ensure_theme_files() -> list:
             tmp.unlink(missing_ok=True)
     if got:
         app_log("update", "added theme files: " + ", ".join(got))
-    try:
-        st = update_state()
+    try:                       # its own file: never a read-modify-write of the rollback state (update_state.json)
         if len(got) < len(missing):
-            st["theme_files_failed"] = time.time()
+            THEME_FILES_FAILED.write_text(str(time.time()))
         else:
-            st.pop("theme_files_failed", None)
-        save_update_state(st)
+            THEME_FILES_FAILED.unlink(missing_ok=True)
     except OSError:
         pass
     return got

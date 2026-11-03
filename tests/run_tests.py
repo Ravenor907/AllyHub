@@ -2842,6 +2842,8 @@ _np6, _sub6, _ia = hub.needs_password, hub.runner.submit, hub.on_item_action
 _acts = []
 hub.needs_password = lambda: False
 hub.runner.submit = lambda label, cmd, key="": _acts.append((key, label, cmd))
+_pk6 = hub.runner.pending_keys
+hub.runner.pending_keys = lambda: set()
 hub.setup.step = hub.setup.steps().index("essentials"); hub.setup.refresh()
 for _k, (_cb, _have) in hub.setup.essentials.items():
     _cb.isChecked = lambda: True
@@ -2856,7 +2858,7 @@ check(len(_dj) == 1 and "one password" in _dj[0][1] and "Quick Access" in _dj[0]
       "Setup installs Decky, the panel and the permissions as one job (one password); Flatpaks on their own")
 check(core.load_config()["saves"]["time_machine"] is True, "picking Ludusavi turns the Save time machine on")
 check(subprocess.run(["bash", "-n", "-c", _dj[0][2]]).returncode == 0, "the one-password setup job is valid shell")
-hub.needs_password, hub.runner.submit = _np6, _sub6
+hub.needs_password, hub.runner.submit, hub.runner.pending_keys = _np6, _sub6, _pk6
 tryit("setup finish", hub.setup.finish)
 check(core.load_config()["setup"]["done"] is True, "finishing marks setup done")
 tryit("home checklist", lambda: hub.health.refresh_notices({"password": False, "decky": {}}))
