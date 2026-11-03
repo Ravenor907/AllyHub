@@ -2264,6 +2264,12 @@ tryit("appearance", lambda: ([hub.appearance.set_preset(t) for t in core.THEMES]
 tryit("automation", lambda: ([hub.automation.set_feature(k, False) for k, _, _ in hub.automation.FEATURES],
                              hub.automation.set_dock_lights(0), hub.automation.refresh(), hub.automation.backup_now()))
 tryit("connect", lambda: (hub.connect_page.refresh(), hub.connect_page.wake()))
+def _tab_a():
+    hub.set_tab(0)
+    hub.enter_tab(hub.tab_buttons[2])
+    assert hub.tab_index() == 2, hub.tab_index()
+    hub.set_tab(0)
+tryit("A on a highlighted tab opens that tab", _tab_a)
 gui.QColorDialog.getColor = staticmethod(lambda *a, **k: C(10, 200, 30))
 gui.ask_color = lambda *a, **k: C(10, 200, 30)
 gui.ask_text = lambda *a, **k: ("Night Drive", True)

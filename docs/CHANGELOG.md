@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.5.1.4
+
+- Fixed: highlighting a tab at the top with the D-pad and pressing A (or Down) went into the tab that was already
+  open. It now opens the tab you highlighted.
+
 ## 1.5.1.3
 
 - Fixed: the Huginn theme was slow and had no raven. The update from 1.5.1.1 didn't bring the theme's fonts and raven

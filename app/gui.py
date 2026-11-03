@@ -882,7 +882,7 @@ class GamepadNav(QObject):
         side = getattr(self.hub, "bars", "top") == "sides"
         into_page, to_tabs = (RIGHT, LEFT) if side else (DOWN, UP)
         if win is self.hub and w in self.hub.tab_buttons and d == into_page:
-            self.hub.focus_page()
+            self.hub.enter_tab(w)                # the highlighted tab, not the one that was open (1.5.1.4)
             return
         if isinstance(w, QSlider) and d in (LEFT, RIGHT):
             step = max(1, (w.maximum() - w.minimum()) // 20)
@@ -967,7 +967,7 @@ class GamepadNav(QObject):
         if w is None:
             return
         if w in self.hub.tab_buttons:
-            self.hub.focus_page()
+            self.hub.enter_tab(w)                # A opens the highlighted tab (the owner, 1.5.1.4)
         elif isinstance(w, QAbstractItemView):
             self._key(w, Qt.Key_Return)
         elif isinstance(w, QAbstractButton):
@@ -7633,6 +7633,15 @@ class Hub(QMainWindow):
 
     def focus_tabs(self):
         self.tab_buttons[self.tab_index()].setFocus(Qt.OtherFocusReason)
+
+    def enter_tab(self, b):
+        """Open the tab the controller highlighted, then step into its page. Moving across the tabs with the D-pad
+        only moves the highlight, so A and Down used to land in the tab that was already open."""
+        if b in self.tab_buttons:
+            i = self.tab_buttons.index(b)
+            if i != self.tab_index():
+                self.set_tab(i)
+        self.focus_page()
 
     def focus_page(self):
         """Focus the top-left control of the page. By position, not creation order: blocks added from other
