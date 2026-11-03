@@ -1,5 +1,54 @@
 # Changelog
 
+## 1.5.1.5
+
+**A gamer-first redesign**
+- Home answers "ready to play?" in big letters (READY TO PLAY, CHECK THESE FIRST or NOT READY), with four gauges
+  (battery and time left, temperature, storage, battery health), the fix for anything that needs you right under
+  them, and hours per game on a full charge. The history chart, power draw and fan moved to Battery & sleep.
+- The header shows Ready, battery, the hottest temperature and the clock on every tab. A on it opens Home.
+- A strip at the bottom says what A, B, X, Y and Menu do right where you are. View shows or hides it.
+- X runs the page's extra action, named in the strip: Install the missing, Search plugins, Update all, Check again.
+- Store sections are now Essentials, Plugins, Apps, Emulation, Launchers and Installed. Plugins puts the hand-picked
+  ones above the full Decky store. Installed shows in Simple too, with the number of updates waiting. Cards are
+  smaller, so about twice as many fit.
+- Games: the game you're playing comes first, every game shows which switches are on, and the "every game" card is
+  one row under the list. Switches save the moment you flip them.
+- Settings → General starts with the version and whether it's current. Simple and Advanced are two buttons.
+- Huginn is the default look. If you were on the old default, it switches once; your own theme or colors stay.
+- Page titles that repeated the section name are gone, for more room.
+
+**Fixes**
+- An update on a nearly full disk can no longer leave Ally Hub broken: it checks for room first and puts the old
+  version back if a file can't be written.
+- The background helper no longer restarts over and over when the disk is full.
+- Update all now updates everything in the list instead of stopping after the first plugin, and says if one failed.
+- Plugin updates copy the new version in before removing the old one, so a full disk can't leave a broken plugin.
+- A shared profile with bad values can't stop the window from opening any more, and profiles bring lighting along.
+- A broken plugin, settings file or Steam file no longer breaks the refresh.
+- Launcher leftovers never offers a store's own Proton folder ticked (games can live there), and the cleanup checks
+  every path again before deleting.
+- Missing theme files are fetched at most every 6 hours after a failure, not every minute.
+- "100% (no limit)" no longer undoes a charge limit another tool sets after a restart.
+- Setup starts on Next instead of Skip setup, installs Decky Loader, the Quick Access panel and the permissions with
+  one password, turns the Save time machine on with Ludusavi, and offers to install HueSync when it's picked.
+- Drop-downs let the D-pad move on at the end of their list, so buttons beside them can be reached.
+- Cross-links (Open, Set it, Repair) put the controller on the new page, and B in a game's settings goes back to
+  the list.
+- Messages use plain names ("Background helper done ✔", not "agent done ✔").
+- "Updated by itself" and "SteamOS was updated" are news, not problems: they no longer count as things that need you.
+- Home names the actual problem (for example "Decky Loader is missing", with Repair) instead of "3 things in Settings".
+- Low battery offers Battery saver: Game Boost off, the rings off, and what to change in Quick Access.
+- Choosing a folder, picture, video, sound or profile opens a list inside Ally Hub instead of a separate window.
+- "Sent" only shows when a report really went out; offline it says it'll send later.
+- Report a problem and the Activity log are buttons on both checkups.
+- The secret theme no longer turns on from moving a slider or scrolling for a while, and it keeps your colors.
+- Launchers puts Add and Remove above the list, and says "(installed)" instead of a check mark.
+- Snapshots show above the Save time machine settings, with 12-hour times.
+- Error reports, text size, layout and controller navigation settings moved to Advanced.
+- Smaller fixes: Game Boost is greyed out where it can't work, turning the background helper off asks first and says
+  what stops, switching to Ally Hub lighting offers to turn HueSync off for you.
+
 ## 1.5.1.4
 
 - Fixed: highlighting a tab at the top with the D-pad and pressing A (or Down) went into the tab that was already
