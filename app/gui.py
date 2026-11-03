@@ -6347,7 +6347,8 @@ class SystemPage(QWidget):
             self.hub.refresh()
             return
         # first time: one password sets this up together with everything else, then the limit applies by itself
-        update_config(lambda c: c.setdefault("battery", {}).__setitem__("limit", core.charge_limit_ok(value) or ""))
+        v = core.charge_limit_ok(value) or ""
+        update_config(lambda c: c.setdefault("battery", {}).__setitem__("limit", "" if v == "100" else v))
         self.hub.allow_all()
 
     def clear_shaders(self):
@@ -7983,12 +7984,17 @@ class Hub(QMainWindow):
     def update_all(self, updates=None, *_args):
         """Update everything installed through Ally Hub that has a newer version, in one job (one password at
         most). Without a list it looks one up first."""
+        if isinstance(updates, dict) and updates.get("error") == "offline":
+            self.toast("Couldn't check for updates: no internet connection")
+            return
         if isinstance(updates, dict) and "error" in updates:
             self.toast("Couldn't look for updates. Check the Activity log (Settings → General).")
             return
         if not isinstance(updates, list):
             self.toast("Looking for updates…")
-            BackgroundTask(self, lambda: core.update_registry(refresh=True), self.update_all)
+            # offline, every lookup fails quietly and looks like "nothing new" (1.5.1.5): check first
+            BackgroundTask(self, lambda: core.update_registry(refresh=True) if core.internet_ok()
+                           else {"error": "offline"}, self.update_all)
             return
         if not updates:
             self.toast("Everything is current ✔")
@@ -7999,8 +8005,9 @@ class Hub(QMainWindow):
             self.toast("Already updating…")
             return
         lock = shlex.quote(str(core.KEEP_CURRENT_LOCK))      # never at the same time as the background helper
-        cmd = f"flock -n {lock} bash -c {shlex.quote(core.update_all_cmd(updates))} || " \
-              "{ echo 'The background helper is updating right now. Try again in a few minutes.' >&2; exit 1; }"
+        cmd = f"flock -n -E 75 {lock} bash -c {shlex.quote(core.update_all_cmd(updates))}; rc=$?; " \
+              "[ $rc = 75 ] && echo 'The background helper is updating right now. Try again in a few minutes.' >&2; " \
+              "exit $rc"
         self.runner.submit(f"Updating {len(updates)} " + ("thing" if len(updates) == 1 else "things"), cmd,
                            "update-all")
 
@@ -8077,7 +8084,9 @@ class Hub(QMainWindow):
 
     def import_profile(self, prof: dict):
         plan = core.profile_plan(prof, self.state)
-        lines = [f"From: {prof.get('device', '?')} ({prof.get('created', '?')})", ""]
+        def _short(v):        # a profile can't push the app list out of view with long or multi-line text
+            return re.sub(r"[\x00-\x1f\x7f]+", " ", str(v if v is not None else "?"))[:40]
+        lines = [f"From: {_short(prof.get('device', '?'))} ({_short(prof.get('created', '?'))})", ""]
         if plan["catalog"]:
             lines.append("Mods: " + ", ".join(CATALOG_BY_ID[i].name for i in plan["catalog"]))
         if plan["flatpaks"]:

@@ -1561,6 +1561,40 @@ check(r.returncode == 0 and not (mine / "old.txt").exists() and (mine / "package
       "in-place update: contents replaced, folder kept: " + r.stderr[-200:])
 core.decky_restart_allowed = _mark
 core.flatpak_updates = _fu
+check(not (mine / ".allyhub-new").exists(), "the in-place update leaves no staging folder behind")
+# 1.5.1.5 break-test regressions
+_ua = core.update_all_cmd([{"cmd": "echo a; exit 0", "name": "A"}, {"cmd": "exit 3", "name": "B"}, {"cmd": "echo c", "name": "C"}])
+_r = subprocess.run(["bash", "-c", _ua], capture_output=True, text=True)
+check("Updated C" in _r.stdout and "Done." in _r.stdout and "Could not update B" in _r.stderr and _r.returncode != 0,
+      "Update all keeps going after a part that exits, and reports the failure")
+core.apply_profile_config({"theme": {"scale": "big", "preset": [], "scale_gamemode": 1e999, "accent": "#112233"},
+                           "rgb": {"rgb": [1, 2, 3]}, "lighting": {"controller": "evil", "effect": {"type": "static", "colors": ["#00ff00"]}}})
+_c = core.load_config()
+check(_c["theme"]["scale"] == 100 and _c["theme"]["preset"] == "ROG Crimson" and _c["theme"]["accent"] == "#112233"
+      and _c["theme"]["scale_gamemode"] is None and _c["rgb"]["rgb"] == [1, 2, 3]
+      and _c["lighting"]["controller"] == "huesync" and _c["lighting"]["effect"]["type"] == "static",
+      "a profile's bad values are skipped key by key, and lighting comes along")
+check(core.theme_size({"scale": "big"}, "scale", True) == 100 and core.theme_palette({"preset": []})["accent"],
+      "bad theme values can never stop the window from opening")
+core.update_config(lambda c: c["theme"].update(accent=None))
+_cf = core.CONFIG_FILE.read_text()
+for _bad in ("null", "[]", "5", '{"agent": null, "theme": []}'):
+    core.CONFIG_FILE.write_text(_bad)
+    _c = core.load_config()
+    check(isinstance(_c["agent"], dict) and isinstance(_c["theme"], dict), "a config.json of the wrong shape loads defaults: " + _bad)
+core.CONFIG_FILE.write_text(_cf)
+_jf = Path(HOME) / "state-test.json"; _jf.write_text("[]")
+check(core.read_json(_jf, {}) == {} and core.read_json(_jf) == [], "state files of the wrong type count as missing")
+_pd = core.DECKY_PLUGINS / "BadPlugin"; _pd.mkdir(parents=True, exist_ok=True)
+(_pd / "plugin.json").write_text('{"name": null}'); (_pd / "package.json").write_text("[1]")
+(core.DECKY_PLUGINS / "loose.txt").write_text("x")
+check(core.installed_decky_plugins().get("badplugin", {}).get("version") == "", "a malformed plugin can't break the refresh")
+import shutil as _sh; _sh.rmtree(_pd); (core.DECKY_PLUGINS / "loose.txt").unlink()
+check(core.nsl_clean_cmd([core.COMPATDATA / ".." / ".." / ".."]) is None, "leftover cleanup refuses .. paths")
+_qr = core._queue_report
+core._queue_report = lambda *a, **k: (_ for _ in ()).throw(OSError(28, "No space left on device"))
+check(core.queue_report("crash", "x", "y") is None, "a report that can't be saved never raises (full disk)")
+core._queue_report = _qr
 """
 
 AGENT = r"""
@@ -1912,6 +1946,28 @@ core.VERSION = "1.3.2"
 REMOTE.update(v="1.3.0")
 ok, msg = core.install_update("1.3.3")
 check(not ok and "mismatch" in msg, "never installs an older download")
+# a full disk never leaves a half-written app (1.5.1.5)
+REMOTE.update(v="1.3.5")
+_du = core.shutil.disk_usage
+core.shutil.disk_usage = lambda p: type("U", (), {{"free": 1000}})()
+_before = (app / "gui.py").read_bytes()
+ok, msg = core.install_update("1.3.5")
+check(not ok and "space" in msg and (app / "VERSION").read_text() == "1.3.2" and (app / "gui.py").read_bytes() == _before
+      and core.update_state().get("pending") != "1.3.5", "too little free space: nothing is touched: " + msg)
+core.shutil.disk_usage = _du
+_rep = core.os.replace
+_n = [0]
+def _bad_replace(a, b):
+    _n[0] += 1
+    if _n[0] == 3:
+        raise OSError(28, "No space left on device")
+    return _rep(a, b)
+core.os.replace = _bad_replace
+ok, msg = core.install_update("1.3.5")
+core.os.replace = _rep
+check(not ok and (app / "VERSION").read_text() == "1.3.2" and (app / "gui.py").read_bytes() == _before
+      and core.update_state().get("pending") != "1.3.5" and not (app / ".update-new").exists(),
+      "a write failing halfway puts the old version back: " + msg)
 # update channels: stable follows main; testing follows whichever of main and testing is newer
 BR = {{"main": "1.3.2", "testing": None}}
 seen = []

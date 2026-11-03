@@ -5,6 +5,7 @@ Shared by the GUI (gui.py) and the background agent (agent.py).
 
 import base64
 import colorsys
+import errno
 import fcntl
 import getpass
 import hashlib
@@ -127,10 +128,11 @@ DEFAULT_CONFIG = {
 
 def _merge(defaults: dict, data: dict) -> dict:
     out = {}
+    data = data if isinstance(data, dict) else {}
     for k, v in defaults.items():
         if isinstance(v, dict) and isinstance(data.get(k), dict):
             out[k] = _merge(v, data[k])
-        elif k in data:
+        elif k in data and not isinstance(v, dict):     # a dict section that isn't a dict falls back below
             out[k] = data[k]
         else:
             out[k] = json.loads(json.dumps(v))
@@ -165,25 +167,48 @@ def save_config(cfg: dict) -> None:
 
 
 def update_config(fn: Callable[[dict], None]) -> dict:
+    """Read-modify-write. The thread lock covers the helper's threads; the file lock covers the window and the
+    helper writing at the same moment (1.5.1.5: half of the changes were lost under stress without it)."""
     with _CONFIG_LOCK:
-        cfg = load_config()
-        fn(cfg)
-        save_config(cfg)
-        return cfg
+        lock = None
+        try:
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            lock = open(CONFIG_DIR / "config.json.lock", "w")
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        except OSError:
+            lock = None
+        try:
+            cfg = load_config()
+            fn(cfg)
+            save_config(cfg)
+            return cfg
+        finally:
+            if lock:
+                lock.close()
 
 
 def read_json(path: Path, default=None):
+    """Valid JSON of the wrong type counts as missing when a dict or list default says what's expected
+    (1.5.1.5: `[]` in a state file crashed the window or the helper)."""
     try:
-        return json.loads(Path(path).read_text())
+        v = json.loads(Path(path).read_text())
     except Exception:
         return default
+    if isinstance(default, (dict, list)) and not isinstance(v, type(default)):
+        return default
+    return v
 
 
 def write_json(path: Path, data) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data))
-    os.replace(tmp, path)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix="." + path.name + "-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(data))
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 # ==========================================================================
@@ -317,9 +342,16 @@ def installed_decky_plugins() -> dict:
     except OSError:
         return found
     for d in dirs:
-        meta = read_json(d / "plugin.json", {}) or {}
-        name = meta.get("name", d.name)
-        version = (read_json(d / "package.json", {}) or {}).get("version", "")
+        try:
+            if not d.is_dir() or d.name.startswith("."):      # staging copies (.allyhub-new-*) aren't plugins
+                continue
+        except OSError:
+            continue
+        meta = read_json(d / "plugin.json", {})            # one malformed plugin must not break every refresh
+        name = meta.get("name")
+        name = name.strip() if isinstance(name, str) and name.strip() else d.name
+        version = read_json(d / "package.json", {}).get("version", "")
+        version = version if isinstance(version, str) else str(version or "")
         found[name.lower()] = {"dir": str(d), "name": name, "version": version}
     return found
 
@@ -854,9 +886,17 @@ def mode_key(gamemode: bool) -> str:
 
 
 def theme_size(theme_cfg: dict, name: str, gamemode: bool):
-    """This mode's own interface or text size, falling back to the shared one."""
+    """This mode's own interface or text size, falling back to the shared one. Text size is always a number
+    from 70 to 200 (a bad value from a profile or old file must never stop the window from opening)."""
     v = theme_cfg.get(f"{name}_{mode_key(gamemode)}")
-    return theme_cfg.get(name, "auto" if name == "ui_scale" else 100) if v is None else v
+    v = theme_cfg.get(name, "auto" if name == "ui_scale" else 100) if v is None else v
+    if name == "scale":
+        try:
+            f = float(v)
+            return int(max(70, min(200, f))) if math.isfinite(f) else 100
+        except (TypeError, ValueError):
+            return 100
+    return v
 
 
 def ui_scale(theme_cfg: dict, gamemode: bool = None) -> float:
@@ -2359,14 +2399,15 @@ THEMES = {
 
 
 def theme_palette(theme_cfg: dict) -> dict:
-    pal = dict(THEMES.get(theme_cfg.get("preset"), THEMES["ROG Crimson"]))
+    preset = theme_cfg.get("preset")
+    pal = dict(THEMES.get(preset if isinstance(preset, str) else "", THEMES["ROG Crimson"]))
     # only plain #rrggbb: these go into the stylesheet, so anything else could inject
     # markup (a shared profile could carry it; security review 1.4.1.8)
     if _valid_hex(theme_cfg.get("accent")):
         pal["accent"] = theme_cfg["accent"]
     if _valid_hex(theme_cfg.get("accent2")):
         pal["accent2"] = theme_cfg["accent2"]
-    pal["light"] = theme_cfg.get("preset") == "Frost Light"
+    pal["light"] = preset == "Frost Light"
     if pal.get("style") == "huginn" and _valid_hex(theme_cfg.get("accent")):
         pal["accent2"] = pal["accent"]           # Huginn is one metal: the accent is the gold
     return pal
@@ -2504,6 +2545,18 @@ def newest_version(*versions: str) -> str:
     return max(vs, key=parse_version) if vs else ""
 
 
+# Copy every new plugin folder in next to the old one first and swap only when all copies worked (1.5.1.5: a
+# full disk mid-copy left a plugin with a new plugin.json and half a dist, which Decky couldn't load).
+_PLUGIN_STAGE = (
+    '{ ok=1; for d in "$tmp/out"/*/; do n=$(basename "$d"); s="$HOME/homebrew/plugins/.allyhub-new-$n"; '
+    'sudo rm -rf "$s"; sudo cp -r "$d" "$s" || ok=0; done; '
+    'if [ "$ok" != 1 ]; then sudo rm -rf "$HOME/homebrew/plugins"/.allyhub-new-*; '
+    'echo "Not enough room to copy the plugin in; the old copy was kept." >&2; false; fi; } && ')
+_PLUGIN_SWAP = (
+    'for d in "$tmp/out"/*/; do n=$(basename "$d"); s="$HOME/homebrew/plugins/.allyhub-new-$n"; '
+    'sudo rm -rf "$HOME/homebrew/plugins/$n" && sudo mv "$s" "$HOME/homebrew/plugins/$n" && '
+    'sudo chown -R "$USER:$USER" "$HOME/homebrew/plugins/$n"; done && ')
+
 def github_decky_install_cmd(repo: str, asset: str, plugin_names: tuple, fallback: str = "") -> str:
     """Install a Decky plugin the way Bazzite's ujust recipes do: the newest stable GitHub release
     (releases/latest never points at a pre-release). Any older copy, including a pre-release saved under
@@ -2524,13 +2577,9 @@ def github_decky_install_cmd(repo: str, asset: str, plugin_names: tuple, fallbac
         'curl -fL --proto =https --proto-redir =https -o "$tmp/p.zip" "$url" && '
         'python3 -m zipfile -e "$tmp/p.zip" "$tmp/out" && '
         'ls -d "$tmp/out"/*/ >/dev/null && '
-        'sudo mkdir -p "$HOME/homebrew/plugins" && '
+        'sudo mkdir -p "$HOME/homebrew/plugins" && ' + _PLUGIN_STAGE +
         '{ for d in "$HOME/homebrew/plugins"/*/; do '
-        f'grep -qiE {match} "$d/plugin.json" 2>/dev/null && sudo rm -rf "$d"; done; true; }} && '
-        'for d in "$tmp/out"/*/; do n=$(basename "$d"); '
-        'sudo rm -rf "$HOME/homebrew/plugins/$n"; '
-        'sudo cp -r "$d" "$HOME/homebrew/plugins/$n"; '
-        'sudo chown -R "$USER:$USER" "$HOME/homebrew/plugins/$n"; done && '
+        f'grep -qiE {match} "$d/plugin.json" 2>/dev/null && sudo rm -rf "$d"; done; true; }} && ' + _PLUGIN_SWAP +
         'sudo systemctl restart plugin_loader; rc=$?; rm -rf "$tmp"; exit $rc'
     )
 
@@ -2606,10 +2655,15 @@ def patch_nsl_shortcuts() -> int:
         try:
             if p.is_symlink():
                 continue
-            new = patch_shortcut_text(p.read_text(errors="replace"))
+            raw = p.read_bytes()
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                continue                 # never rewrite bytes we can't read back exactly (1.5.1.5)
+            new = patch_shortcut_text(text)
             if new is None:
                 continue
-            p.write_text(new)
+            p.write_bytes(new.encode("utf-8"))
             done += 1
         except OSError:
             continue
@@ -3615,8 +3669,13 @@ def nsl_leftovers() -> list:
     for name, (rel, own, _a, _u) in NSL_STORES.items():
         d = COMPATDATA / own
         exe = nsl_exe(name)
-        if d.exists() and not (exe and str(d) + "/" in str(exe)):
-            out.append({"label": f"{name}'s old Proton prefix", "path": d, "size": _du(d), "warn": ""})
+        own_drive = d / "pfx/drive_c"
+        in_use = (exe and str(d) + "/" in str(exe)) or (own_drive / rel).exists() or \
+            (name == "EA App" and (own_drive / "Program Files/Electronic Arts").exists())
+        if d.exists() and not in_use:
+            # separate-mode games live in the store's own prefix: never ticked by default (1.5.1.5)
+            out.append({"label": f"{name}'s old Proton prefix", "path": d, "size": _du(d),
+                        "warn": "Also removes any games you installed through this store."})
     shared = COMPATDATA / NSL_SHARED
     if shared.exists() and not any(nsl_exe(n) and NSL_SHARED in str(nsl_exe(n)) for n in NSL_STORES):
         out.append({"label": "Shared launcher prefix (no store left in it)", "path": shared, "size": _du(shared),
@@ -3654,7 +3713,11 @@ def stale_nsl_shortcuts() -> list:
                 if target is not None:
                     text = target.read_text(errors="replace") if target.exists() else ""
                     if not text and not target.exists():
-                        out.append(p)                  # dangling link to a removed NSL file
+                        # a dangling link counts only when it pointed at NSL's applications folder
+                        if str(target).startswith(str(APPLICATIONS_DIR) + "/") and \
+                                any(n.lower().replace(" ", "") in target.stem.lower().replace(" ", "")
+                                    for n in NSL_STORES):
+                            out.append(p)
                         continue
             except OSError:
                 continue
@@ -3667,8 +3730,12 @@ def stale_nsl_shortcuts() -> list:
 
 
 def nsl_clean_cmd(paths: list) -> Optional[str]:
-    """Delete the chosen leftovers (all inside the home folder, no password)."""
+    """Delete the chosen leftovers (all inside the home folder, no password). Every path is checked again at
+    delete time: it must be one nsl_leftovers lists right now, with no `..` (1.5.1.5: a string prefix check
+    alone let `compatdata/../..` through)."""
     home = str(HOME) + "/"
+    allowed = {str(x["path"]) for x in nsl_leftovers()}
+    paths = [p for p in paths if str(p) in allowed and ".." not in Path(str(p)).parts]
     safe = [str(p) for p in paths if str(p).startswith(home) and str(p) != str(HOME)
             and (str(p).startswith(str(COMPATDATA) + "/") or str(p).startswith(str(NSL_USER_DIR) + "/")
                  or str(p).startswith(str(NSL_DOWNLOADS)) or "/shortcuts.vdf_backups/" in str(p)
@@ -3741,9 +3808,13 @@ def shortcut_ids() -> set:
 def compat_tools_in_use() -> set:
     """Proton builds Steam is set to use (per game, or as the default "0" entry) in config.vdf."""
     text = read_text(STEAM_ROOT / "config/config.vdf") or read_text(HOME / ".steam/root/config/config.vdf")
-    mapping = _ci(parse_vdf_text(text), "InstallConfigStore", "Software", "Valve", "Steam", "CompatToolMapping")
-    return {str(v.get("name") or v.get("Name") or "") for v in (mapping or {}).values()
-            if isinstance(v, dict)} - {""}
+    try:
+        mapping = _ci(parse_vdf_text(text), "InstallConfigStore", "Software", "Valve", "Steam", "CompatToolMapping")
+    except (AttributeError, TypeError):
+        mapping = None
+    if not isinstance(mapping, dict):
+        return set()
+    return {str(v.get("name") or v.get("Name") or "") for v in mapping.values() if isinstance(v, dict)} - {""}
 
 
 def tool_names(folder: Path) -> set:
@@ -4633,6 +4704,18 @@ def set_charge_limit(value) -> bool:
     value = charge_limit_ok(value)
     if not value:
         return False
+    if value == "100":
+        # no limit: written once now, never saved, so the helper doesn't undo a limit another tool sets at the
+        # next boot (1.5.1.5)
+        update_config(lambda c: c.setdefault("battery", {}).__setitem__("limit", ""))
+        b = battery_info()
+        if not b.get("limit_file"):
+            return False
+        try:
+            Path(b["limit_file"]).write_text("100")
+            return True
+        except OSError:
+            return False
     update_config(lambda c: c.setdefault("battery", {}).__setitem__("limit", value))
     return apply_charge_limit()
 
@@ -5377,11 +5460,7 @@ def decky_store_install_cmd(url: str, sha256: str = "") -> str:
         f'curl -fL --proto =https --proto-redir =https -o "$tmp/p.zip" {q} && '
         + check +
         'python3 -m zipfile -e "$tmp/p.zip" "$tmp/out" && '
-        'sudo mkdir -p "$HOME/homebrew/plugins" && '
-        'for d in "$tmp/out"/*/; do n=$(basename "$d"); '
-        'sudo rm -rf "$HOME/homebrew/plugins/$n"; '
-        'sudo cp -r "$d" "$HOME/homebrew/plugins/$n"; '
-        'sudo chown -R "$USER:$USER" "$HOME/homebrew/plugins/$n"; done && '
+        'sudo mkdir -p "$HOME/homebrew/plugins" && ' + _PLUGIN_STAGE + _PLUGIN_SWAP +
         'sudo systemctl restart plugin_loader; rc=$?; rm -rf "$tmp"; exit $rc'
     )
 
@@ -5489,6 +5568,16 @@ def plugin_dir_user_owned(info: dict) -> bool:
     return bool(info and info.get("dir")) and _user_writable_tree(Path(info["dir"]))
 
 
+def _nopw_swap(d: str) -> str:
+    """Password-free in-place update: the new files are copied into a folder INSIDE the plugin (its parent is
+    root's) and only replace the old ones once the whole copy worked; moves inside one folder can't run out of
+    room."""
+    return (f'n={d}/.allyhub-new; rm -rf "$n"; {{ cp -r "$src". "$n" || {{ rm -rf "$n"; '
+            'echo "Not enough room to copy the update in; the old copy was kept." >&2; false; }; } && '
+            f'find {d} -mindepth 1 -maxdepth 1 ! -name .allyhub-new -exec rm -rf {{}} + && '
+            f'find "$n" -mindepth 1 -maxdepth 1 -exec mv -t {d} {{}} + && rmdir "$n" && ')
+
+
 def decky_store_update_nopw_cmd(url: str, sha256: str, dest: str) -> str:
     """Replace the CONTENTS of a plugin folder Ally Hub installed (so it's the user's), then restart Decky through
     the polkit rule from Allow all. No sudo anywhere: the folder itself is kept (its parent is root's)."""
@@ -5499,7 +5588,7 @@ def decky_store_update_nopw_cmd(url: str, sha256: str, dest: str) -> str:
     return ('tmp=$(mktemp -d) && '
             f'curl -fL --proto =https --proto-redir =https -o "$tmp/p.zip" {q} && ' + check +
             'python3 -m zipfile -e "$tmp/p.zip" "$tmp/out" && src=$(ls -d "$tmp/out"/*/ | head -n1) && '
-            f'[ -n "$src" ] && find {d} -mindepth 1 -delete && cp -r "$src". {d}/ && '
+            f'[ -n "$src" ] && ' + _nopw_swap(d) +
             'systemctl restart plugin_loader; rc=$?; rm -rf "$tmp"; exit $rc')
 
 
@@ -5512,7 +5601,7 @@ def github_update_nopw_cmd(repo: str, asset: str, dest: str) -> str:
             f'{shlex.quote(asset)}) && [ -n "$url" ] && '
             'curl -fL --proto =https --proto-redir =https -o "$tmp/p.zip" "$url" && '
             'python3 -m zipfile -e "$tmp/p.zip" "$tmp/out" && src=$(ls -d "$tmp/out"/*/ | head -n1) && '
-            f'[ -n "$src" ] && find {d} -mindepth 1 -delete && cp -r "$src". {d}/ && '
+            f'[ -n "$src" ] && ' + _nopw_swap(d) +
             'systemctl restart plugin_loader; rc=$?; rm -rf "$tmp"; exit $rc')
 
 
@@ -5592,10 +5681,11 @@ def update_registry(state: dict = None, store: list = None, refresh: bool = Fals
 
 def update_all_cmd(updates: list) -> str:
     """One job for everything in the list; sudo asks once. Each part reports on its own line and a failure
-    doesn't stop the rest."""
-    parts = [f"{{ {u['cmd']}; }} && echo {shlex.quote('Updated ' + u['name'])} || echo {shlex.quote('Could not update ' + u['name'])} >&2"
-             for u in updates]
-    return " ; ".join(parts) + " ; echo 'Done.'"
+    doesn't stop the rest. Each part runs in its own subshell: several builders end with `exit $rc`, which in a
+    `{ }` group ended the whole job after the first part (1.5.1.5). The job fails if any part failed."""
+    parts = [f"( {u['cmd']} ) && echo {shlex.quote('Updated ' + u['name'])} || "
+             f"{{ echo {shlex.quote('Could not update ' + u['name'])} >&2; _fail=1; }}" for u in updates]
+    return "_fail=0 ; " + " ; ".join(parts) + " ; echo 'Done.' ; [ \"$_fail\" = 0 ]"
 
 
 KEEP_CURRENT_LOCK = DATA_DIR / "keep_current.lock"
@@ -5689,9 +5779,10 @@ def snapshot_settings() -> Path:
         except OSError:
             pass
     out = SETTINGS_SNAP_DIR / f"settings-{time.strftime('%Y-%m-%d_%H%M%S')}.tar.gz"
+    part = out.with_name(out.name + ".part")       # renamed only when complete (1.5.1.5: a full disk kept a broken one)
     old_umask = os.umask(0o077)
     try:
-        with tarfile.open(out, "w:gz") as tar:
+        with tarfile.open(part, "w:gz") as tar:
             for rel in ("homebrew/settings", ".config/allyhub", ".config/MangoHud"):
                 base = HOME / rel
                 if not base.exists():
@@ -5710,8 +5801,15 @@ def snapshot_settings() -> Path:
                                 tar.addfile(info, io.BytesIO(data))
                             else:
                                 tar.add(p, arcname=str(p.relative_to(HOME)))
-                        except (OSError, tarfile.TarError, ValueError):
+                        except OSError as e:
+                            if e.errno in (errno.ENOSPC, errno.EDQUOT):
+                                raise
+                        except (tarfile.TarError, ValueError):
                             pass
+        os.replace(part, out)
+    except BaseException:
+        part.unlink(missing_ok=True)
+        raise
     finally:
         os.umask(old_umask)
     snaps = sorted(SETTINGS_SNAP_DIR.glob("settings-*.tar.gz"))
@@ -5720,10 +5818,67 @@ def snapshot_settings() -> Path:
     return out
 
 
-PROFILE_KEYS = ("theme", "rgb", "agent", "game_colors", "dock", "wol", "performance")
+PROFILE_KEYS = ("theme", "rgb", "agent", "game_colors", "dock", "wol", "performance", "lighting")
 # Never shared in a profile and never taken from one: a profile can't switch on someone's remote with a PIN the
 # sender knows, and doesn't hand out the PIN or the PC's network address.
-PROFILE_PRIVATE = {"agent": ("remote", "remote_pin", "remote_port", "save_backup_dir"), "wol": ("mac", "broadcast")}
+PROFILE_PRIVATE = {"agent": ("remote", "remote_pin", "remote_port", "save_backup_dir"), "wol": ("mac", "broadcast"),
+                   "lighting": ("chip_spiral", "color_spirals_fixed", "before_theme", "gamma", "stream_all")}
+
+
+def _profile_scalar(dv, v) -> bool:
+    """A profile value may only replace a default of the same kind (numbers finite, text short)."""
+    if isinstance(dv, bool):
+        return isinstance(v, bool)
+    if isinstance(dv, (int, float)):
+        return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+    if isinstance(dv, str):
+        return isinstance(v, str) and len(v) <= 200
+    if dv is None:
+        return v is None or (isinstance(v, str) and len(v) <= 200) or \
+            (isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v))
+    if isinstance(dv, list):
+        return isinstance(v, list) and len(v) <= 64 and all(isinstance(x, str) and len(x) <= 200 for x in v)
+    return False
+
+
+def _profile_clean(key: str, v):
+    """The part of a profile's config section that's safe to keep (1.5.1.5: `"scale": "big"` stopped the window
+    from opening on every start). Returns None when nothing usable is there."""
+    dv = DEFAULT_CONFIG[key]
+    if key == "rgb":
+        if isinstance(v, dict) and isinstance(v.get("rgb"), list) and len(v["rgb"]) == 3 and \
+                all(isinstance(x, int) and not isinstance(x, bool) and 0 <= x <= 255 for x in v["rgb"]):
+            out = {"rgb": list(v["rgb"]), "enums": {}}
+            b = v.get("brightness")
+            if isinstance(b, (int, float)) and not isinstance(b, bool) and math.isfinite(b):
+                out["brightness"] = max(0, min(100, b))
+            return out
+        return None
+    if not isinstance(v, dict):
+        return None
+    v = {kk: vv for kk, vv in v.items() if kk not in PROFILE_PRIVATE.get(key, ())}
+    if key == "game_colors":
+        return {str(g)[:40]: c for g, c in list(v.items())[:200] if _valid_hex(c)}
+    out = {}
+    for kk, dvv in dv.items():
+        if kk not in v:
+            continue
+        if key == "lighting" and kk == "effect":
+            out[kk] = normalize_effect(v[kk]) if isinstance(v[kk], dict) else None
+        elif key == "lighting" and kk == "custom":
+            if isinstance(v[kk], dict):
+                out[kk] = {str(n)[:40]: normalize_effect(e) for n, e in list(v[kk].items())[:50] if isinstance(e, dict)}
+        elif key == "lighting" and kk == "controller":
+            if v[kk] in ("huesync", "allyhub"):
+                out[kk] = v[kk]
+        elif key == "theme" and kk in ("accent", "accent2"):
+            out[kk] = v[kk] if _valid_hex(v[kk]) else None
+        elif key == "theme" and kk == "preset":
+            if isinstance(v[kk], str) and v[kk] in THEMES:
+                out[kk] = v[kk]
+        elif not isinstance(dvv, dict) and _profile_scalar(dvv, v[kk]):
+            out[kk] = v[kk]
+    return out or None
 FLATPAK_ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*(\.[A-Za-z0-9_-]+){2,}$")
 
 
@@ -5783,20 +5938,20 @@ def profile_plan(profile: dict, state: dict) -> dict:
 
 
 def apply_profile_config(conf: dict) -> None:
+    """Merge a profile's settings key by key; anything of the wrong type or a private key is skipped."""
+    conf = conf if isinstance(conf, dict) else {}
+
     def fn(cfg):
         for k in PROFILE_KEYS:
-            v = conf.get(k)
-            if v is None or not isinstance(v, type(DEFAULT_CONFIG[k])):
+            v = _profile_clean(k, conf.get(k))
+            if v is None:
                 continue
-            if isinstance(v, dict) and k in PROFILE_PRIVATE:
-                v = {kk: vv for kk, vv in v.items() if kk not in PROFILE_PRIVATE[k]}
-                v.update({kk: cfg[k][kk] for kk in PROFILE_PRIVATE[k] if kk in cfg.get(k, {})})
-            if k == "theme" and isinstance(v, dict):
-                v = dict(v)
-                for kk in ("accent", "accent2"):
-                    if v.get(kk) is not None and not _valid_hex(v.get(kk)):
-                        v[kk] = None
-            cfg[k] = v
+            if k == "rgb":
+                cfg[k] = v
+            elif k == "game_colors":
+                cfg[k] = v
+            else:
+                cfg[k] = {**(cfg.get(k) if isinstance(cfg.get(k), dict) else {}), **v}
     update_config(fn)
 
 
@@ -6569,8 +6724,23 @@ def upload_soon():
     threading.Thread(target=run, daemon=True).start()
 
 
-def queue_report(kind: str, title: str, details: str, fingerprint: str = None, attachments: list = None,
-                 force: bool = False, upload: bool = True) -> Optional[Path]:
+def queue_report(*args, **kw) -> Optional[Path]:
+    """Never lets a report failure become a crash of its own (1.5.1.5: on a full disk the write raised inside
+    the helper's except block and systemd restarted it every 5 s)."""
+    global LAST_QUEUE
+    try:
+        return _queue_report(*args, **kw)
+    except Exception as e:
+        LAST_QUEUE = "failed"
+        try:
+            app_log("report", f"couldn't save a report: {e!r}")
+        except Exception:
+            pass
+        return None
+
+
+def _queue_report(kind: str, title: str, details: str, fingerprint: str = None, attachments: list = None,
+                  force: bool = False, upload: bool = True) -> Optional[Path]:
     """Save a scrubbed report and send it straight away. `attachments` are (name, text) pairs posted as
     follow-up comments so nothing gets cut short. A system snapshot is always attached. `force` is for
     reports the user sends by hand (they still need the access key)."""
@@ -6669,7 +6839,10 @@ def report_exception(component: str, exc_info=None) -> Optional[Path]:
     last = frames[-1] if frames else None
     where = f"{Path(last.filename).name}:{last.name}" if last else "?"
     text = "".join(traceback.format_exception(etype, evalue, tb))
-    app_log(component, f"exception {etype.__name__} in {where}: {evalue}")
+    try:
+        app_log(component, f"exception {etype.__name__} in {where}: {evalue}")
+    except Exception:
+        pass
     return queue_report("crash", f"{component}: {etype.__name__} in {where}: {evalue}", text,
                         _fingerprint("crash", component, etype.__name__, where))
 
@@ -6861,6 +7034,9 @@ def version_label(v: str = None) -> str:
 LAST_REMOTE_STATUS = {}
 
 
+THEME_FILES_RETRY_S = 6 * 3600
+
+
 def ensure_theme_files() -> list:
     """Fetch any missing THEME_FILES (Huginn's fonts and raven) from the same place updates come from. An update
     installed by an OLDER build copies only the files that build knew about (1.5.1.2 on the owner's handheld: no raven,
@@ -6868,6 +7044,9 @@ def ensure_theme_files() -> list:
     missing = [f for f in THEME_FILES if not (APP_DIR / f).exists()]
     if not missing:
         return []
+    st = update_state()
+    if time.time() - float(st.get("theme_files_failed", 0) or 0) < THEME_FILES_RETRY_S:
+        return []          # tried and failed lately: never hammer GitHub once a minute (1.5.1.5)
     branch = update_state().get("branch") or ("testing" if load_config()["updates"].get("channel") == "testing"
                                               else "main")
     got = []
@@ -6885,6 +7064,15 @@ def ensure_theme_files() -> list:
             tmp.unlink(missing_ok=True)
     if got:
         app_log("update", "added theme files: " + ", ".join(got))
+    try:
+        st = update_state()
+        if len(got) < len(missing):
+            st["theme_files_failed"] = time.time()
+        else:
+            st.pop("theme_files_failed", None)
+        save_update_state(st)
+    except OSError:
+        pass
     return got
 
 
@@ -6926,6 +7114,77 @@ def check_for_update() -> dict:
     st["last_remote"] = remote
     save_update_state(st)
     return out
+
+
+def _swap_in_update(src: Path, expected: str, branch: str) -> tuple:
+    """Install the checked files from `src` without ever leaving a half-written app (1.5.1.5: a full disk left
+    gui.py truncated and no pending flag, so rollback never ran). Order: check the free space, stage every new
+    file next to the app, write the backup to a temp folder and swap it in, record `pending`, then replace
+    each file with os.replace (atomic). Any failure before the replace step changes nothing; a failure during it
+    puts the backup back."""
+    files = [f for f in APP_FILES if repo_file(src, f).exists()]
+    need = sum(repo_file(src, f).stat().st_size for f in files) + \
+        sum((APP_DIR / f).stat().st_size for f in APP_FILES if (APP_DIR / f).exists())
+    try:
+        free = shutil.disk_usage(APP_DIR).free
+    except OSError:
+        free = 0
+    if free < need + 20 * 1024 * 1024:
+        return False, f"Not enough free space to update (need about {need // 1048576 + 20} MB)"
+    stage = APP_DIR / ".update-new"
+    prev_new = PREV_DIR.with_name(PREV_DIR.name + ".new")
+    prev_old = PREV_DIR.with_name(PREV_DIR.name + ".old")
+    try:
+        for d in (stage, prev_new, prev_old):
+            shutil.rmtree(d, ignore_errors=True)
+        stage.mkdir(parents=True)
+        for f in files:
+            (stage / f).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(repo_file(src, f), stage / f)
+            if (stage / f).stat().st_size != repo_file(src, f).stat().st_size:
+                raise OSError(f"short copy of {f}")
+        prev_new.mkdir(parents=True)
+        for f in APP_FILES:
+            if (APP_DIR / f).exists():
+                (prev_new / f).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(APP_DIR / f, prev_new / f)
+        (prev_new / "VERSION").write_text(VERSION)
+        if PREV_DIR.exists():
+            PREV_DIR.rename(prev_old)
+        prev_new.rename(PREV_DIR)
+        shutil.rmtree(prev_old, ignore_errors=True)
+    except OSError as e:
+        shutil.rmtree(stage, ignore_errors=True)
+        shutil.rmtree(prev_new, ignore_errors=True)
+        if not PREV_DIR.exists() and prev_old.exists():
+            prev_old.rename(PREV_DIR)
+        return False, f"Couldn't prepare the update: {e}"
+    st = update_state()
+    before = json.loads(json.dumps(st))
+    st.update({"pending": expected, "from": VERSION, "boots": {}, "healthy_by": [], "installed_at": time.time(),
+               "branch": branch})
+    st.setdefault("history", []).append({"from": VERSION, "to": expected, "at": time.time()})
+    st["history"] = st["history"][-20:]
+    try:
+        save_update_state(st)
+        for f in files:
+            os.replace(stage / f, APP_DIR / f)
+    except OSError as e:
+        for f in APP_FILES:
+            if (PREV_DIR / f).exists():
+                try:
+                    shutil.copy2(PREV_DIR / f, APP_DIR / f)
+                except OSError:
+                    pass
+        try:
+            save_update_state(before)       # the running version keeps whatever probation it had
+        except OSError:
+            pass
+        shutil.rmtree(stage, ignore_errors=True)
+        return False, f"Update couldn't be written, kept {display_version(VERSION)}: {e}"
+    shutil.rmtree(stage, ignore_errors=True)
+    shutil.rmtree(APP_DIR / "__pycache__", ignore_errors=True)
+    return True, ""
 
 
 def install_update(expected: str, branch: str = "main", allow_older: bool = False) -> tuple:
@@ -6972,23 +7231,9 @@ def install_update(expected: str, branch: str = "main", allow_older: bool = Fals
                 py_compile.compile(str(repo_file(src, f)), cfile=str(Path(tmp) / (f + "c")), doraise=True)
             except py_compile.PyCompileError as e:
                 return False, f"Update has a syntax error in {f}: {e.msg[:200]}"
-        if PREV_DIR.exists():
-            shutil.rmtree(PREV_DIR)
-        PREV_DIR.mkdir(parents=True)
-        for f in APP_FILES:
-            if (APP_DIR / f).exists():
-                shutil.copy2(APP_DIR / f, PREV_DIR / f)
-        (PREV_DIR / "VERSION").write_text(VERSION)
-        for f in APP_FILES:
-            if repo_file(src, f).exists():
-                shutil.copy2(repo_file(src, f), APP_DIR / f)
-        shutil.rmtree(APP_DIR / "__pycache__", ignore_errors=True)
-    st = update_state()
-    st.update({"pending": expected, "from": VERSION, "boots": {}, "healthy_by": [], "installed_at": time.time(),
-               "branch": branch})
-    st.setdefault("history", []).append({"from": VERSION, "to": expected, "at": time.time()})
-    st["history"] = st["history"][-20:]
-    save_update_state(st)
+        ok, msg = _swap_in_update(src, expected, branch)
+        if not ok:
+            return False, msg
     app_log("update", f"installed {expected} (from {VERSION})")
     try:
         sync_testing_rescue()

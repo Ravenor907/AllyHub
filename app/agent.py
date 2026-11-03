@@ -755,11 +755,11 @@ class Agent:
         st = core.keep_current_state()
         if now - float(st.get("last", 0) or 0) < 86400 or not core.internet_ok():
             return
-        st["last"] = now
-        core.keep_current_save(st)
         with core.keep_current_lock() as got:      # never at the same time as the window's Update all
             if not got:
-                return
+                return                            # try again next pass, not in 24 h (1.5.1.5)
+            st["last"] = now
+            core.keep_current_save(st)
             core.store_cache_refresh()
             ups = core.update_registry(refresh=True)
             done, skipped = [], [u["name"] for u in ups if u["needs_root"]]
@@ -900,8 +900,11 @@ class Agent:
         try:
             fn(*args)
         except Exception:
-            log(f"{name} failed: {sys.exc_info()[1]!r}")
-            core.report_exception(f"agent-{name}")
+            try:
+                log(f"{name} failed: {sys.exc_info()[1]!r}")
+                core.report_exception(f"agent-{name}")
+            except Exception:
+                pass                     # a full disk: reporting must never take the helper down
 
     def run(self):
         log(f"Ally Hub agent {core.VERSION} starting")
