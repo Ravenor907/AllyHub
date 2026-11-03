@@ -6826,9 +6826,9 @@ def report_hint() -> str:
     """Plain-language reason the last report wasn't sent, for messages to the user."""
     return {
         "off": "Turn on error reports (Settings → General) so problems like this get reported.",
-        "no_key": "Error reports are on, but there's no GitHub access key yet. Add one on Settings → General.",
+        "no_key": "Reports need a GitHub access key: turn on Advanced (Settings → General) and add it in Error reports.",
         "duplicate": "This exact problem was already reported in the last day, so it wasn't sent again. "
-                     "A fix may already be out: Settings → General → Check now.",
+                     "A fix may already be out: Settings → General → Check again.",
         "limit": "Ally Hub already sent its daily maximum of reports. It'll send more tomorrow.",
     }.get(LAST_QUEUE, "")
 

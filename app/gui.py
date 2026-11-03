@@ -385,7 +385,7 @@ JOB_NAMES = {
     "saves": "Save backup", "sd": "SD card access", "shader": "Shader cache cleanup", "sleep-nowake": "Wake fix",
     "ssh": "SSH", "storage-clean": "Storage cleanup", "tailscale-login": "Tailscale sign-in",
     "tailscale-logout": "Tailscale sign-out", "tm-restore": "Save restore", "tuneup": "System tune-up",
-    "tuneup-undo": "Tune-up undo", "update-all": "Updates", "install-set": "Installing",
+    "tuneup-undo": "Tune-up undo", "update-all": "Updates", "install-set": "Your picks", "huesync": "Turning HueSync off",
 }
 INFO_ALERTS = ("kept-current", "update-")          # Update Guardian alerts that are news, not problems
 JOB_OWN_TOAST = {"nonsteamlaunchers", "nsl-clean", "nsl-uninstall", "tm-restore", "storage-clean", "sleep-nowake",
@@ -2219,7 +2219,7 @@ class ItemCard(QFrame):
         root.addLayout(btns)
 
     def update_state(self, installed: bool, missing_reqs: list, queued: bool, version: str = "",
-                     off: bool = False):
+                     off: bool = False, has_update: bool = False):
         self.off = bool(off)
         self._installed = installed
         self.btn_toggle.setText("Turn on" if self.off else "Turn off")
@@ -2227,7 +2227,8 @@ class ItemCard(QFrame):
         # GitHub plugins: the newest release from the last check (no network here), so the card can say UPDATE
         repo = self.item.github or self.item.releases
         latest = core.github_latest_cached(repo) if repo else ""
-        upd = bool(installed and version and latest and core.plugin_newer(latest, version))
+        upd = bool(installed and version and latest and core.plugin_newer(latest, version)) or \
+            bool(installed and has_update)        # anything the update list knows about (Flatpaks too)
         if queued:
             set_pill(self.pill, "WORKING…", "busy")
         elif installed and self.off:
@@ -2235,7 +2236,8 @@ class ItemCard(QFrame):
         elif self.item.kind == "run":
             set_pill(self.pill, "TOOL", "tool")
         elif upd:
-            set_pill(self.pill, f"UPDATE {version.lstrip('v')} → {latest}", "update")
+            set_pill(self.pill, f"UPDATE {version.lstrip('v')} → {latest}" if version and latest else "UPDATE",
+                     "update")
         elif installed:
             set_pill(self.pill, "INSTALLED", "on")
         else:
@@ -3726,6 +3728,9 @@ class HueSyncPage(QWidget):
 
     def install(self):
         if not CATALOG_BY_ID["decky"].check(self.hub.state):
+            if "decky" in self.hub.runner.pending_keys():
+                self.hub.toast("Decky Loader is installing. Tap Install HueSync again when it's done.", 7000)
+                return
             self.hub.on_item_action("decky", "install")
             self.hub.toast("Installing Decky first. Tap Install HueSync again when it's done.", 7000)
             return
@@ -4304,7 +4309,8 @@ class HealthPage(QWidget):
             f"{cap}%" if b.get("capacity") else "n/a",
             "charging" if status == "charging" else "plugged in" if status in ("full", "not charging")
             else f"about {left} left" if left not in ("", "n/a") else "", cap if b.get("capacity") else None,
-            "fail" if cap <= 10 and status == "discharging" else "warn" if cap <= 20 and status == "discharging" else "ok")
+            "fail" if cap <= 10 and status not in ("charging", "full", "not charging") else
+            "warn" if cap <= 20 and status not in ("charging", "full", "not charging") else "ok")
         temps = [t for t in (s.get("cpu_temp"), s.get("gpu_temp")) if t]
         top = max(temps) if temps else 0
         self.gauges["Temperature"].show_value(
@@ -4914,7 +4920,7 @@ class GamesPage(QWidget):
         core.game_env_set(key, bool(on))
         self.refresh_game_env()
         if on:
-            self.hub.toast("Saved. Restart the handheld to apply it to games.")
+            self.hub.toast("Saved. Restart the handheld to apply it to games ✔")
 
     def refresh_game_env(self):
         self._loading = True
@@ -5042,7 +5048,7 @@ class GamesPage(QWidget):
 
     def qam_done(self, ok: bool, key: str):
         if ok and key == "qam-install":
-            self.hub.toast("Ally Hub is in Quick Access now: press ••• and open the plug icon.")
+            self.hub.toast("Ally Hub is in Quick Access now: press ••• and open the plug icon ✔")
         self.hub.update_cards()
 
     # ---- one game ----
@@ -6468,8 +6474,8 @@ class DoctorPage(QWidget):
             todo = list(getattr(other, "problem_checks", []) or []) if other is not None else []
             # Home names the actual problem and fixes it in place ("Decky Loader is missing → Repair"), not a
             # vague "3 things in Settings → General" (1.5.1.5)
-            for c in todo[:2]:
-                checks.append(dict(c, auto=False))
+            for c in todo[:2]:            # app things never make the HANDHELD "not ready" (offline is fine to play)
+                checks.append(dict(c, auto=False, status="warn"))
             if len(todo) > 2:
                 more = len(todo) - 2
                 checks.append(dict(status="warn", title="Ally Hub setup",
@@ -6525,6 +6531,8 @@ class DoctorPage(QWidget):
             self.problem_checks = [c for c in checks if c["status"] != "ok"]
             if "updates" in (self.probe or {}):        # Store → Installed shows how many updates wait (1.5.1.5)
                 self.hub.set_section_badge("Installed", len(self.probe.get("updates") or []))
+                if hasattr(self.hub, "browse"):
+                    self.hub.update_cards()            # the cards show UPDATE for the same list
         titles = [c["title"] + c["detail"] for c in checks if c["status"] != "ok"]
         changed = self.problems != own or titles != getattr(self, "_last_titles", None)
         self._last_titles, self.problems = titles, own
@@ -6726,7 +6734,7 @@ class SystemPage(QWidget):
             return
         core.BOOT_VIDEO.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(path, core.BOOT_VIDEO)
-        self.hub.toast("Boot video set. You'll see it next time Steam starts.")
+        self.hub.toast("Boot video set. You'll see it next time Steam starts ✔")
         self.refresh()
 
     def reset_boot_video(self):
@@ -6741,7 +6749,7 @@ class SystemPage(QWidget):
         except OSError as e:
             msg_warn(self, APP_NAME, f"Couldn't save the backup: {e}")
             return
-        self.hub.toast(f"Saved {out.name} (the last 5 are kept)")
+        self.hub.toast(f"Saved {out.name} (the last 5 are kept) ✔")
 
     def export_profile(self):
         path = core.export_profile(self.hub.state)
@@ -7177,7 +7185,8 @@ class UpdatesPage(QWidget):
             parts.append("this version is new and being checked")
         newer = st.get("last_remote") and core.parse_version(st["last_remote"]) > core.parse_version(VERSION)
         lead = (f"Update {core.display_version(st['last_remote'])} is ready." if newer
-                else "Up to date ✔" if st.get("last_check") else "")
+                else "Up to date ✔" if st.get("last_check") else "Not checked yet")
+        parts.insert(0, "Testing channel" if core.update_channel(cfg) == "testing" else "Stable channel")
         self.update_info.setText(" · ".join(([lead] if lead else []) + parts))
         self.btn_restart.setVisible(disk_ver != VERSION)
         if disk_ver != VERSION:
@@ -7295,7 +7304,7 @@ class UpdatesPage(QWidget):
             core.report_update_failure(msg)
         if ok:
             if core.agent_running():
-                self.hub.runner.submit("Restart agent", "systemctl --user restart allyhub-agent.service",
+                self.hub.runner.submit("Restart the background helper", "systemctl --user restart allyhub-agent.service",
                                        "agent")
             if ask(self, f"{msg}. Restart Ally Hub now?"):
                 self.hub.restart_app()
@@ -7309,7 +7318,7 @@ class UpdatesPage(QWidget):
         self.hub.toast(msg)
         if ok:
             if core.agent_running():
-                self.hub.runner.submit("Restart agent", "systemctl --user restart allyhub-agent.service",
+                self.hub.runner.submit("Restart the background helper", "systemctl --user restart allyhub-agent.service",
                                        "agent")
             self.hub.restart_app()
 
@@ -7555,7 +7564,8 @@ class Hub(QMainWindow):
         self.saves.tm_layout.addWidget(self.automation.block_saves)
         add_block(self.lighting, self.automation.block_lighting)
         retitle(self.store_page, "Plugins", "Hand-picked plugins, then the whole Decky plugin store.")
-        retitle(self.appearance, "Theme", "Colors, sizes, where the bars sit, and Steam's boot video.")
+        retitle(self.appearance, "Theme", "Colors, interface size and Steam's boot video. Advanced adds text size and "
+                                          "layout.")
         add_block(self.appearance, self.system.card_boot, heading="Boot video")
         add_block(self.appearance, self.build_glyphs_card(), heading="Controller icons")
         retitle(self.updates, "General", "How much Ally Hub shows, the background helper, updates and backups.")
@@ -7641,6 +7651,10 @@ class Hub(QMainWindow):
         self.toast("Getting CSS Loader from the plugin store…")
 
     def set_mode(self, i: int):
+        if (i == 1) == advanced_mode():
+            for j, b in enumerate(getattr(self, "mode_btns", [])):
+                b.setChecked(j == i)
+            return
         update_config(lambda c: c["theme"].__setitem__("advanced", i == 1))
         for j, b in enumerate(getattr(self, "mode_btns", [])):
             b.setChecked(j == i)
@@ -7815,6 +7829,8 @@ class Hub(QMainWindow):
             return "Select"
         if isinstance(w, QLineEdit):
             return "Type"
+        if isinstance(w, QAbstractButton) and w.objectName() == "topStatus":
+            return "Open Home"
         if isinstance(w, QAbstractButton):
             t = re.sub(r"[‹›✔…]", "", w.text() or "").strip()
             if not t or "\n" in t:
@@ -8041,10 +8057,31 @@ class Hub(QMainWindow):
     def unlock_extra_theme(self, apply: bool = False):
         self.activate_extra_theme()
 
+    @staticmethod
+    def _live_state() -> str:
+        """The same battery and heat limits as the checkup, from live readings."""
+        b = core.battery_info()
+        try:
+            cap = int(b.get("capacity") or 0)
+        except (TypeError, ValueError):
+            cap = 0
+        plugged = (b.get("status") or "").lower() in ("charging", "full", "not charging")
+        s = core.sensors()
+        top = max([t for t in (s.get("cpu_temp"), s.get("gpu_temp")) if t] or [0])
+        if (b.get("capacity") and cap <= 10 and not plugged) or top >= 95:
+            return "fail"
+        if (b.get("capacity") and cap <= 20 and not plugged) or top >= 90:
+            return "warn"
+        return "ok"
+
     def update_top_status(self):
         side = getattr(self, "bars", "top") == "sides"
         doc = getattr(self, "doctor", None)
         state = getattr(doc, "verdict_state", None) if doc is not None else None
+        live = self._live_state()                  # battery and heat change between checkups: never show a stale word
+        if state is not None or live != "ok":
+            order = {"ok": 0, "warn": 1, "fail": 2}
+            state = max(state or "ok", live, key=lambda x: order[x])
         word = {"ok": "● Ready", "warn": "● Check", "fail": "● Not ready"}.get(state, "")
         pct = core.battery_percent().split(" ")[0]
         left = core.time_left_text()
@@ -8202,6 +8239,7 @@ class Hub(QMainWindow):
 
     def update_cards(self):
         pending = self.runner.pending_keys()
+        ups = {u.get("id") for u in ((getattr(self.doctor_app, "probe", None) or {}).get("updates") or [])}
         for page in (self.browse,):
             for iid, card in page.cards.items():
                 item = CATALOG_BY_ID[iid]
@@ -8211,7 +8249,8 @@ class Hub(QMainWindow):
                 off = inst and bool(item.decky_names) and bool(
                     set(core.decky_item_names(item, self.state)) & set(self.state.get("decky_off") or []))
                 busy = iid in pending or (iid == "qam" and bool({"qam-install", "qam-remove"} & set(pending)))
-                card.update_state(inst, missing, busy, core.decky_version(item, self.state), off=off)
+                card.update_state(inst, missing, busy, core.decky_version(item, self.state), off=off,
+                                  has_update=iid in ups)
         self.store_page.refresh_state()
         self.update_glyphs()
 
@@ -8335,7 +8374,7 @@ class Hub(QMainWindow):
         elif key in ("qam-install", "qam-remove"):
             self.games.qam_done(code == 0, key)
         elif key == "game-reset" and code == 0:
-            self.toast("Reset done. Start the game to make fresh Windows files.")
+            self.toast("Reset done. Start the game to make fresh Windows files ✔")
         if key == "decky" and self.qam_after_decky:
             self.qam_after_decky = False
             if code == 0 and CATALOG_BY_ID["decky"].check(self.state):
@@ -8419,6 +8458,9 @@ class Hub(QMainWindow):
             return
         if action == "open":
             self.launch(item.open_cmd)
+            return
+        if action in ("install", "uninstall") and iid in self.runner.pending_keys():
+            self.toast(f"Already working on {item.name}…")
             return
         if (iid in ("decky", "tailscale") or item.decky_names) and self.needs_password():
             return
@@ -8907,9 +8949,10 @@ class Hub(QMainWindow):
             update_config(off)
             did.append("the rings are off")
         msg_info(self, "Battery saver",
-                 ((", ".join(did).capitalize() + ".\n\n") if did else "") +
+                 ((lambda t: t[:1].upper() + t[1:])(", ".join(did)) + ".\n\n" if did else "") +
                  "For more time, in Quick Access (the ••• button) → Performance: set a frame rate limit (30 or 40) "
-                 "and lower the TDP, and turn the screen brightness down.")
+                 "and lower the TDP, and turn the screen brightness down." +
+                 ("\n\nTurn the rings back on under Customize → Lighting." if "the rings are off" in did else ""))
         self.refresh()
 
     def report_toast(self, path, ok_text: str):
