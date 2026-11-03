@@ -190,6 +190,19 @@ QPushButton#presetCard:focus {{ border: 3px solid {a2}; }}
 #keyText {{ color: {p['muted']}; font-size: {fs(13)}px; }}
 #footInfo {{ color: {p['muted']}; font-size: {fs(13)}px; }}
 QMessageBox QLabel {{ font-size: {fs(15)}px; }}
+#verdictCard {{ background: {p['surface']}; border: 1px solid {p['border']}; border-radius: 18px; }}
+#verdict {{ font-size: {fs(34)}px; font-weight: 700; color: {p['text']}; }}
+#verdict[state="ok"] {{ color: #4ade80; }}
+#verdict[state="warn"] {{ color: #fbbf24; }}
+#verdict[state="fail"] {{ color: #fb7185; }}
+#card[state="warn"] {{ border: 1px solid #7a5a14; }}
+#card[state="fail"] {{ border: 1px solid #7f2a3a; }}
+QPushButton#topStatus {{ background: transparent; border: 2px solid transparent; border-radius: 12px;
+    padding: 4px 10px; min-height: 0; color: {p['muted']}; font-size: {fs(14)}px; }}
+QPushButton#topStatus:focus {{ border: 2px solid {p['text']}; padding: 4px 10px; }}
+QPushButton#topStatus[state="warn"] {{ color: #fbbf24; }}
+QPushButton#topStatus[state="fail"] {{ color: #fb7185; }}
+#legendBar {{ background: {p['side']}; border-top: 1px solid {p['border']}; }}
 """ + (huginn_qss(p, fs) if p.get("style") == "huginn" else "")
 
 
@@ -239,6 +252,15 @@ QScrollBar:vertical {{ border-radius: 3px; }}
 QScrollBar::handle:vertical {{ border-radius: 3px; background: #45484d; }}
 QScrollBar::handle:vertical:hover, QScrollBar::handle:vertical:pressed {{ background: {a}; }}
 #key, #hint {{ border-radius: 3px; }}
+#verdict {{ font-family: {carved}{body}"Noto Serif", serif; }}
+#verdictCard {{ border-radius: 3px; }}
+#verdict[state="ok"] {{ color: {a}; }}
+#chipBar QPushButton#chip {{ background: transparent; border: 1px solid transparent; border-bottom: 3px solid transparent;
+    border-radius: 0; padding: 9px 17px 7px 17px; color: {m}; }}
+#chipBar QPushButton#chip:checked {{ background: transparent; border: 1px solid transparent; border-bottom: 3px solid {a};
+    color: {a}; }}
+#chipBar QPushButton#chip:focus, #chipBar QPushButton#chip:checked:focus {{ border: 3px solid {t};
+    padding: 7px 15px 7px 15px; }}
 """
 
 
@@ -559,6 +581,8 @@ class GamepadNav(QObject):
 
     def set_enabled(self, on: bool):
         self.enabled = on
+        if hasattr(self.hub, "update_legend"):
+            QTimer.singleShot(0, self.hub.update_legend)      # the hint strip only shows with the controller on
         if on:
             self.scan()
             self.scan_timer.start(3000)
@@ -638,6 +662,8 @@ class GamepadNav(QObject):
             QDesktopServices.openUrl(QUrl("steam://open/keyboard"))
         elif n in (4, 5):
             self.hub.step_page(-1 if n == 4 else 1)
+        elif n == 6:                    # View: show or hide the button hints (1.5.1.5, Huginn's rule)
+            self.hub.toggle_legend()
         elif n == 7:                    # Menu: refresh (was Y before 1.5.0.1)
             self.hub.refresh()
             self.hub.toast("Refreshed ✔")
@@ -1017,7 +1043,7 @@ def label(text: str, obj: str = "", wrap: bool = False) -> QLabel:
 # ---- Huginn theme (1.5.1.2): Cinzel capitals for titles, Barlow for text, Huginn's raven ----
 # Stylesheets can't set capitals or letter spacing, so titles get them through their font (the stylesheet only sets
 # the family and size, which Qt merges with these). Switching themes calls carve_all, which also undoes it.
-CARVED = {"pageTitle": 4, "section": 3, "cardTitle": 1, "heroTitle": 4, "brandSmall": 3}
+CARVED = {"pageTitle": 4, "section": 3, "cardTitle": 1, "heroTitle": 4, "brandSmall": 3, "verdict": 5}
 THEME_STYLE = {"style": ""}
 _THEME_FONTS = {"files": set(), "families": set()}
 
@@ -1670,7 +1696,9 @@ def page_shell(widget: QWidget, title: str, sub: str) -> QVBoxLayout:
         widget._sub = label(sub, "pageSub", wrap=True)
         v.addWidget(widget._title)
         v.addWidget(widget._sub)
-        v.addSpacing(8)
+        # the section chip already names the page: no big title repeating it (1.5.1.5 redesign, ~70 px back);
+        # hidden after it has a parent (never show or hide a parentless widget)
+        widget._title.hide()
     outer = QVBoxLayout(widget)
     outer.setContentsMargins(0, 0, 0, 0)
     outer.addWidget(scroll_page(inner))
@@ -1698,7 +1726,7 @@ def add_block(page: QWidget, widget: QWidget, index: int = None, heading: str = 
         if index and v.itemAt(index - 1).spacerItem() is not None:
             index -= 1
     else:
-        index += 3 if getattr(page, "_title", None) is not None else 0      # title, subtitle, spacing
+        index += 2 if getattr(page, "_title", None) is not None else 0      # title (hidden), subtitle
     if heading:
         v.insertWidget(index, label(heading.upper(), "section"))
         index += 1
@@ -2141,26 +2169,28 @@ class ItemCard(QFrame):
         self.item = item
         self.setObjectName("card")
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
+        # compact tile (1.5.1.5 redesign): icon, name, one line, a tag only for INSTALLED / UPDATE, and a button only
+        # when there's something to do, so about twice as many fit on the screen. Cautions are asked at install time.
         root = QVBoxLayout(self)
-        root.setContentsMargins(20, 20, 20, 18)
-        root.setSpacing(10)
+        root.setContentsMargins(16, 14, 16, 14)
+        root.setSpacing(8)
         top = QHBoxLayout()
-        top.setSpacing(14)
-        top.addWidget(monogram_badge(item_icon(item), item.color))
+        top.setSpacing(12)
+        top.addWidget(monogram_badge(item_icon(item), item.color, 40))
         titles = QVBoxLayout()
-        titles.setSpacing(4)
-        titles.addWidget(label(item.name, "cardTitle"))
+        titles.setSpacing(2)
+        nr = QHBoxLayout()
+        nr.addWidget(label(item.name, "cardTitle"))
         self.pill = label("", "pill")
-        pr = QHBoxLayout()
-        pr.addWidget(self.pill)
-        pr.addStretch()
-        titles.addLayout(pr)
+        nr.addWidget(self.pill)
+        nr.addStretch()
+        titles.addLayout(nr)
+        desc = item.desc.split(". ")[0].rstrip(".")
+        self.desc = label(desc if len(desc) <= 90 else desc[:87].rstrip() + "…", "cardDesc")
+        self.desc.setToolTip(item.desc + (("\n\n⚠ " + item.warn) if item.warn else ""))
+        titles.addWidget(self.desc)
         top.addLayout(titles, 1)
         root.addLayout(top)
-        root.addWidget(label(item.desc, "cardDesc", wrap=True))
-        if item.warn:
-            root.addWidget(label("⚠ " + item.warn, "cardWarn", wrap=True))
-        root.addStretch()
         btns = QHBoxLayout()
         self.btn_install = button("Run" if item.kind == "run" else "Install",
                                   lambda: self.action.emit(item.id, "install"), "primary")
@@ -2197,13 +2227,16 @@ class ItemCard(QFrame):
         elif upd:
             set_pill(self.pill, f"UPDATE {version.lstrip('v')} → {latest}", "update")
         elif installed:
-            set_pill(self.pill, f"INSTALLED · v{version.lstrip('v')}" if version else "INSTALLED", "on")
+            set_pill(self.pill, "INSTALLED", "on")
         else:
-            set_pill(self.pill, "NOT INSTALLED", "off")
+            self.pill.setText("")                      # no "NOT INSTALLED" shouting on every card
+        self.pill.setVisible(bool(self.pill.text()))
         if self.item.kind != "run":
             self.btn_install.setText("Update" if upd else "Reinstall" if installed else "Install")
             self.btn_install.setObjectName("" if installed and not upd else "primary")
             repolish(self.btn_install)
+            # Reinstall (a repair) only where installs are managed; elsewhere an installed card has no button
+            self.btn_install.setVisible(not installed or upd or self.manage)
         self.btn_install.setEnabled(not queued and not missing_reqs)
         self.btn_install.setToolTip("Install first: " + ", ".join(missing_reqs) if missing_reqs else "")
         self.btn_open.setVisible(installed and bool(self.item.open_cmd))
@@ -2211,6 +2244,8 @@ class ItemCard(QFrame):
         self.apply_manage()
 
     def apply_manage(self):
+        if self.item.kind != "run" and self._installed and self.btn_install.text() == "Reinstall":
+            self.btn_install.setVisible(self.manage)
         self.btn_toggle.setVisible(self.manage and self._installed and bool(self.item.decky_names))
         self.btn_remove.setVisible(self.manage and self._installed and bool(self.item.uninstall))
 
@@ -2220,8 +2255,9 @@ class BrowsePage(QWidget):
     plugins, Installed) pick the view through set_view; the Decky plugin store is the StorePage, under its section. Every catalog card exists once (self.cards) and is
     moved between the filter views, so update_cards keeps them all current."""
 
-    FILTERS = [("essentials", "Essentials"), ("mods", "Mods"), ("apps", "Apps"), ("plugins", "Decky plugins"),
+    FILTERS = [("essentials", "Essentials"), ("plugins", "Plugins"), ("apps", "Apps"), ("emulation", "Emulation"),
                ("installed", "Installed")]
+    PLUGIN_CATEGORIES = ["Game Mode plugins"]         # curated plugins, shown on top of the Decky store
 
     def __init__(self, hub, store_page):
         super().__init__()
@@ -2240,6 +2276,7 @@ class BrowsePage(QWidget):
         self.sub = label("", "pageSub", wrap=True)
         cv.addWidget(self.title)
         cv.addWidget(self.sub)
+        self.title.hide()                  # the section chip names it (1.5.1.5)
         top = QHBoxLayout()
         self.btn_all = button("Install all essentials", hub.install_essentials, "primary")
         top.addWidget(self.btn_all)
@@ -2276,7 +2313,11 @@ class BrowsePage(QWidget):
             # Decky plugins (the panel too) are listed once, under Your plugins
             return [("", [i for i in CATALOG if i.kind == "install" and i.check(st)
                           and not i.decky_names and i.id != "qam"])]
-        cats = core.MOD_CATEGORIES if key == "mods" else core.APP_CATEGORIES
+        if key == "emulation":
+            return [("", [i for i in CATALOG if i.category == "Emulation"])]
+        if key == "plugins":
+            return [("", [i for i in CATALOG if i.category in self.PLUGIN_CATEGORIES])]
+        cats = core.APP_CATEGORIES + ["Launchers & stores"]          # Tailscale lives with the apps
         return [(c, [i for i in CATALOG if i.category == c]) for c in cats]
 
     def set_filter(self, key: str):
@@ -2284,30 +2325,22 @@ class BrowsePage(QWidget):
         for k, c in self.chips.items():
             c.setChecked(k == key)
         if key == "plugins":
+            self._take_cards(self.list_v)
+            self._place_curated()
             self.stack.setCurrentIndex(1)
             self.store_page.ensure_loaded()
             self.store_page.refresh_state()
             return
+        self._take_cards(self.store_page.curated_box)
+        self.store_page.curated_title.hide()
         self.stack.setCurrentIndex(0)
         self.rebuild()
 
-    def rebuild(self):
-        key = self.filter
-        if key in (None, "plugins"):
-            return
-        titles = {"essentials": ("Essentials", "The few things most handhelds want. Tap Install on what you'd like."),
-                  "mods": ("Mods", "Game Mode plugins, launchers and emulation."),
-                  "apps": ("Apps", "Hand-picked apps from Flathub, installed for your user (no password)."),
-                  "installed": ("Installed", "Everything installed, Decky plugins included: turn things off or remove "
-                                             "what you don't use.")}
-        t, sub = titles[key]
-        self.title.setText(t)
-        self.sub.setText(sub)
-        self.btn_all.setVisible(key == "essentials" and any(
-            i.recommended and not i.check(self.hub.state) for i in CATALOG))
-        self.btn_update.setVisible(key == "installed")
-        while self.list_v.count():                     # take the cards out; they're reused, never deleted
-            it = self.list_v.takeAt(0)
+    @staticmethod
+    def _take_cards(layout):
+        """Take the reused cards out of a layout (never deleted: each catalog card exists once)."""
+        while layout.count():
+            it = layout.takeAt(0)
             lay, w = it.layout(), it.widget()
             if lay is not None:
                 while lay.count():
@@ -2316,7 +2349,41 @@ class BrowsePage(QWidget):
                         c.hide()
                 lay.deleteLater()
             elif w is not None:
-                w.deleteLater()
+                if isinstance(w, ItemCard):
+                    w.hide()
+                else:
+                    w.deleteLater()
+
+    def _place_curated(self):
+        """Plugins: the hand-picked ones as cards above the full Decky store."""
+        items = self.groups("plugins")[0][1]
+        grid = two_col_grid()
+        for n, item in enumerate(items):
+            card = self.cards[item.id]
+            grid.addWidget(card, n // 2, n % 2)
+            card.manage = False
+            card.apply_manage()
+            card.show()
+        self.store_page.curated_box.addLayout(grid)
+        self.store_page.curated_title.setVisible(bool(items))
+
+    def rebuild(self):
+        key = self.filter
+        if key in (None, "plugins"):
+            return
+        titles = {"essentials": ("Essentials", "The few things most handhelds want. Tap Install on what you'd like."),
+                  "emulation": ("Emulation", "Play your retro games: emulators and the tools that add them to Steam."),
+                  "apps": ("Apps", "Hand-picked apps from Flathub, installed for your user (no password)."),
+                  "installed": ("Installed", "Everything installed, Decky plugins included: turn things off or remove "
+                                             "what you don't use.")}
+        t, sub = titles[key]
+        self.title.setText(t)
+        self.sub.setText(sub)
+        missing = [i for i in CATALOG if i.recommended and not i.check(self.hub.state)]
+        self.btn_all.setVisible(key == "essentials" and bool(missing))
+        self.btn_all.setText(f"Install the {len(missing)} missing" if len(missing) != 1 else "Install the missing one")
+        self.btn_update.setVisible(key == "installed")
+        self._take_cards(self.list_v)                  # take the cards out; they're reused, never deleted
         shown = 0
         for heading, items in self.groups(key):
             if not items:
@@ -2356,6 +2423,36 @@ class StatTile(QFrame):
         v.addWidget(label(title, "statLabel"))
         self.value = label("…", "bigValue" if big else "statValue", wrap=True)
         v.addWidget(self.value)
+
+
+class Gauge(QFrame):
+    """A Home gauge (1.5.1.5): what it is, one big value, a short line under it and a thin bar. The bar and value
+    turn amber or red with the same limits the checkup uses."""
+
+    def __init__(self, title: str):
+        super().__init__()
+        self.setObjectName("card")
+        v = QVBoxLayout(self)
+        v.setContentsMargins(18, 14, 18, 14)
+        v.setSpacing(6)
+        v.addWidget(label(title, "statLabel"))
+        self.value = label("…", "bigValue")
+        v.addWidget(self.value)
+        self.sub = label("", "cardMeta")
+        v.addWidget(self.sub)
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 100)
+        self.bar.setTextVisible(False)
+        v.addWidget(self.bar)
+
+    def show_value(self, value: str, sub: str, pct, state: str = "ok"):
+        self.value.setText(value)
+        self.sub.setText(sub)
+        self.bar.setVisible(pct is not None)
+        if pct is not None:
+            self.bar.setValue(max(0, min(100, int(pct))))
+        self.setProperty("state", state)          # QSS colors #card[state="warn"] / [state="fail"]
+        repolish(self)
 
 
 # ==========================================================================
@@ -2528,6 +2625,13 @@ class StorePage(QWidget):
         nl.addWidget(label("Decky Loader isn't installed yet. Install it first.", "bannerText", wrap=True), 1)
         nl.addWidget(button("Install Decky Loader", lambda: hub.on_item_action("decky", "install"), "primary"))
         v.addWidget(self.need_decky)
+        # Store → Plugins: the hand-picked plugins first (BrowsePage puts its cards here), then the full store
+        self.curated_title = label("PICKED FOR THE HANDHELD", "section")
+        v.addWidget(self.curated_title)
+        self.curated_title.hide()
+        self.curated_box = QVBoxLayout()
+        self.curated_box.setSpacing(12)
+        v.addLayout(self.curated_box)
         mine, mv = titled_card("plug", "#8b5cf6", "Your plugins",
                                "Everything in Decky, however it was installed. Turn a plugin off if it misbehaves "
                                "(it stays installed), or remove it.")
@@ -2543,7 +2647,7 @@ class StorePage(QWidget):
                            "time to find the culprit.", "cardMeta", wrap=True))
         self.mine_card = mine
         self.mine_shown = False       # it shows under Store → Installed (BrowsePage sets this)
-        v.addWidget(label("STORE", "section"))
+        v.addWidget(label("DECKY PLUGIN STORE", "section"))
         bar = QHBoxLayout()
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search plugins…")
@@ -2847,7 +2951,7 @@ class LightingPage(QWidget):
 
         self.empty = self._banner(
             "No ring lights were detected on this kernel. You can still design effects here, and "
-            "Ally Center (Store → Mods) can drive the rings in Game Mode.", None, None)
+            "Ally Center (Store → Plugins) can drive the rings in Game Mode.", None, None)
         self.agent_banner = self._banner("Animated effects run in the background helper, which is off.",
                                          "Turn it on", hub.enable_agent)
         self.perm_banner = self._banner("Allow lighting changes without a password so effects can run.",
@@ -3576,7 +3680,7 @@ class HueSyncPage(QWidget):
         row = QHBoxLayout()
         self.btn_install = button("Install HueSync", self.install, "primary")
         row.addWidget(self.btn_install)
-        row.addWidget(button("Open the plugin store", lambda: hub.go("Decky plugins")))
+        row.addWidget(button("Open the plugin store", lambda: hub.go("Plugins")))
         row.addStretch()
         cv.addLayout(row)
         cv.addWidget(label("To use it: in Game Mode press the ••• (Quick Access) button, open the plug "
@@ -3600,7 +3704,7 @@ class HueSyncPage(QWidget):
         decky = CATALOG_BY_ID["decky"].check(self.hub.state)
         self.btn_install.setVisible(not self.installed())
         if self.installed():
-            self.status.setText("✔ Installed. Updates and removal are in Store > Decky plugins.")
+            self.status.setText("✔ Installed. Updates and removal are in Store → Installed.")
             self.btn_install.setText("Install HueSync")
         elif not decky:
             self.status.setText("Needs Decky Loader first")
@@ -4062,23 +4166,43 @@ class HealthPage(QWidget):
         super().__init__()
         self.hub = hub
         v = page_shell(self, "Health", "Live readings, history and which games drain your battery.")
-        # setup, password and Decky reminders live in the Checkup below (one place, 1.5.0.8)
+        # 1.5.1.5 redesign (the owner): "can I play?" in one glance. The verdict goes first (Hub puts the device
+        # checkup at self.slot), then four gauges, then hours per game. The history chart, power draw and fan moved
+        # to Battery & sleep (self.history_block, placed there by Hub.compose_sections).
+        self.slot = v.count()
+        grid = QGridLayout()
+        grid.setSpacing(16)
+        self.gauges = {k: Gauge(k) for k in ("Battery", "Temperature", "Storage", "Battery health")}
+        for n, t in enumerate(self.gauges.values()):
+            grid.addWidget(t, 0, n)
+        v.addLayout(grid)
+        v.addWidget(label("ON A FULL CHARGE", "section"))
+        self.games_card = card_frame()
+        self.games_box = QVBoxLayout(self.games_card)
+        self.games_box.setContentsMargins(20, 16, 20, 16)
+        v.addWidget(self.games_card)
+        v.addStretch()
+        self.info = label("", "footInfo", wrap=True)
+        # full width with the text aligned right: a wrapped label added with a layout alignment gets its one-line
+        # height, so a second line was cut off on the handheld (the owner's screenshot)
+        self.info.setAlignment(Qt.AlignRight | Qt.AlignTop)
+        v.addWidget(self.info)
+
+        # ---- the history block (shown under Home → Battery & sleep) ----
+        self.history_block = QWidget()
+        hv = QVBoxLayout(self.history_block)
+        hv.setContentsMargins(0, 0, 0, 0)
+        hv.setSpacing(12)
+        hv.addWidget(label("HISTORY", "section"))
         self.banner = QFrame()
         self.banner.setObjectName("banner")
         bl = QHBoxLayout(self.banner)
         bl.setContentsMargins(20, 12, 20, 12)
         bl.addWidget(label("History needs the background helper with Battery history on.", "bannerText", wrap=True), 1)
         bl.addWidget(button("Set up", lambda: hub.go("General"), "primary"))
-        self.slot = v.count()          # "Good to go?" goes here, first (Hub puts it in), above the banner too
-        v.addWidget(self.banner)
-        grid = QGridLayout()
-        grid.setSpacing(16)
-        self.live = {k: StatTile(k, big=True) for k in
-                     ("Battery", "Time left", "Power draw", "CPU", "GPU", "Fan")}
-        for n, t in enumerate(self.live.values()):
-            grid.addWidget(t, n // 3, n % 3)
-        v.addLayout(grid)
-        v.addWidget(label("HISTORY", "section"))
+        hv.addWidget(self.banner)
+        self.now_line = label("", "cardMeta")
+        hv.addWidget(self.now_line)
         chips = QHBoxLayout()
         self.series_chips, self.range_chips = {}, {}
         for key, name, _u in self.SERIES:
@@ -4093,24 +4217,13 @@ class HealthPage(QWidget):
             self.range_chips[span] = c
             chips.addWidget(c)
         chips.addStretch()
-        v.addLayout(chips)
+        hv.addLayout(chips)
         chart_card = card_frame()
         cl = QVBoxLayout(chart_card)
         cl.setContentsMargins(12, 12, 12, 12)
         self.chart = LineChart()
         cl.addWidget(self.chart)
-        v.addWidget(chart_card)
-        v.addWidget(label("BATTERY DRAIN BY GAME", "section"))
-        self.games_card = card_frame()
-        self.games_box = QVBoxLayout(self.games_card)
-        self.games_box.setContentsMargins(20, 16, 20, 16)
-        v.addWidget(self.games_card)
-        v.addStretch()
-        self.info = label("", "footInfo", wrap=True)
-        # full width with the text aligned right: a wrapped label added with a layout alignment gets its one-line
-        # height, so a second line was cut off on the handheld (the owner's screenshot)
-        self.info.setAlignment(Qt.AlignRight | Qt.AlignTop)
-        v.addWidget(self.info)
+        hv.addWidget(chart_card)
         self.series, self.span = "pct", 3600
         self.recent = collections.deque(maxlen=150)    # about 5 minutes of 2-second readings
         self.sampler = QTimer(self)                    # runs while the app is open, even off this page
@@ -4129,11 +4242,14 @@ class HealthPage(QWidget):
             self.recent.append(core.health_now())
         except Exception:
             pass
+        try:
+            if self.history_block.isVisible() and self.span <= 120:
+                self.refresh_chart()    # the 1-minute chart moves live (it sits under Battery & sleep now)
+        except RuntimeError:
+            pass
 
     def tick(self):
         self.refresh_live()
-        if self.span <= 120:
-            self.refresh_chart()        # the 1-minute chart moves live
 
     def showEvent(self, ev):
         super().showEvent(ev)
@@ -4153,21 +4269,50 @@ class HealthPage(QWidget):
         self.refresh_chart()
 
     def refresh(self):
+        self.refresh_live()
+        self.refresh_games()
+
+    def refresh_history(self):
+        """The block under Battery & sleep."""
         a = load_config()["agent"]
         self.banner.setVisible(not (core.agent_running() and a.get("health_log")))
         self.refresh_live()
         self.refresh_chart()
-        self.refresh_games()
 
     def refresh_live(self):
         s = core.sensors()
         w = core.battery_power_w()
-        self.live["Battery"].value.setText(core.battery_percent())
-        self.live["Time left"].value.setText(core.time_left_text())
-        self.live["Power draw"].value.setText(f"{w:.1f} W" if w else "n/a")
-        self.live["CPU"].value.setText(f"{s['cpu_temp']:.0f}°C" if s["cpu_temp"] else "n/a")
-        self.live["GPU"].value.setText(f"{s['gpu_temp']:.0f}°C" if s["gpu_temp"] else "n/a")
-        self.live["Fan"].value.setText(f"{s['fan_rpm']} rpm" if s["fan_rpm"] is not None else "n/a")
+        b = core.battery_info()
+        try:
+            cap = int(b.get("capacity") or 0)
+        except (TypeError, ValueError):
+            cap = 0
+        status = (b.get("status") or "").lower()
+        left = core.time_left_text()
+        self.gauges["Battery"].show_value(
+            f"{cap}%" if b.get("capacity") else "n/a",
+            "charging" if status == "charging" else "plugged in" if status in ("full", "not charging")
+            else f"about {left} left" if left not in ("", "n/a") else "", cap if b.get("capacity") else None,
+            "fail" if cap <= 10 and status == "discharging" else "warn" if cap <= 20 and status == "discharging" else "ok")
+        temps = [t for t in (s.get("cpu_temp"), s.get("gpu_temp")) if t]
+        top = max(temps) if temps else 0
+        self.gauges["Temperature"].show_value(
+            f"{top:.0f}°C" if temps else "n/a",
+            " · ".join(f"{n} {t:.0f}°" for n, t in (("CPU", s.get("cpu_temp")), ("GPU", s.get("gpu_temp"))) if t),
+            min(100, int(top)) if temps else None, "fail" if top >= 95 else "warn" if top >= 90 else "ok")
+        try:
+            du = shutil.disk_usage(str(HOME))
+            free_pct = du.free / du.total if du.total else 0
+            self.gauges["Storage"].show_value(f"{core.human_size(du.free)} free", f"of {core.human_size(du.total)}",
+                                              int(100 - free_pct * 100),
+                                              "fail" if free_pct <= 0.1 else "warn" if free_pct <= 0.2 else "ok")
+        except OSError:
+            self.gauges["Storage"].show_value("n/a", "", None, "ok")
+        hl = b.get("health")
+        self.gauges["Battery health"].show_value(f"{hl}%" if hl else "n/a", "of its original capacity" if hl else "",
+                                                 hl if hl else None, "ok" if not hl or hl >= 80 else "warn")
+        self.now_line.setText("Now: " + " · ".join(x for x in (
+            f"{w:.1f} W" if w else "", f"fan {s['fan_rpm']} rpm" if s.get("fan_rpm") is not None else "") if x))
 
     def refresh_chart(self):
         for k, c in self.series_chips.items():
@@ -4192,15 +4337,13 @@ class HealthPage(QWidget):
             self.games_box.addWidget(label("Play a few games on battery with the background helper on and "
                                            "they'll show up here.", "cardDesc", wrap=True))
             return
-        for appid, watts, samples in drain[:12]:
+        for appid, watts, samples in drain[:8]:
             r = QHBoxLayout()
             r.addWidget(label(seen.get(appid, appid), "cardTitle"), 1)
-            r.addWidget(label(f"{watts:.1f} W avg", "cardDesc"))
-            if full:
-                r.addSpacing(16)
-                r.addWidget(label(f"≈ {full / watts:.1f} h on a full charge", "statValue"))
+            r.addWidget(label(f"{watts:.1f} W", "cardMeta"))
             r.addSpacing(16)
-            r.addWidget(label(f"{samples} min logged", "cardMeta"))
+            # hours on a full charge is the number a gamer wants (1.5.1.5): big, on the right
+            r.addWidget(label(f"{full / watts:.1f} h" if full and watts else "n/a", "statValue"))
             self.games_box.addLayout(r)
 
 
@@ -4729,11 +4872,29 @@ class GamesPage(QWidget):
             self.env_checks[key] = cb
         self.env_status = label("", "cardMeta", wrap=True)
         gv.addWidget(self.env_status)
-        self.v.addWidget(self.all_card)
+        # 1.5.1.5 redesign: the game you're playing first, then your games, and "every game" as one small row under
+        # them (Show opens the card above's switches)
         self.body = QVBoxLayout()
         self.body.setSpacing(12)
         self.v.addLayout(self.body)
+        self.all_row = QWidget()
+        ar = QHBoxLayout(self.all_row)
+        ar.setContentsMargins(0, 0, 0, 0)
+        self.all_summary = label("", "cardDesc", wrap=True)
+        ar.addWidget(self.all_summary, 1)
+        self.btn_all_more = button("Every game settings", self.toggle_all_card)
+        ar.addWidget(self.btn_all_more)
+        self.v.addWidget(self.all_row)
+        self.v.addWidget(self.all_card)
+        self.all_card.hide()
         self.v.addStretch()
+
+    def toggle_all_card(self, *_args):
+        show = not self.all_card.isVisible()
+        self.all_card.setVisible(show)
+        self.btn_all_more.setText("Hide" if show else "Every game settings")
+        if show:
+            QTimer.singleShot(0, lambda: _focus_first(self.all_card))
 
     def set_game_env(self, key: str, on: bool):
         if self._loading:
@@ -4762,10 +4923,16 @@ class GamesPage(QWidget):
         elif core.custom_protons():
             lines.append("Proton builds that support this: " + ", ".join(core.custom_protons()[-3:]) + ".")
         self.env_status.setText("\n".join(lines))
+        names = [core.GAME_ENV_OPTIONS[k][1] for k in on]
+        self.all_summary.setText("Every game: " + (", ".join(names) + " on" + (
+            " · active" if env is not None and all(core.game_env_live(k, env) for k in on) else " · after a restart")
+            if names else "nothing extra on"))
 
     # ---- list view ----
     def refresh(self):
-        self.all_card.setVisible(self.game is None)
+        self.all_row.setVisible(self.game is None)
+        if self.game is not None:
+            self.all_card.hide()
         if self.game is None:
             self.refresh_game_env()
             self.body_message("Reading your library…")
@@ -4787,29 +4954,48 @@ class GamesPage(QWidget):
 
     def show_list(self):
         self.game = None
-        self.all_card.show()
+        self.all_row.show()
         clear_layout(self.body)
-        self.body.addWidget(label("YOUR GAMES", "section"))
         if not self.live:
             self.body.addWidget(label("⚠ Steam's connection for plugins is off, so settings can be viewed but not "
-                                      "saved. It comes with Decky Loader (Store → Mods).", "cardWarn", wrap=True))
+                                      "saved. It comes with Decky Loader (Store → Essentials).", "cardWarn", wrap=True))
         if not self.games:
             self.body.addWidget(label("No games found yet.", "cardDesc"))
             return
         playing = str(core.steam_appid_of(core.agent_state().get("game")) or "")
-        games = sorted(self.games, key=lambda g: str(g["appid"]) != playing)
+        now = next((g for g in self.games if str(g["appid"]) == playing), None)
+        first = None
+        if now is not None:
+            # the game you're playing, first, with its switches one press away
+            pc, pv = titled_card("gamepad-2", "#22c55e", "Playing now")
+            pr = QHBoxLayout()
+            pr.addWidget(label(now["name"], "statValue"), 1)
+            tags = core.game_tags(now.get("options", ""))
+            if tags:
+                pr.addWidget(label(" · ".join(tags), "cardMeta"))
+            first = button("Its settings", lambda _=False, g=now: self.open_game(g), "primary")
+            pr.addWidget(first)
+            pv.addLayout(pr)
+            self.body.addWidget(pc)
+        self.body.addWidget(label("YOUR GAMES", "section"))
+        games = [g for g in self.games if g is not now]
         shown = games if self.show_all else games[:self.LIST_SIZE]
-        card = card_frame()
-        cv = QVBoxLayout(card)
-        cv.setContentsMargins(20, 16, 20, 16)
-        cv.setSpacing(6)
-        for g in shown:
-            text = g["name"] + ("   ▶ playing now" if str(g["appid"]) == playing else "")
-            cv.addWidget(button(text, lambda _=False, g=g: self.open_game(g)))
-        self.body.addWidget(card)
+        # a 3-column grid; each tile says which switches are on, so a game's settings show without opening it
+        grid = QGridLayout()
+        grid.setSpacing(10)
+        for c in range(3):
+            grid.setColumnStretch(c, 1)
+        for n, g in enumerate(shown):
+            tags = core.game_tags(g.get("options", ""))
+            b = button(g["name"] + ("\n" + " · ".join(tags) if tags else ""), lambda _=False, g=g: self.open_game(g))
+            b.setToolTip(g["name"])
+            grid.addWidget(b, n // 3, n % 3)
+            first = first or b
+        self.body.addLayout(grid)
         if not self.show_all and len(games) > self.LIST_SIZE:
-            self.body.addWidget(button(f"Show all {len(games)} games", self.expand))
-        QTimer.singleShot(0, lambda: _focus_first(card))
+            self.body.addWidget(button(f"Show all {len(games) + (1 if now else 0)} games", self.expand))
+        if first is not None:
+            QTimer.singleShot(0, lambda w=first: w.setFocus(Qt.TabFocusReason))
 
     def expand(self, *_args):
         self.show_all = True
@@ -4849,6 +5035,8 @@ class GamesPage(QWidget):
     def open_game(self, g: dict):
         self.game = g
         self.all_card.hide()
+        self.all_row.hide()
+        self.btn_all_more.setText("Every game settings")
         self.body_message(f"Loading {g['name']}…")
         BackgroundTask(self, lambda: core.game_settings(g["appid"], g["kind"]), lambda s: self._loaded(g, s))
 
@@ -4897,7 +5085,7 @@ class GamesPage(QWidget):
                     note += (" One more step: open Quick Access (the ••• button) → the plug icon → Lossless "
                              "Scaling, and tap Install lsfg-vk. Then come back here.")
                 else:
-                    note += " Install Lossless Scaling Frame Gen under Store → Mods first."
+                    note += " Install Lossless Scaling Frame Gen under Store → Plugins first."
             cv.addWidget(cb)
             cv.addWidget(label(note, "cardDesc", wrap=True))
             self.checks[key] = cb
@@ -5044,6 +5232,7 @@ class GamesPage(QWidget):
             if self.game is g:
                 QTimer.singleShot(0, self.save)
         if isinstance(done, list) and "options" in done:
+            g["options"] = opts                     # the grid's tags follow without re-reading Steam's files
             if self.game is g:
                 self.settings = dict(self.settings or {}, options=opts, tool=tool if "tool" in done else
                                      (self.settings or {}).get("tool", ""))
@@ -6033,8 +6222,18 @@ class DoctorPage(QWidget):
         super().__init__()
         self.hub = hub
         self.area = area
-        card, cv = titled_card("stethoscope" if area == "device" else "wrench", "#22c55e",
-                               "Good to go?" if area == "device" else "Ally Hub setup")
+        if area == "device":
+            # the verdict hero (1.5.1.5 redesign): READY TO PLAY / CHECK THESE FIRST / NOT READY, big, one line under
+            card = card_frame()
+            card.setObjectName("verdictCard")
+            cv = QVBoxLayout(card)
+            cv.setContentsMargins(24, 20, 24, 18)
+            cv.setSpacing(8)
+            self.verdict = label("CHECKING…", "verdict")
+            cv.addWidget(self.verdict)
+        else:
+            card, cv = titled_card("wrench", "#22c55e", "Ally Hub setup")
+            self.verdict = None
         self.summary = label("Checking…", "cardDesc", wrap=True)
         cv.addWidget(self.summary)
         self.box = QVBoxLayout()
@@ -6250,6 +6449,7 @@ class DoctorPage(QWidget):
                 checks.append(dict(status="warn", title="Ally Hub setup",
                                    detail=f"{more} more thing{'s' if more != 1 else ''} in Settings → General.",
                                    fix_label="Open", fix=lambda: self.hub.go("General"), auto=False))
+        checks.sort(key=lambda c: {"fail": 0, "warn": 1}.get(c["status"], 2))     # the most important first
         for c in checks:
             if c["status"] != "ok":
                 problems += 1
@@ -6275,8 +6475,17 @@ class DoctorPage(QWidget):
                                    "primary" if c["status"] == "fail" else ""))
             self.box.addWidget(card)
         if self.area == "device":
-            self.summary.setText("✔ Good to go." if problems == 0 else
-                                 f"{problems} thing{'s' if problems != 1 else ''} to look at.")
+            worst = "fail" if any(c["status"] == "fail" for c in checks) else "warn" if problems else "ok"
+            self.verdict_state = worst
+            self.verdict.setText({"ok": "READY TO PLAY", "warn": "CHECK THESE FIRST", "fail": "NOT READY"}[worst])
+            self.verdict.setProperty("state", worst)
+            repolish(self.verdict)
+            first = next((c for c in checks if c["status"] == worst), None) if worst != "ok" else None
+            self.summary.setText("Battery, temperatures and storage all look fine." if worst == "ok" else
+                                 (f"{first['title']}: {first['detail']}" if problems == 1 and first else
+                                  f"{problems} things to look at, the most important first."))
+            if hasattr(self.hub, "update_top_status"):
+                self.hub.update_top_status()
         else:
             self.summary.setText(f"✔ Everything looks good ({len(checks)} checks)." if problems == 0 else
                                  f"{problems} thing{'s' if problems != 1 else ''} to look at.")
@@ -6288,6 +6497,8 @@ class DoctorPage(QWidget):
             (first or self.btn_all).setFocus()
         if self.area == "app":
             self.problem_checks = [c for c in checks if c["status"] != "ok"]
+            if "updates" in (self.probe or {}):        # Store → Installed shows how many updates wait (1.5.1.5)
+                self.hub.set_section_badge("Installed", len(self.probe.get("updates") or []))
         changed, self.problems = self.problems != own, own
         if self.area == "app" and changed:
             dev = getattr(self.hub, "doctor", None)
@@ -6833,12 +7044,18 @@ class UpdatesPage(QWidget):
         rbl.addWidget(button("OK", self.ack_rollback))
         v.addWidget(self.rollback_banner)
 
-        grid = two_col_grid()
-        ucard, uv = titled_card("refresh-cw", "#22c55e", "Auto-update")
+        # header (1.5.1.5 redesign): which version, which channel and whether it's current, at the very top of
+        # General (Hub.compose_sections puts it there), with the update actions beside it
+        self.header = card_frame()
+        hv_ = QVBoxLayout(self.header)
+        hv_.setContentsMargins(20, 16, 20, 16)
+        hv_.setSpacing(6)
         self.ver_label = label("", "bigValue")
-        uv.addWidget(self.ver_label)
+        hv_.addWidget(self.ver_label)
         self.update_info = label("", "cardDesc", wrap=True)
-        uv.addWidget(self.update_info)
+        hv_.addWidget(self.update_info)
+        grid = two_col_grid()
+        ucard, uv = titled_card("refresh-cw", "#22c55e", "Updates")
         self.auto_cb = QCheckBox("Install updates automatically (checks every 6 hours)")
         self.auto_cb.toggled.connect(lambda on: update_config(
             lambda c: c["updates"].__setitem__("auto_update", on)))
@@ -6866,7 +7083,7 @@ class UpdatesPage(QWidget):
         ur.addWidget(self.btn_restart)
         ur.addWidget(self.btn_rollback)
         ur.addStretch()
-        uv.addLayout(ur)
+        hv_.addLayout(ur)
         uv.addWidget(label("If a new version fails to start, Ally Hub automatically goes back to the "
                            "previous one and reports the problem.", "cardMeta", wrap=True))
         uv.addStretch()
@@ -6921,18 +7138,19 @@ class UpdatesPage(QWidget):
         self.key_guide.setVisible(not core.github_token())
         self.testing_banner.setVisible(core.update_channel(cfg) == "testing")
         disk_ver = core.read_text(core.APP_DIR / "VERSION") or VERSION
-        self.ver_label.setText(f"Version {core.version_label()}")
+        self.ver_label.setText(f"Ally Hub {core.version_label()}")
         self.channel.blockSignals(True)
         self.channel.setCurrentIndex(1 if core.update_channel(cfg) == "testing" else 0)
         self.channel.blockSignals(False)
         parts = [f"Updates from github.com/{core.repo_name()}"]
         if st.get("last_check"):
-            parts.append("last checked " + time.strftime("%b %d %H:%M", time.localtime(st["last_check"])))
-        if st.get("last_remote") and core.parse_version(st["last_remote"]) > core.parse_version(VERSION):
-            parts.append(f"latest is {core.display_version(st['last_remote'])}")
+            parts.append("last checked " + time.strftime("%b %-d, %-I:%M %p", time.localtime(st["last_check"])))
         if core.on_probation():
             parts.append("this version is new and being checked")
-        self.update_info.setText(" · ".join(parts))
+        newer = st.get("last_remote") and core.parse_version(st["last_remote"]) > core.parse_version(VERSION)
+        lead = (f"Update {core.display_version(st['last_remote'])} is ready." if newer
+                else "Up to date ✔" if st.get("last_check") else "")
+        self.update_info.setText(" · ".join(([lead] if lead else []) + parts))
         self.btn_restart.setVisible(disk_ver != VERSION)
         if disk_ver != VERSION:
             self.btn_restart.setText(f"Restart to finish updating to {core.display_version(disk_ver)}")
@@ -7121,16 +7339,18 @@ class Hub(QMainWindow):
         ("Home", [("Overview", "health"), ("Battery & sleep", "sleep"), ("Storage", "storage"), ("Setup", "setup")]),
         # "page/view": one page shown with a view (1.3.7.10, the owner: the filter row under the sections couldn't be
         # reached with the controller, so the filters became the sections)
-        ("Store", [("Essentials", "browse/essentials"), ("Mods", "browse/mods"), ("Apps", "browse/apps"),
-                   ("Decky plugins", "browse/plugins"), ("Installed", "browse/installed"),
-                   ("Launchers", "launchers")]),
+        # 1.5.1.5 redesign (the owner): gamer names, no guessing whether a plugin is a "Mod" or a "Decky plugin";
+        # Installed shows in Simple too, with the number of updates waiting
+        ("Store", [("Essentials", "browse/essentials"), ("Plugins", "browse/plugins"), ("Apps", "browse/apps"),
+                   ("Emulation", "browse/emulation"), ("Launchers", "launchers"), ("Installed", "browse/installed")]),
         ("Games", [("Game settings", "games"), ("Performance", "performance"), ("Saves", "saves")]),
         ("Customize", [("Lighting", "lighting_section"), ("Theme", "appearance")]),
         ("Settings", [("General", "updates"), ("Connections", "connect_page"), ("Activity log", "activity")]),
     ]
     # old section names (code paths, earlier docs) still land in the right place
     # old section names that saved links or older code may still use (only a few are left; 1.5.1.5)
-    ALIASES = {"Home": "Overview", "Activity": "Activity log", "Plugin store": "Decky plugins", "Updates": "General"}
+    ALIASES = {"Home": "Overview", "Activity": "Activity log", "Plugin store": "Plugins", "Decky plugins": "Plugins",
+               "Mods": "Plugins", "Updates": "General"}
 
     def section_page(self, attr: str):
         return getattr(self, attr.partition("/")[0])
@@ -7183,7 +7403,10 @@ class Hub(QMainWindow):
             b.setCheckable(True)
             self.tab_buttons.append(b)
         self.hint_rb = label("RB", "key")
-        self.top_status = label("", "topStatus")
+        # the status strip (1.5.1.5 redesign): good to go, battery, hottest temperature and the clock from any tab;
+        # A on it opens Home
+        self.top_status = button("", lambda *_: self.go("Overview"), "topStatus")
+        self.top_status.setToolTip("Open Home")
 
         # ---- pages ----
         self.store_page = StorePage(self)
@@ -7235,6 +7458,21 @@ class Hub(QMainWindow):
         self.btn_log = button("Activity log", lambda: self.go("Activity log"))
         self.btn_report = button("Report a problem", self.report_problem)
         self.btn_report.setToolTip("Report a problem")
+        # the button-hint strip (1.5.1.5 redesign): what A, B, X, Y and Menu do right here, so nothing has to be
+        # remembered. Not the old bottom bar: no buttons, and View shows or hides it.
+        self.legend_frame = QFrame()
+        self.legend_frame.setObjectName("legendBar")
+        lgl = QHBoxLayout(self.legend_frame)
+        lgl.setContentsMargins(20, 6, 20, 6)
+        lgl.setSpacing(6)
+        self._legend = {}
+        for key in ("A", "B", "X", "Y", "Menu", "View"):
+            k, t = label(key, "key"), label("", "keyText")
+            lgl.addWidget(k)
+            lgl.addWidget(t)
+            lgl.addSpacing(12)
+            self._legend[key] = (k, t)
+        lgl.addStretch()
         try:
             self.arrange_bars(load_config()["theme"].get("bars", "top"))
         except Exception:                                   # a bad layout setting must not stop the app
@@ -7255,6 +7493,7 @@ class Hub(QMainWindow):
 
         self.gamepad = GamepadNav(self)
         self.touch_scroller = TouchScroller(QApplication.instance())
+        QApplication.instance().focusChanged.connect(self.update_legend)     # A's word follows the focus
         self.askpass = AskpassServer(self)
         self.apply_theme()
         self.apply_mode()
@@ -7280,11 +7519,12 @@ class Hub(QMainWindow):
         self.health._shell.insertWidget(self.health.slot, self.doctor.block)
         retitle(self.sleep, "Battery & sleep", "Battery care, and what every sleep cost and what woke the handheld.")
         add_block(self.sleep, self.system.card_battery, 0)
+        add_block(self.sleep, self.health.history_block)        # moved from Overview (1.5.1.5)
         self.system.clean_row.insertWidget(2, self.launchers.btn_clean)
         add_block(self.storage, self.system.card_storage)
         self.saves.tm_layout.addWidget(self.automation.block_saves)
         add_block(self.lighting, self.automation.block_lighting)
-        retitle(self.store_page, "Decky plugins", "The official Decky plugin store, and every plugin you have.")
+        retitle(self.store_page, "Plugins", "Hand-picked plugins, then the whole Decky plugin store.")
         retitle(self.appearance, "Theme", "Colors, sizes, where the bars sit, and Steam's boot video.")
         add_block(self.appearance, self.system.card_boot, heading="Boot video")
         add_block(self.appearance, self.build_glyphs_card(), heading="Controller icons")
@@ -7292,12 +7532,15 @@ class Hub(QMainWindow):
         mcard, mv = titled_card("layout-grid", "#0ea5e9", "How much to show",
                                 'Simple keeps things calm. Advanced adds tune-up, Proton per game, wake blockers, SSH and the log.')
         mr = QHBoxLayout()
-        self.mode_box = QComboBox()
-        self.mode_box.addItems(["Simple", "Advanced"])
-        self.mode_box.setCurrentIndex(1 if advanced_mode() else 0)
-        self.mode_box.activated.connect(self.set_mode)
-        self.mode_box.setProperty("padCycle", False)      # A opens it; Left/Right just move on
-        mr.addWidget(self.mode_box)
+        # two buttons instead of a drop-down (1.5.1.5): one press, and you can see which one is on
+        self.mode_btns = []
+        for i, text in enumerate(("Simple", "Advanced")):
+            b = button(text, lambda _=False, i=i: self.set_mode(i), "chip")
+            b.setCheckable(True)
+            b.setChecked((i == 1) == advanced_mode())
+            self.mode_btns.append(b)
+            mr.addWidget(b)
+        mr.addSpacing(12)
         mr.addWidget(button("Run setup again", self.rerun_setup))
         self.btn_log_simple = button("Activity log", lambda: self.go("Activity log"))   # Simple only (Advanced: its section)
         mr.addWidget(self.btn_log_simple)
@@ -7305,6 +7548,7 @@ class Hub(QMainWindow):
         mv.addLayout(mr)
         add_block(self.updates, block(mcard, self.automation.block_general), 0)
         add_block(self.updates, self.doctor_app.block, 0)    # the app checkup sits at the top of General
+        add_block(self.updates, self.updates.header, 0)      # …under the version header (1.5.1.5)
         retitle(self.connect_page, "Connections", "Wake your PC and play from anywhere.")
         add_block(self.connect_page, adv(self.system.card_ssh))
         # 1.3.7.10: backups live with the other app settings, not in a section of their own
@@ -7368,6 +7612,8 @@ class Hub(QMainWindow):
 
     def set_mode(self, i: int):
         update_config(lambda c: c["theme"].__setitem__("advanced", i == 1))
+        for j, b in enumerate(getattr(self, "mode_btns", [])):
+            b.setChecked(j == i)
         self.apply_mode()
         self.toast("Advanced: everything shows" if i == 1 else "Simple: the expert controls are tucked away")
 
@@ -7381,11 +7627,17 @@ class Hub(QMainWindow):
             except RuntimeError:            # its page section was rebuilt
                 _ADVANCED.remove(box)
         self.set_section_hidden("Activity log", not on)
-        self.set_section_hidden("Installed", not on)     # managing installs is for Advanced (the owner, 1.5.0.9)
         if getattr(self, "btn_log_simple", None) is not None:
             self.btn_log_simple.setVisible(not on)       # Simple's only way to the log; Advanced has its section
         if getattr(self, "games", None) is not None and self.current_page() is self.games:
             self.games.refresh()            # the game view is built per game, so it's redrawn
+
+    def set_section_badge(self, name: str, n: int):
+        """A count on a section's chip ("Installed · 2"), nothing when it's 0."""
+        for ti, (_tab, secs) in enumerate(self.TABS):
+            for si, (sec, _a) in enumerate(secs):
+                if sec == name and ti < len(getattr(self, "groups", [])):
+                    self.groups[ti].chips[si].setText(f"{sec} · {n}" if n else sec)
 
     def set_section_hidden(self, name: str, hidden: bool):
         for ti, (_tab, secs) in enumerate(self.TABS):
@@ -7486,6 +7738,7 @@ class Hub(QMainWindow):
         box.setSpacing(0)
         box.addWidget(self.top_frame)
         box.addWidget(self.stack, 1)
+        box.addWidget(self.legend_frame)
         box.addWidget(self.footer_frame)
         root.layout().addWidget(self._body)
         if old_body is not None:
@@ -7508,6 +7761,86 @@ class Hub(QMainWindow):
         if hasattr(self, "gamepad"):
             for w in (self.pad_hint, self.hint_lb, self.hint_rb):
                 w.setVisible(self.gamepad.enabled)
+        self.update_legend()
+
+    def legend_wanted(self) -> bool:
+        return (getattr(self, "bars", "top") != "sides" and not getattr(self, "footer_on", False)
+                and bool(load_config()["theme"].get("legend", True))
+                and (not hasattr(self, "gamepad") or self.gamepad.enabled))
+
+    def toggle_legend(self):
+        on = not bool(load_config()["theme"].get("legend", True))
+        update_config(lambda c: c["theme"].__setitem__("legend", on))
+        self.update_legend()
+        self.toast("Button hints on ✔" if on else "Button hints hidden. View brings them back ✔")
+
+    @staticmethod
+    def a_word(w) -> str:
+        """What A does on this control, in a word or two."""
+        if isinstance(w, QCheckBox):
+            return "Turn off" if w.isChecked() else "Turn on"
+        if isinstance(w, QComboBox):
+            return "Choose"
+        if isinstance(w, QSlider):
+            return "Select"
+        if isinstance(w, QLineEdit):
+            return "Type"
+        if isinstance(w, QAbstractButton):
+            t = re.sub(r"[‹›✔…]", "", w.text() or "").strip()
+            if not t or "\n" in t:
+                t = w.toolTip() or "Select"
+            return t if len(t) <= 22 else t[:21].rstrip() + "…"
+        return "Select"
+
+    def update_legend(self, *_args):
+        lf = getattr(self, "legend_frame", None)
+        if lf is None or not hasattr(self, "_legend"):
+            return
+        want = self.legend_wanted()
+        lf.setVisible(want)
+        if not want:
+            return
+        w = QApplication.focusWidget()
+        sheet = getattr(self, "_sheet", None) is not None
+        x = None if sheet else self.page_x()
+        words = {"A": self.a_word(w) if w is not None else "Select",
+                 "B": "Close" if sheet else "Back", "X": x[0] if x else "", "Y": "Keyboard",
+                 "Menu": "" if sheet else "Refresh", "View": "Hide hints"}
+        if isinstance(w, (QComboBox, QSlider)):
+            words["A"] += "   ◀ ▶ change"
+        for key, (k, t) in self._legend.items():
+            t.setText(words[key])
+            k.setVisible(bool(words[key]))
+            t.setVisible(bool(words[key]))
+
+    def page_x(self):
+        """X = the one secondary action of the page (1.5.1.5), named in the legend. None when there isn't one."""
+        try:
+            page = self.current_page()
+        except Exception:
+            return None
+        if page is self.browse:
+            f = self.browse.filter
+            if f == "plugins":
+                return ("Search plugins", self._search_plugins)
+            if f == "essentials" and any(i.recommended and not i.check(self.state) for i in CATALOG):
+                return ("Install the missing", self.install_essentials)
+            if f == "installed":
+                return ("Update all", self.update_all)
+            return None
+        if page is self.health:
+            return ("Check again", self.doctor.run_checks)
+        if page is self.games:
+            return ("Game won't start?", self.games.rescue) if self.games.game is not None else None
+        if page is self.updates:
+            return ("Check for updates", self.updates.check_now)
+        if page is self.saves:
+            return ("Refresh", self.saves.load)
+        return None
+
+    def _search_plugins(self):
+        self.store_page.search.setFocus()
+        QDesktopServices.openUrl(QUrl("steam://open/keyboard"))
 
     FOOT_BUTTONS = (("btn_refresh", "refresh-cw", "Refresh", "Refresh"),
                     ("btn_log", "terminal", "Activity log", "Activity log"),
@@ -7673,8 +8006,26 @@ class Hub(QMainWindow):
         self.activate_extra_theme()
 
     def update_top_status(self):
-        sep = "\n" if getattr(self, "bars", "top") == "sides" else "   "
-        self.top_status.setText(f"{core.battery_percent().split(' ')[0]}{sep}{time.strftime('%-I:%M %p')}")
+        side = getattr(self, "bars", "top") == "sides"
+        doc = getattr(self, "doctor", None)
+        state = getattr(doc, "verdict_state", None) if doc is not None else None
+        word = {"ok": "● Ready", "warn": "● Check", "fail": "● Not ready"}.get(state, "")
+        pct = core.battery_percent().split(" ")[0]
+        left = core.time_left_text()
+        try:
+            sens = core.sensors()
+            temps = [t for t in (sens.get("cpu_temp"), sens.get("gpu_temp")) if t]
+        except Exception:
+            temps = []
+        temp = f"{max(temps):.0f}°C" if temps else ""
+        clock = time.strftime("%-I:%M %p")
+        if side:                                   # narrow column: battery and clock only
+            self.top_status.setText(f"{pct}\n{clock}")
+        else:
+            bat = pct + (f" · {left}" if left and left not in ("n/a",) and "charg" not in left.lower() else "")
+            self.top_status.setText("   ".join(x for x in (word, bat, temp, clock) if x))
+        self.top_status.setProperty("state", state or "")
+        repolish(self.top_status)
 
     # ---- navigation ----
     def tab_index(self) -> int:
@@ -7757,11 +8108,10 @@ class Hub(QMainWindow):
             p.ensureWidgetVisible(w)
 
     def gamepad_x(self):
-        if self.current_page() is self.browse and self.browse.filter == "plugins":
-            self.store_page.search.setFocus()
-            QDesktopServices.openUrl(QUrl("steam://open/keyboard"))
-        else:
-            self.go("Decky plugins")
+        """X runs the page's secondary action, the one the hint strip names (1.5.1.5)."""
+        x = self.page_x()
+        if x:
+            x[1]()
 
     def on_page_shown(self, page, breadcrumb: bool = True):
         """Every section is fresh when it opens (1.4.0: Games, Saves, Sleep, Storage and Setup used to open
@@ -7777,7 +8127,7 @@ class Hub(QMainWindow):
             pass
         if page is not self.setup:
             self.update_setup_chip()
-        owners = {self.health: [], self.sleep: [self.system.refresh],
+        owners = {self.health: [], self.sleep: [self.system.refresh, self.health.refresh_history],
                   self.storage: [self.system.refresh], self.saves: [self.automation.refresh],
                   self.lighting_section: [self.automation.refresh], self.appearance: [self.system.refresh],
                   self.updates: [self.automation.refresh, self.doctor_app.run_checks],
@@ -7794,6 +8144,7 @@ class Hub(QMainWindow):
                 f()
         except Exception:
             core.report_exception("gui-page")
+        self.update_legend()                    # X names this page's action
 
     # ---- state ----
     def refresh(self):
@@ -8621,7 +8972,7 @@ def main():
             fix()
         except Exception:
             pass
-    for fix in (core.migrate_brand_theme, core.secure_data_dir):
+    for fix in (core.migrate_brand_theme, core.migrate_huginn_default, core.secure_data_dir):
         try:
             fix()
         except Exception:

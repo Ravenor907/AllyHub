@@ -82,7 +82,7 @@ REFUSAL_PATTERNS = re.compile(
 # ==========================================================================
 
 DEFAULT_CONFIG = {
-    "theme": {"preset": "ROG Crimson", "brand_theme": False, "extra_themes": False, "brand_reverted": False,
+    "theme": {"preset": "Huginn", "brand_theme": False, "extra_themes": False, "brand_reverted": False,
               "keys_tidied": False, "accent": None, "accent2": None,
               "scale": 100, "controller_nav": "auto", "ui_scale": "auto",
               # Game Mode and Desktop Mode show the same size differently, so each remembers its own
@@ -90,7 +90,9 @@ DEFAULT_CONFIG = {
               "scale_gamemode": None, "scale_desktop": None, "ui_scale_gamemode": None, "ui_scale_desktop": None,
               "bars": "top",            # "sides": header/footer as icon columns
               "footer": False,          # bottom bar off by default (the owner's call)
-              "advanced": False},       # Simple by default; Advanced shows the expert controls (1.4.0)
+              "advanced": False,        # Simple by default; Advanced shows the expert controls (1.4.0)
+              "huginn_default": False,   # True once the old default look (ROG Crimson) moved to Huginn (1.5.1.5)
+              "legend": True},          # the button-hint strip at the bottom (View shows or hides it, 1.5.1.5)
     "rgb": None,
     "agent": {
         "enabled": False, "battery_rings": False, "low_battery_flash": True,
@@ -1662,7 +1664,8 @@ def hid_streams(method: str = None) -> bool:
 
 
 EXTRA_THEMES = ("Ally Hub",)
-ADVANCED_THEMES = ("Huginn",)    # listed only in Advanced (or while in use)
+# themes listed only in Advanced (or while in use). Huginn was here until 1.5.1.5, when it became the default look
+ADVANCED_THEMES = ()
 # Huginn's typefaces (SIL Open Font License, texts beside them) and its raven; optional: system fonts stand in
 THEME_FILES = ("Cinzel.ttf", "Barlow-Regular.ttf", "Barlow-SemiBold.ttf", "NotoSansRunic-Regular.ttf",
                "OFL-Cinzel.txt", "OFL-Barlow.txt", "OFL-NotoSansRunic.txt", "raven-gold.png")
@@ -1763,6 +1766,17 @@ def migrate_brand_theme() -> bool:
     back = t.get("preset") in EXTRA_THEMES and not t.get("extra_themes")
     update_config(lambda c: c["theme"].update(brand_reverted=True, **({"preset": "ROG Crimson"} if back else {})))
     return back
+
+
+def migrate_huginn_default() -> bool:
+    """Once (1.5.1.5, the owner: Huginn is the default look): a handheld still on the old default, ROG Crimson with no
+    custom colors, moves to Huginn. Anyone who picked a theme or colors keeps them; switching back is one tap."""
+    t = load_config()["theme"]
+    if t.get("huginn_default"):
+        return False
+    move = t.get("preset") == "ROG Crimson" and not t.get("accent") and not t.get("accent2")
+    update_config(lambda c: c["theme"].update(huginn_default=True, **({"preset": "Huginn"} if move else {})))
+    return move
 
 
 def uses_chip_effect(effect: dict) -> bool:
@@ -3991,6 +4005,20 @@ GAME_TOGGLES = {
     "log": ("Troubleshooting log", "Proton writes a log of the next launch, which Ally Hub can attach to a "
             "report.", "env", "PROTON_LOG=1"),
 }
+GAME_TAGS = {"fsr4": "FSR 4", "lsfg": "Frame gen", "deck": "Deck mode", "wined3d": "Old-game fix", "log": "Log"}
+
+
+def game_tags(options: str) -> list:
+    """Short names of the switches that are on, for the Games grid (1.5.1.5). Steam's file can lag behind a change
+    made a moment ago; the grid updates its own copy when Ally Hub saves."""
+    try:
+        if not launch_parseable(options or ""):
+            return []
+        return [GAME_TAGS[k] for k in GAME_TOGGLES if k in launch_flags(options or "")]
+    except Exception:
+        return []
+
+
 STEAM_TOOL_NAMES = re.compile(r"^(Proton|Steam Linux Runtime|Steamworks Common|SteamVR)", re.I)
 PREFIX_BACKUP = re.compile(r"^(\d+)_allyhub_backup_(\d+)$")
 
@@ -4109,7 +4137,9 @@ def game_choices() -> list:
             last = int((local.get(a["appid"]) or {}).get("LastPlayed") or 0)
         except (ValueError, AttributeError):
             last = 0
-        out.append({"appid": int(a["appid"]), "name": a["name"], "kind": "steam", "last": last})
+        opts = (local.get(a["appid"]) or {}).get("LaunchOptions", "") if isinstance(local.get(a["appid"]), dict) else ""
+        out.append({"appid": int(a["appid"]), "name": a["name"], "kind": "steam", "last": last,
+                    "options": opts if isinstance(opts, str) else ""})
     f = shortcuts_vdf()
     try:
         tiles = _vdf_shortcuts(f.read_bytes()) if f and f.exists() else []
@@ -4117,7 +4147,8 @@ def game_choices() -> list:
         tiles = []
     for s in tiles:
         if not is_self_shortcut(s):
-            out.append({"appid": s["appid"], "name": s["name"], "kind": "shortcut", "last": s.get("last", 0)})
+            out.append({"appid": s["appid"], "name": s["name"], "kind": "shortcut", "last": s.get("last", 0),
+                        "options": s.get("options", "") if isinstance(s.get("options"), str) else ""})
     out.sort(key=lambda g: (-g["last"], g["name"].lower()))
     return out
 

@@ -28,18 +28,18 @@ and health stats. Works in Desktop Mode, and fully in Game Mode with just the co
 |   |   |
 |---|---|
 | 🎛️ **Quick Access panel** | Ally Hub in the ••• menu while you play: battery, temps, this game's switches, Game Boost, lighting and a save backup button |
-| 🎮 **Made for Game Mode** | Five console-style tabs, every button, list and dropdown works with the controller, and pop-ups open inside the app instead of new windows. Simple by default, Advanced when you want every control |
-| 🧩 **One store** | Essentials, mods, apps, launchers and the full Decky Plugin Store, each a section you reach with LT/RT: Decky Loader, Ally Center, Lossless Scaling and OptiScaler frame gen (Bazzite's builds), EmuDeck and more. Turn any plugin off without uninstalling it |
+| 🎮 **Made for Game Mode** | Five console-style tabs, a hint strip that says what each button does right here, and everything works with the controller, pop-ups and file pickers included. Simple by default, Advanced when you want every control |
+| 🧩 **One store** | Essentials, Plugins, Apps, Emulation, Launchers and Installed, each a section you reach with LT/RT: Decky Loader, Ally Center, Lossless Scaling and OptiScaler frame gen, the full Decky Plugin Store, EmuDeck and more, set up with one password. Turn any plugin off without uninstalling it |
 | 📦 **30 curated apps** | Heroic, Greenlight (Xbox Cloud), Moonlight, ProtonPlus, Discord, Spotify and more, each with install, update and remove |
 | 🕹️ **PC launchers** | Battle.net, Epic, EA, Ubisoft, GOG and 10 more added straight to your Steam library with their own cover art, plus uninstall and a leftover cleaner |
 | 🚀 **Performance** | Game Boost while you play, a one-tap system tune-up and FSR 4 for every game, ideas from CachyOS and Bazzite, all undoable. In Advanced: experimental 144 Hz that undoes itself if you don't keep it |
-| 🎚️ **Game settings** | Per-game switches instead of typing launch options (FSR 4, frame generation, Steam Deck mode and more), the right Proton per game, and help when a game won't start |
+| 🎚️ **Game settings** | The game you're playing first, then every game with the switches that are on. Per-game switches instead of typing launch options (FSR 4, frame generation, Steam Deck mode and more) that save as you flip them, the right Proton per game, and help when a game won't start |
 | 🕰️ **Save time machine** | A snapshot of each game's saves every time it starts, restorable from Game Mode, with undo |
 | 🌙 **Sleep guardian** | Battery used per sleep, what woke the handheld and failed sleeps, with a fix for USB devices that keep waking it |
 | 💽 **Storage saver** | See each game's real size and clear what Steam leaves behind: shader caches and files of removed games, unused Proton builds, old downloads |
 | 🌈 **Ring lighting** | Smooth animated effects, a customizable RGB Spiral, battery and per-game colors, or hand the rings to HueSync |
-| 🎨 **Themes** | 8 themes, custom accent colors, interface size, and tabs on the top or as icons down the sides |
-| 🩺 **Good to go?** | Home answers it first: battery, temperatures, battery health and storage, then live readings, history and drain per game |
+| 🎨 **Themes** | Huginn's look by default, 8 more themes, custom accent colors, interface size, and tabs on the top or as icons down the sides |
+| 🩺 **Ready to play?** | Home answers it first in big letters, with gauges for battery, temperature, storage and battery health, the fix for anything that needs you, and hours per game on a full charge. The header shows it from every tab |
 | 🤖 **Background helper** | Dock mode, Update Guardian, battery history and scheduled game save backups |
 | 🔁 **Keeps everything current** | Apps, Decky plugins and tools installed through Ally Hub track their newest versions; one Update all, and the helper applies the password-free ones by itself |
 | 🔄 **Self-updating** | Updates itself and rolls back on its own if a new version misbehaves |
@@ -63,7 +63,7 @@ It's finished when it says **Done!**
 
 **4. Open Ally Hub** from the desktop icon, the app launcher, or your Game Mode library (the installer adds it
 there for you). The first time, a short setup walks you through the rest: a sudo password, Decky Loader and a few
-favorites. Skip anything you like; Home keeps a reminder.
+favorites. Skip anything you like; the checkup keeps a reminder.
 
 That's it. Ally Hub keeps itself up to date from here on.
 
@@ -73,7 +73,7 @@ That's it. Ally Hub keeps itself up to date from here on.
 - **"git: command not found"**: [download the ZIP](https://github.com/Ravenor907/AllyHub/archive/refs/heads/main.zip),
   extract it into your home folder, open Konsole in that folder and run `bash scripts/install.sh`.
 - **It asks for a password**: the installer never does. Decky Loader, lighting and some tweaks need a sudo
-  password later. No password yet? The checkup on Home has a **Set password** button.
+  password later. No password yet? The checkup at the top of **Settings → General** has a **Set password** button.
 - **Nothing happens after "Done!"**: log out and back in, or run `~/.local/bin/allyhub` in Konsole to see
   the error, then open a [bug report](../../issues/new?template=bug_report.yml).
 - **Reinstall or repair**: run the same command again. Your settings are kept.
@@ -84,8 +84,8 @@ That's it. Ally Hub keeps itself up to date from here on.
 
 | Tab | Sections |
 |---|---|
-| **Home** | Overview (good to go? battery, temps, health) · Battery & sleep · Storage (all cleanup) |
-| **Store** | Essentials · Mods · Apps · Decky plugins · Installed · Launchers |
+| **Home** | Overview (ready to play? battery, temps, storage, health) · Battery & sleep (charge limit, history, sleeps) · Storage (all cleanup) |
+| **Store** | Essentials · Plugins · Apps · Emulation · Launchers · Installed |
 | **Games** | Game settings · Performance · Saves |
 | **Customize** | Lighting · Theme |
 | **Settings** | General (Ally Hub setup checkup, Simple / Advanced, background helper, updates, backups) · Connections (Wake my PC, Tailscale) · Activity log (Advanced) |
@@ -146,9 +146,10 @@ asks what color you see, and keeps the one that works on your system.
 | D-pad left / right | Change a dropdown or slider |
 | **LB / RB** | Switch tabs |
 | **LT / RT** | Switch sections inside a tab |
-| **X** | Search plugins |
+| **X** | The page's extra action, named in the hint strip (Install the missing, Search plugins, Update all, Check again) |
 | **Y** | Steam keyboard |
 | **☰ Menu** | Refresh |
+| **⧉ View** | Show or hide the button hints |
 
 Using the side layout? Right moves into the page and Left goes back to the tabs.
 
@@ -165,7 +166,7 @@ Using the side layout? Right moves into the page and Left goes back to the tabs.
 - New versions run on probation. If the app or its background helper fails to start 3 times, Ally Hub goes back
   to the previous version by itself.
 - **Error reports are off unless you turn them on.** When on, crashes and failed installs become issues here,
-  with IP and MAC addresses, usernames, PINs and keys removed first. Setup is on **Settings → General**.
+  with IP and MAC addresses, usernames, PINs and keys removed first. Set them up under **Settings → General** in Advanced.
 - **Report a problem** sends your description right away with logs, the full task output and a
   system snapshot, scrubbed the same way.
 

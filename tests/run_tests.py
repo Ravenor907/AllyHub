@@ -1328,16 +1328,22 @@ check(core.remote_version("main") == "6.5.0.4" and _calls == [True, False],
 check("HTTP 403" in core.github_problem(403) and core.github_problem(0) == "no connection", "the error says why")
 core.urllib.request.urlopen, core.github_token = _uo, _gt
 # ---- the extra Ally Hub theme ----
-check(core.DEFAULT_CONFIG["theme"]["preset"] == "ROG Crimson" and "Ally Hub" in core.EXTRA_THEMES
+check(core.DEFAULT_CONFIG["theme"]["preset"] == "Huginn" and "Ally Hub" in core.EXTRA_THEMES
       and list(core.THEMES)[-1] == "Ally Hub" and core.theme_palette({"preset": "nope"})["accent"] == "#e11d48",
-      "ROG Crimson is the default again; Ally Hub is an extra theme, last in the grid")
+      "Huginn is the default look (1.5.1.5); Ally Hub is an extra theme, last in the grid")
 core.update_config(lambda c: c["theme"].update(preset="Ally Hub", extra_themes=False, brand_reverted=False))
 check(core.migrate_brand_theme() is True and core.load_config()["theme"]["preset"] == "ROG Crimson"
       and core.migrate_brand_theme() is False, "installs 1.4.1.3 gave the brand theme go back once")
 core.update_config(lambda c: c["theme"].update(preset="Ally Hub", extra_themes=True, brand_reverted=False))
 check(core.migrate_brand_theme() is False and core.load_config()["theme"]["preset"] == "Ally Hub",
       "a turned-on extra theme stays")
-core.update_config(lambda c: c["theme"].update(preset="ROG Crimson", extra_themes=False))
+core.update_config(lambda c: c["theme"].update(preset="ROG Crimson", extra_themes=False, huginn_default=False, accent=None))
+check(core.migrate_huginn_default() is True and core.load_config()["theme"]["preset"] == "Huginn"
+      and core.migrate_huginn_default() is False, "the old default look moves to Huginn once")
+core.update_config(lambda c: c["theme"].update(preset="ROG Crimson", huginn_default=False, accent="#123456"))
+check(core.migrate_huginn_default() is False and core.load_config()["theme"]["preset"] == "ROG Crimson",
+      "custom colors mean someone chose that look: it stays")
+core.update_config(lambda c: c["theme"].update(preset="ROG Crimson", extra_themes=False, accent=None))
 check(core.theme_sound() is None and core.play_sound(None) is False, "no sound file: nothing plays")
 (Path(HOME) / "Downloads").mkdir(exist_ok=True)
 (Path(HOME) / "Downloads" / "hub-intro-sound.mp3").write_bytes(b"x")
@@ -2021,9 +2027,9 @@ check("Cinzel" not in gui.build_qss(core.theme_palette({"preset": "Huginn"}), 10
 check(_hq.count("{") == _hq.count("}") and "Cinzel" in _hq and "border-radius: 3px" in _hq
       and "Cinzel" not in gui.build_qss(core.theme_palette({"preset": "ROG Crimson"}), 100),
       "the Huginn theme styles only itself: squared corners, Cinzel titles")
-check("Huginn" in core.ADVANCED_THEMES and set(core.THEME_FILES) <= set(core.APP_FILES)
+check("Huginn" not in core.ADVANCED_THEMES and set(core.THEME_FILES) <= set(core.APP_FILES)
       and all(os.path.exists(os.path.join(os.path.dirname(gui.__file__), f)) for f in core.THEME_FILES),
-      "Huginn is Advanced only, and its fonts and raven ship with every install and update")
+      "Huginn shows in Simple too (the default look), and its fonts and raven ship with every install and update")
 check("adv(rcard)" in _psrc and "FrameMeter" not in _psrc and not hasattr(gui, "FrameMeter"),
       "experimental 144 Hz only shows in Advanced; the lab and frame meter are gone")
 from PySide6.QtWidgets import QApplication
@@ -2055,12 +2061,16 @@ check([t for t, _ in hub.TABS] == ["Home", "Store", "Games", "Customize", "Setti
       and sum(len(s) for _, s in hub.TABS) <= 18, "the owner's map: five tabs, one row of sections each")
 check(set(map(id, hub.pages)) == set(map(id, [p for g in hub.groups for p in g.pages]))
       and len(hub.pages) == len(set(map(id, hub.pages))), "every page lives in a tab, once")
-check(not hub.browse.chips and [n for n, _ in hub.TABS[1][1]][:5] == ["Essentials", "Mods", "Apps", "Decky plugins",
-      "Installed"], "Store's filters are its LT/RT sections: no chip row the controller can't reach")
-hub.go("Mods")
-check(hub.current_page() is hub.browse and hub.browse.filter == "mods", "a Store section picks its view")
+check(not hub.browse.chips and [n for n, _ in hub.TABS[1][1]] == ["Essentials", "Plugins", "Apps", "Emulation",
+      "Launchers", "Installed"], "Store's filters are its LT/RT sections, with gamer names (1.5.1.5)")
+hub.go("Apps")
+check(hub.current_page() is hub.browse and hub.browse.filter == "apps", "a Store section picks its view")
 hub.groups[1].step(1)
-check(hub.browse.filter == "apps", "RT moves to the next Store view")
+check(hub.browse.filter == "emulation", "RT moves to the next Store view")
+hub.go("Mods")
+check(hub.browse.filter == "plugins", "the old Mods name lands on Plugins")
+check(all(i.category == "Game Mode plugins" for i in hub.browse.groups("plugins")[0][1])
+      and hub.browse.groups("plugins")[0][1], "Plugins lists the hand-picked plugins above the Decky store")
 hub.go("Overview")
 check(hub.tab_index() == 0 and hub.current_page() is hub.health, "old names land in the new place (Doctor is in Overview)")
 check(hub.doctor.block.parent() is not None or True, "the Checkup is a block on Overview")
@@ -2242,7 +2252,7 @@ check(core.desktop_scale() == 1.5, "reads the scale from Plasma's saved display 
 core.panel_resolution = _pr
 check("never set up" in core.emudeck_uninstall_cmd() and "uninstall.sh" in core.emudeck_uninstall_cmd(),
       "EmuDeck removal works whether or not EmuDeck was ever set up")
-tryit("health", lambda: (hub.health.refresh(), hub.health.set_range(12 * 3600), hub.health.set_series("w")))
+tryit("health", lambda: (hub.health.refresh(), hub.health.refresh_history(), hub.health.set_range(12 * 3600), hub.health.set_series("w")))
 check([s for s, _ in hub.health.RANGES] == [60, 3600, 12 * 3600], "history ranges are 1 minute, 1 hour, 12 hours")
 H = hub.health
 H.recent.clear()
