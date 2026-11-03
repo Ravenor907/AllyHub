@@ -570,7 +570,6 @@ def refresh_step(now: float = None) -> str:
     so a try restarts the handheld; after the restart Ally Hub opens with a countdown, and without Keep the old
     profile comes back with another restart. Returns what it did: "", "started", "back", "reverted", "removed"."""
     now = now or time.monotonic()      # within-boot timers (each boot compares only its own times)
-    clear_desktop_144()
     st = refresh_state()
     status = st.get("status")
     if status == "pending":
@@ -631,17 +630,7 @@ def refresh_left(now: float = None) -> Optional[int]:
 
 
 
-# 1.4.1.12 briefly tried 144 Hz in Desktop Mode through an edited screen description; the owner chose Game Mode only
-# (1.4.1.13). Its boot service only acts while EDID_FLAG exists, so clearing the flag switches it off for good.
-EDID_FLAG = CONFIG_DIR / "edid-144"
 
-
-def clear_desktop_144() -> bool:
-    if EDID_FLAG.exists():
-        EDID_FLAG.unlink(missing_ok=True)
-        app_log("refresh", "Desktop Mode 144 Hz retired: back to the screen's own description after the next restart")
-        return True
-    return False
 
 # 1.5.1.1 (the owner: reduce the 144 Hz scope): the lab, its frame meter and its reports are gone; "Turn on 144 Hz"
 # (method "a", which passed on both test devices) stays with its restart-and-undo safety net. A lab that was mid-run
@@ -1670,55 +1659,6 @@ def hid_streams(method: str = None) -> bool:
     """Methods that commit once and then take bare zone commands can be animated frame by frame,
     the way HueSync animates its custom effects (no chip-memory writes per frame)."""
     return hid_method(method).get("commit") == "first"
-
-
-def migrate_chip_spiral() -> bool:
-    """Once: saved spirals (current effect, saved effects, per-game colors) switch to the chip's own spiral, the
-    new default. Afterwards a spiral set to Ally Hub's style stays that way. True when something changed."""
-    if load_config()["lighting"].get("chip_spiral"):
-        return False
-    changed = []
-
-    def fix(e):
-        if isinstance(e, dict) and e.get("type") == "spiral" and e.get("engine") != "chip":
-            e["engine"] = "chip"
-            changed.append(1)
-
-    def run(c):
-        L = c["lighting"]
-        fix(L.get("effect"))
-        for e in (L.get("custom") or {}).values():
-            fix(e)
-        for e in (c.get("game_colors") or {}).values():
-            fix(e)
-        L["chip_spiral"] = True
-    update_config(run)
-    return bool(changed)
-
-
-def migrate_color_spirals() -> bool:
-    """Once (1.4.1.1): a spiral with its own colors can't run on the chip, whose spiral is rainbow only, so saved
-    ones that migrate_chip_spiral moved there (Neon Vortex) go back to Ally Hub's style. True when something changed."""
-    if load_config()["lighting"].get("color_spirals_fixed"):
-        return False
-    changed = []
-
-    def fix(e):
-        if isinstance(e, dict) and e.get("type") == "spiral" and e.get("engine") == "chip" \
-                and not normalize_effect(e).get("rainbow"):
-            e["engine"] = "smooth"
-            changed.append(1)
-
-    def run(c):
-        L = c["lighting"]
-        fix(L.get("effect"))
-        for e in (L.get("custom") or {}).values():
-            fix(e)
-        for e in (c.get("game_colors") or {}).values():
-            fix(e)
-        L["color_spirals_fixed"] = True
-    update_config(run)
-    return bool(changed)
 
 
 EXTRA_THEMES = ("Ally Hub",)
@@ -4803,6 +4743,11 @@ TM_MIN_GAP_S = 600                                    # one snapshot per game pe
 
 def ludusavi_cmd(*args) -> list:
     return ["flatpak", "run", LUDUSAVI_ID, *args]
+
+
+def save_backup_args(dest: str) -> list:
+    """The one "back up every game's saves" command (the window's Back up now and the helper's schedule)."""
+    return ludusavi_cmd("backup", "--force", "--path", str(dest))
 
 
 def ludusavi_ready() -> bool:

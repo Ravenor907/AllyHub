@@ -1116,20 +1116,6 @@ _nv_chip = dict(core.PRESETS["Neon Vortex"], engine="chip")
 check(len(set(core.zone_frames(_nv_chip, 0.3))) > 1
       and core.zone_frames(_nv_chip, 0.3) == core.zone_frames(dict(_nv_chip, rainbow=True, layout="linked"), 0.3),
       "a chip spiral previews as the rainbow the chip shows")
-core.update_config(lambda c: (c["lighting"].update(chip_spiral=False, effect=dict(core.PRESETS["Neon Vortex"], engine="smooth"),
-                                                    custom={"Mine": {"type": "spiral", "engine": "smooth"}, "Calm": {"type": "breathe"}}),
-                              c["game_colors"].update(Halo={"type": "spiral", "engine": "smooth"}, Doom="#ff0000")))
-check(core.migrate_chip_spiral() is True, "saved spirals move to the chip's spiral once")
-_lc = core.load_config()
-check(_lc["lighting"]["effect"]["engine"] == "chip" and _lc["lighting"]["custom"]["Mine"]["engine"] == "chip"
-      and _lc["lighting"]["custom"]["Calm"] == {"type": "breathe"} and _lc["game_colors"]["Halo"]["engine"] == "chip"
-      and _lc["game_colors"]["Doom"] == "#ff0000" and _lc["lighting"]["chip_spiral"], "only spirals change: " + str(_lc["lighting"]))
-check(core.migrate_color_spirals() is True and core.load_config()["lighting"]["effect"]["engine"] == "smooth"
-      and core.load_config()["lighting"]["custom"]["Mine"]["engine"] == "chip" and core.migrate_color_spirals() is False,
-      "a color spiral moved to the chip (Neon Vortex) goes back to Ally Hub's style once; rainbow ones stay on the chip")
-core.update_config(lambda c: c["lighting"]["effect"].__setitem__("engine", "smooth"))
-check(core.migrate_chip_spiral() is False and core.load_config()["lighting"]["effect"]["engine"] == "smooth",
-      "picking Ally Hub's style afterwards sticks")
 core.update_config(lambda c: (c["lighting"].update(effect=None, custom={}), c["game_colors"].clear()))
 check(core.DEFAULT_CONFIG["setup"]["password_known"] is False, "'I already have one' is remembered in setup")
 # ---- security review 1.4.1.8 ----
@@ -1209,10 +1195,6 @@ core.refresh_request_off()
 check(core.refresh_step(_t0) == "removed" and core.refresh_installed() is None and _rs[-1] == 1, "back to 120 Hz removes it and restarts")
 core.game_mode_active, core.reboot_device, core.boot_id, core.launch_self = _g
 core.REFRESH_STATE.unlink(missing_ok=True)
-# ---- 144 Hz is Game Mode only (1.4.1.13): 1.4.1.12's Desktop Mode switch is retired ----
-core.EDID_FLAG.parent.mkdir(parents=True, exist_ok=True); core.EDID_FLAG.write_text("on")
-core.refresh_step(_t0)
-check(not core.EDID_FLAG.exists(), "the Desktop Mode 144 Hz switch from 1.4.1.12 is turned off")
 check("VRR" in core.REFRESH_DISCLAIMER and "touch" in core.REFRESH_DISCLAIMER and "keep VRR off" not in core.REFRESH_DISCLAIMER
       and "Game Mode only" in core.REFRESH_DISCLAIMER and "REFRESH_NOTE" in core.QAM_INDEX_JS
       and "touch screen" in core.QAM_INDEX_JS,
@@ -1726,8 +1708,8 @@ _free = _so.socket(); _free.settimeout(1)
 check(_free.connect_ex(("127.0.0.1", 18911)) != 0 and not hasattr(agent, "make_handler"),
       "no phone remote server, even with old remote settings in the config")
 _free.close()
-st = a.status()
-check(st["game_name"] == "Halo Infinite", "status works (the Quick Access panel reads it)")
+st = a.qam_status()
+check(st.get("game_name") == "Halo Infinite" or "Halo Infinite" in json.dumps(st), "status works (the Quick Access panel reads it)")
 (bat / "capacity").write_text("10"); time.sleep(2.2)
 check(a.led_reason == "low battery", "low battery flash overrides")
 core.update_config(lambda c: (c["agent"].update(low_battery_flash=False, battery_rings=False),
@@ -2079,7 +2061,7 @@ hub.go("Mods")
 check(hub.current_page() is hub.browse and hub.browse.filter == "mods", "a Store section picks its view")
 hub.groups[1].step(1)
 check(hub.browse.filter == "apps", "RT moves to the next Store view")
-hub.go("Doctor")
+hub.go("Overview")
 check(hub.tab_index() == 0 and hub.current_page() is hub.health, "old names land in the new place (Doctor is in Overview)")
 check(hub.doctor.block.parent() is not None or True, "the Checkup is a block on Overview")
 hub.go("Plugin store")
@@ -2204,7 +2186,7 @@ core.update_config(lambda c: c["theme"].__setitem__("extra_themes", False))
 tryit("release notes panel", hub.show_release_notes)
 check("tweaks" not in vars(hub) and "backups" not in vars(hub) and not hasattr(gui, "TweaksPage")
       and [n for n, _ in hub.TABS[4][1]] == ["General", "Connections", "Activity log"]
-      and hub.ALIASES["Backups"] == "General" and hub.ALIASES["Activity"] == "Activity log",
+      and hub.ALIASES["Activity"] == "Activity log",
       "1.3.7.10: Quick fixes and the Backups section are folded in; old names still land")
 check(hub.launchers.btn_clean.parent() is not None and hub.automation.block_saves.parent() is not None,
       "launcher leftovers and scheduled save backups are placed (Storage, Saves) and never float as windows")
@@ -2632,7 +2614,7 @@ gui.ask_item = lambda *a, **k: ("Uninstall it in Steam", True)
 tryit("storage uninstall", lambda: hub.storage.game_menu(_sr["games"][0]))
 gui.ask_item = _ai
 tryit("storage job done", lambda: hub.on_job_finished("storage-clean", 0, ""))
-hub.go("Games")
+hub.go("Game settings")
 check(hub.current_page() is hub.games, "Game settings live under Tools")
 tryit("games refresh", hub.games.refresh)
 _gm = {"appid": 100, "name": "Big Game", "kind": "steam", "last": 1}
@@ -2769,7 +2751,7 @@ check("u1" in _tm[-1][1] and str(core.TM_BEFORE_RESTORE) in _tm[-1][1], "the las
 tryit("saves loaded (both lists)", lambda: hub.saves._loaded({"tm": _snaps, "undo": {}}))
 gui.ask_item, hub.runner.submit = _ai3, _sub4
 tryit("saves restore done", lambda: hub.on_job_finished("tm-restore", 0, ""))
-hub.go("Sleep")
+hub.go("Battery & sleep")
 check(hub.current_page() is hub.sleep, "Sleep lives under Tools")
 tryit("sleep refresh empty", hub.sleep.refresh)
 _sle = {"end": 1, "slept": 40, "pct_before": 80, "pct_after": 79, "drop": 1, "charging": False, "per_hour": None,

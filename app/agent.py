@@ -271,7 +271,6 @@ class Agent:
         self.games = core.GameWatcher()
         self.game = None
         self.docked = None
-        self.last_led = None
         self.leds = core.find_leds()
         self.led_reason = ""
         self.tick = 0
@@ -308,38 +307,13 @@ class Agent:
         if m != self.cfg_mtime:
             self.cfg_mtime = m
             self.cfg = core.load_config()
-            self.last_led = None   # re-apply
             return True
         return False
 
-    # ---- status and quick actions (the Quick Access panel) ----
-    def status(self) -> dict:
-        b = core.battery_info()
-        s = core.sensors()
-        return {
-            "battery": core.battery_percent(), "time_left": core.time_left_text(),
-            "cpu": s["cpu_temp"], "gpu": s["gpu_temp"], "fan": s["fan_rpm"],
-            "game": self.game, "game_name": self.seen.get(self.game) if self.game else None,
-            "docked": bool(self.docked), "battery_rings": self.cfg["agent"].get("battery_rings"),
-            "wol": bool(core.normalize_mac(self.cfg["wol"].get("mac", ""))),
-            "health": b.get("health"),
-        }
-
+    # ---- quick lighting actions (the Quick Access panel) ----
     def remote_action(self, action: str, data: dict) -> str:
-        if action == "rgb":
-            try:
-                rgb = core.hex_to_rgb(str(data.get("hex", "#e11d48")))
-                bright = max(0, min(255, int(data.get("brightness", 255))))
-            except (ValueError, TypeError):
-                return "Bad color"
-
-            def fn(cfg):
-                old = cfg.get("rgb") or {}
-                cfg["rgb"] = {"rgb": list(rgb), "brightness": bright, "enums": old.get("enums", {})}
-                cfg["lighting"]["effect"] = {"type": "static", "colors": [core.rgb_to_hex(rgb)]}
-            self.cfg = core.update_config(fn)
-            msg = "Color applied"
-        elif action == "preset":
+        """Effect on / lights off from the Quick Access panel (the phone remote's other actions went in 1.5.1.1)."""
+        if action == "preset":
             name = str(data.get("name", ""))
             eff = core.lookup_effect("preset:" + name, self.cfg)
             if not eff:
@@ -360,28 +334,8 @@ class Agent:
                 cfg["rgb"] = old
             self.cfg = core.update_config(fn)
             msg = "Lights off"
-        elif action == "battery_rings":
-            on = bool(data.get("on"))
-            self.cfg = core.update_config(lambda c: c["agent"].__setitem__("battery_rings", on))
-            msg = f"Battery rings {'on' if on else 'off'}"
-        elif action == "game_color":
-            if not self.game:
-                return "No game is running"
-            hexc = str(data.get("hex", ""))
-            try:
-                core.hex_to_rgb(hexc)
-            except ValueError:
-                return "Bad color"
-            g = self.game
-            self.cfg = core.update_config(lambda c: c["game_colors"].__setitem__(g, hexc))
-            msg = f"Saved color for {self.seen.get(g, g)}"
-        elif action == "wol":
-            w = self.cfg["wol"]
-            ok = core.send_wol(w.get("mac", ""), w.get("broadcast", ""))
-            msg = f"Wake signal sent to {w.get('name') or 'your PC'}" if ok else "Set your PC's MAC address first"
         else:
             return "Unknown action"
-        self.last_led = None
         self.wake.set()
         return msg
 
@@ -568,7 +522,6 @@ class Agent:
                 if isinstance(eff, dict):
                     eff["speed"] = round(v, 2)
             self.cfg = core.update_config(fn)
-            self.last_led = None
             self.wake.set()
             return {"ok": True, "message": ""}
         if name == "toggle":
@@ -579,7 +532,6 @@ class Agent:
             if key not in self.QAM_TOGGLES:
                 return {"ok": False, "message": "Unknown switch"}
             self.cfg = core.update_config(lambda c: c["agent"].__setitem__(key, on))
-            self.last_led = None
             self.wake.set()
             return {"ok": True, "message": ""}
         if name == "boost":
@@ -600,7 +552,6 @@ class Agent:
                 old["brightness"] = b
                 cfg["rgb"] = old
             self.cfg = core.update_config(fn)
-            self.last_led = None
             self.wake.set()
             return {"ok": True, "message": ""}
         if name == "game_flag":
@@ -659,7 +610,6 @@ class Agent:
         if docked != self.docked:
             first = self.docked is None
             self.docked = docked
-            self.last_led = None
             if not first and self.cfg["agent"].get("dock_mode") and self.cfg["dock"].get("audio_hdmi"):
                 core.set_hdmi_audio(docked)
             if not first:
@@ -671,7 +621,6 @@ class Agent:
             g = None
         if g != self.game:
             self.game = g
-            self.last_led = None
             if g and g not in self.seen:
                 self.seen[g] = core.game_name(g)
                 core.write_json(SEEN_FILE, self.seen)
@@ -853,7 +802,7 @@ class Agent:
         Path(dest).mkdir(parents=True, exist_ok=True)
         log("starting save backup")
         self.save_proc = subprocess.Popen(
-            ["flatpak", "run", core.LUDUSAVI_ID, "backup", "--force", "--path", dest],
+            core.save_backup_args(dest),
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def write_state(self):
@@ -918,8 +867,6 @@ class Agent:
             log("rolled back a bad update, restarting on the previous version")
             sys.exit(1)
         self.safely("boost", self.recover_boost)
-        self.safely("lighting", core.migrate_chip_spiral)
-        self.safely("lighting", core.migrate_color_spirals)
         self.safely("refresh", core.retire_lab)          # 1.5.1.1: a lab caught mid-run winds down once
         self.safely("privacy", core.secure_data_dir)
         self.safely("rescue", core.sync_testing_rescue)      # Testing: a way out that works without the app

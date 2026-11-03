@@ -2476,12 +2476,8 @@ class StoreRow(QFrame):
         h.addLayout(mid, 1)
         btns = QVBoxLayout()
         self.btn_install = button("Install", lambda: self.action.emit(self.plugin, "install"), "primary")
-        self.btn_remove = button("Remove", lambda: self.action.emit(self.plugin, "uninstall"), "danger")
         self.off = False
-        self.btn_toggle = button("Turn off", lambda: self.action.emit(self.plugin, "enable" if self.off else "disable"))
-        btns.addWidget(self.btn_install)
-        btns.addWidget(self.btn_toggle)
-        btns.addWidget(self.btn_remove)
+        btns.addWidget(self.btn_install)          # turn off / remove live under Store → Installed (one place per job)
         btns.addStretch()
         h.addLayout(btns)
 
@@ -2491,9 +2487,6 @@ class StoreRow(QFrame):
         if gi:          # installs from GitHub (newer than the store's copy), so compare with that
             latest["name"] = core.newest_version(core.github_latest_cached(gi.github), latest.get("name", ""))
         self.off = bool(off)
-        self.btn_toggle.setVisible(False)                # turning plugins off lives under Store → Installed
-        self.btn_toggle.setText("Turn on" if self.off else "Turn off")
-        self.btn_toggle.setEnabled(not queued)
         if queued:
             set_pill(self.pill, "WORKING…", "busy")
         elif installed and self.off:
@@ -2514,7 +2507,6 @@ class StoreRow(QFrame):
         repolish(self.btn_install)
         self.btn_install.setVisible(not installed or upd)
         self.btn_install.setEnabled(decky_ok and not queued)
-        self.btn_remove.setVisible(False)
 
 
 class StorePage(QWidget):
@@ -3018,7 +3010,6 @@ class LightingPage(QWidget):
         self.live_timer = QTimer(self)
         self.live_timer.timeout.connect(self.update_live)
         self._test_prev = None
-        self._test_results = []
         self.refresh()
 
     # ---- helpers ----
@@ -3585,7 +3576,7 @@ class HueSyncPage(QWidget):
         row = QHBoxLayout()
         self.btn_install = button("Install HueSync", self.install, "primary")
         row.addWidget(self.btn_install)
-        row.addWidget(button("Open the plugin store", lambda: hub.go("Plugin store")))
+        row.addWidget(button("Open the plugin store", lambda: hub.go("Decky plugins")))
         row.addStretch()
         cv.addLayout(row)
         cv.addWidget(label("To use it: in Game Mode press the ••• (Quick Access) button, open the plug "
@@ -3880,8 +3871,7 @@ class AutomationPage(QWidget):
     def backup_now(self):
         d = load_config()["agent"].get("save_backup_dir") or str(core.BACKUP_DIR / "saves")
         stamp_file = shlex.quote(str(core.DATA_DIR / "save_backup.json"))
-        cmd = (f"mkdir -p {shlex.quote(d)} && flatpak run {core.LUDUSAVI_ID} backup --force "
-               f"--path {shlex.quote(d)} && "
+        cmd = (f"mkdir -p {shlex.quote(d)} && {shlex.join(core.save_backup_args(d))} && "
                f"echo '{{\"last\": '$(date +%s)', \"rc\": 0}}' > {stamp_file}")
         self.hub.runner.submit("Back up game saves", cmd, "saves")
 
@@ -3984,7 +3974,7 @@ class ConnectPage(QWidget):
             "Tailscale login",
             f"echo 'Open the link below on your phone to log in:'; "
             f"sudo {core.TAILSCALE_BIN} up --operator=\"$USER\" --qr", "tailscale-login")
-        self.hub.go("Activity")
+        self.hub.go("Activity log")
 
     def ts_logout(self):
         self.hub.runner.submit("Tailscale logout", f"sudo {core.TAILSCALE_BIN} logout", "tailscale-logout")
@@ -6420,10 +6410,8 @@ class SystemPage(QWidget):
             self.btn_limit.setEnabled(False)
             self.btn_limit.setToolTip("This kernel doesn't expose a charge limit. "
                                       "Ally Center's charge limit may still work.")
-        lines = [f"Internal: {core.disk_usage(str(HOME))}"]
-        for card in core.sd_cards():
-            lines.append(f"{card.name}: {core.disk_usage(str(card))}")
-        lines.append("Shader cache: calculating…" if core.SHADER_CACHE.exists() else "Shader cache: empty")
+        # the drives themselves are shown once, under Your drives (1.5.1.5)
+        lines = ["Shader cache: calculating…" if core.SHADER_CACHE.exists() else "Shader cache: empty"]
         self.storage_lines = lines
         self.storage_stats.setText("\n".join(lines))
         if core.SHADER_CACHE.exists() and self.shader_proc is None:
@@ -6459,24 +6447,6 @@ class SystemPage(QWidget):
             self.storage_stats.setText("\n".join(self.storage_lines))
         self.shader_proc.deleteLater()
         self.shader_proc = None
-
-    def charge_limit_cmd(self, value: str) -> Optional[str]:
-        b = core.battery_info()
-        if not b.get("limit_file"):
-            return None
-        path = shlex.quote(str(b["limit_file"]))
-        bat = Path(b["path"]).name
-        value = core.charge_limit_ok(value)
-        if not value or '"' in bat or "'" in bat:
-            return None
-        if value == "100":
-            return (f"echo 100 | sudo tee {path} >/dev/null && sudo rm -f {core.UDEV_CHARGE_RULE} && "
-                    "echo 'Charge limit removed.'")
-        rule = (f'ACTION=="add", SUBSYSTEM=="power_supply", KERNEL=="{bat}", '
-                f'ATTR{{charge_control_end_threshold}}="{value}"')
-        return (f"echo {value} | sudo tee {path} >/dev/null && "
-                f"echo {shlex.quote(rule)} | sudo tee {core.UDEV_CHARGE_RULE} >/dev/null && "
-                f"echo 'Battery will stop charging at {value}%.'")
 
     def apply_limit(self):
         value = self.limit_box.currentText().split("%")[0]
@@ -6637,7 +6607,12 @@ class AppearancePage(QWidget):
         ir.addWidget(self.btn_ui_restart)
         v.addLayout(ir)
 
-        v.addWidget(label("TEXT SIZE", "section"))
+        # text size, layout and controller navigation are expert settings: Advanced only (1.5.1.5)
+        expert = QWidget()
+        e = QVBoxLayout(expert)
+        e.setContentsMargins(0, 0, 0, 0)
+        e.setSpacing(12)
+        e.addWidget(label("TEXT SIZE", "section"))
         sr = QHBoxLayout()
         self.scale = QSlider(Qt.Horizontal)
         self.scale.setRange(85, 160)
@@ -6648,9 +6623,9 @@ class AppearancePage(QWidget):
         sr.addWidget(self.scale, 1)
         sr.addWidget(self.scale_lbl)
         sr.addWidget(button("Apply", self.save_scale))
-        v.addLayout(sr)
+        e.addLayout(sr)
 
-        v.addWidget(label("LAYOUT", "section"))
+        e.addWidget(label("LAYOUT", "section"))
         lr = QHBoxLayout()
         self.bars_mode = QComboBox()
         self.bars_mode.addItems(["Header and footer: top and bottom", "Header and footer: on the sides"])
@@ -6659,12 +6634,12 @@ class AppearancePage(QWidget):
         lr.addWidget(label("On the sides gives pages more height, handy with a bigger interface size or on "
                            "a wide screen. Tabs go down the left, status and buttons down the right.",
                            "cardDesc", wrap=True), 1)
-        v.addLayout(lr)
+        e.addLayout(lr)
         self.footer_cb = QCheckBox("Show the bottom bar (status, button hints, refresh and log)")
         self.footer_cb.toggled.connect(self.save_footer)
-        v.addWidget(self.footer_cb)
+        e.addWidget(self.footer_cb)
 
-        v.addWidget(label("CONTROLLER NAVIGATION", "section"))
+        e.addWidget(label("CONTROLLER NAVIGATION", "section"))
         cr = QHBoxLayout()
         self.nav_mode = QComboBox()
         self.nav_mode.addItems(["Auto (Game Mode only)", "Always on", "Off"])
@@ -6674,7 +6649,8 @@ class AppearancePage(QWidget):
         cr.addWidget(label("D-pad/stick moves, A selects, B goes back, LB/RB switch tabs, LT/RT switch "
                            "sections, X searches plugins, Y opens the Steam keyboard, Menu refreshes.",
                            "cardDesc", wrap=True), 1)
-        v.addLayout(cr)
+        e.addLayout(cr)
+        v.addWidget(adv(expert))
         v.addStretch()
 
     def update_extras(self):
@@ -6918,7 +6894,8 @@ class UpdatesPage(QWidget):
         rr.addStretch()
         rv.addLayout(rr)
         rv.addStretch()
-        grid.addWidget(rcard, 0, 1)
+        # error reports only matter with a report key (the owner's handheld): Advanced only (1.5.1.5)
+        grid.addWidget(adv(rcard), 0, 1)
         v.addLayout(grid)
 
         hcard, hv = titled_card("key-round", "#64748b", "Getting a GitHub access key",
@@ -6933,11 +6910,10 @@ class UpdatesPage(QWidget):
             "cardDesc", wrap=True))
         hv.addWidget(button("Open the GitHub page", lambda: QDesktopServices.openUrl(
             QUrl("https://github.com/settings/personal-access-tokens/new"))), 0, Qt.AlignLeft)
-        v.addWidget(hcard)
-        self.key_guide = hcard               # only while no key is saved
+        v.addWidget(adv(hcard))
+        self.key_guide = hcard               # only while no key is saved, and only in Advanced
 
         v.addStretch()
-        self.installed_new = None
 
     def refresh(self):
         cfg = load_config()
@@ -7153,12 +7129,8 @@ class Hub(QMainWindow):
         ("Settings", [("General", "updates"), ("Connections", "connect_page"), ("Activity log", "activity")]),
     ]
     # old section names (code paths, earlier docs) still land in the right place
-    ALIASES = {"Home": "Overview", "Health": "Overview", "Doctor": "Overview", "Tweaks": "Overview",
-               "Sleep": "Battery & sleep", "System": "Battery & sleep", "Browse": "Essentials", "Store": "Essentials",
-               "Plugin store": "Decky plugins", "Plugin Store": "Decky plugins", "Themes": "Theme", "Appearance": "Theme",
-               "Automation": "General", "Updates": "General", "Connect": "Connections", "Games": "Game settings",
-               "Backups": "General", "Activity": "Activity log", "Quick fixes": "Overview",
-               "Leftovers": "Storage"}
+    # old section names that saved links or older code may still use (only a few are left; 1.5.1.5)
+    ALIASES = {"Home": "Overview", "Activity": "Activity log", "Plugin store": "Decky plugins", "Updates": "General"}
 
     def section_page(self, attr: str):
         return getattr(self, attr.partition("/")[0])
@@ -7260,7 +7232,7 @@ class Hub(QMainWindow):
         self.progress.hide()
         self.pad_hint = None
         self.btn_refresh = button("Refresh", self.refresh)
-        self.btn_log = button("Activity log", lambda: self.go("Activity"))
+        self.btn_log = button("Activity log", lambda: self.go("Activity log"))
         self.btn_report = button("Report a problem", self.report_problem)
         self.btn_report.setToolTip("Report a problem")
         try:
@@ -7327,7 +7299,7 @@ class Hub(QMainWindow):
         self.mode_box.setProperty("padCycle", False)      # A opens it; Left/Right just move on
         mr.addWidget(self.mode_box)
         mr.addWidget(button("Run setup again", self.rerun_setup))
-        self.btn_log_simple = button("Activity log", lambda: self.go("Activity"))   # Simple only (Advanced: its section)
+        self.btn_log_simple = button("Activity log", lambda: self.go("Activity log"))   # Simple only (Advanced: its section)
         mr.addWidget(self.btn_log_simple)
         mr.addStretch()
         mv.addLayout(mr)
@@ -7789,7 +7761,7 @@ class Hub(QMainWindow):
             self.store_page.search.setFocus()
             QDesktopServices.openUrl(QUrl("steam://open/keyboard"))
         else:
-            self.go("Plugin store")
+            self.go("Decky plugins")
 
     def on_page_shown(self, page, breadcrumb: bool = True):
         """Every section is fresh when it opens (1.4.0: Games, Saves, Sleep, Storage and Setup used to open
@@ -8312,11 +8284,11 @@ class Hub(QMainWindow):
             if core.charge_limit_writable():             # no password (1.5.0.15+); the saved value is what stays
                 core.set_charge_limit(sysp["charge_limit"])
             else:
+                # the same path as the Battery page: save it, one Allow all, then the helper applies it (the old root
+                # rule this used to write is the one the permission job removes)
                 update_config(lambda c: c.setdefault("battery", {}).__setitem__(
                     "limit", core.charge_limit_ok(sysp["charge_limit"]) or ""))
-                cmd = self.system.charge_limit_cmd(sysp["charge_limit"])
-                if cmd:
-                    self.runner.submit("Restore charge limit", cmd, "charge-limit")
+                self.allow_all()
         if load_config()["agent"].get("enabled"):
             self.enable_agent()
         self.update_cards()
@@ -8466,7 +8438,7 @@ class Hub(QMainWindow):
         st = core.update_state()
         rb = st.get("rolled_back")
         if rb and not rb.get("ack"):
-            self.go("Updates")
+            self.go("General")
 
     def show_release_notes(self):
         """This version's notes in a scrolling in-window panel (after an update, and from Settings > General)."""
@@ -8500,9 +8472,9 @@ class Hub(QMainWindow):
     def report_problem(self):
         """One button for anything that's wrong: the user's words plus logs, job output and a system snapshot."""
         if not core.github_token():
-            msg_info(self, APP_NAME, "Reports need the GitHub access key. Add it on "
-                                                    "Settings → General, then try again.")
-            self.go("Updates")
+            msg_info(self, APP_NAME, "Reports need a GitHub access key. Turn on Advanced (Settings → General), add "
+                                     "the key in the Error reports card there, then try again.")
+            self.go("General")
             return
         page = type(self.current_page()).__name__.replace("Page", "")
         text, ok = ask_text(self, "Report a problem",
@@ -8649,7 +8621,7 @@ def main():
             fix()
         except Exception:
             pass
-    for fix in (core.migrate_chip_spiral, core.migrate_color_spirals, core.migrate_brand_theme, core.secure_data_dir):
+    for fix in (core.migrate_brand_theme, core.secure_data_dir):
         try:
             fix()
         except Exception:
