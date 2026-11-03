@@ -13,7 +13,6 @@
 Mods, plugins and apps in one tap that stay up to date, game performance boosts, joystick ring lighting, themes
 and health stats. Works in Desktop Mode, and fully in Game Mode with just the controller.</p>
 
-
 <p align="center">
   <a href="#-install">Install</a> ·
   <a href="#-highlights">Highlights</a> ·

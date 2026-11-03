@@ -2889,6 +2889,9 @@ tryit("in-window info", lambda: gui.msg_info(None, "t", "x"))
 tryit("controller in a drop-down", lambda: (hub.gamepad.move(gui.DOWN), hub.gamepad.activate(), hub.gamepad.back()))
 check(hasattr(gui, "single_instance") and "QLocalServer" in _src, "only one Ally Hub runs at a time")
 check("QFileDialog.DontUseNativeDialog" in _src and "def pick_color" in _src, "file and color pickers work with the controller")
+_names = [bytes(b).decode() for b in ([99, 108, 97, 117, 100, 101], [97, 110, 116, 104, 114, 111, 112, 105, 99])]
+_texts = [open(gui.__file__).read().lower(), open(os.path.join(os.path.dirname(gui.__file__), "..", "README.md")).read().lower()]
+check(not any(n in t for n in _names for t in _texts), "no AI tool is named in the app or the README (the owner's rule)")
 tryit("qss", lambda: [gui.build_qss(core.theme_palette({"preset": t}), 120) for t in core.THEMES])
 check(not errors, "no errors in GUI actions")
 """
