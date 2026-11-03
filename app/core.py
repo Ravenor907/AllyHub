@@ -128,13 +128,17 @@ DEFAULT_CONFIG = {
 }
 
 
+_DICT_OR_NONE = {"rgb", "effect", "before_theme"}     # None by default, a dict when set: anything else is junk
+
+
 def _merge(defaults: dict, data: dict) -> dict:
     out = {}
     data = data if isinstance(data, dict) else {}
     for k, v in defaults.items():
         if isinstance(v, dict) and isinstance(data.get(k), dict):
             out[k] = _merge(v, data[k])
-        elif k in data and not isinstance(v, dict):     # a dict section that isn't a dict falls back below
+        elif k in data and not isinstance(v, dict) and not (k in _DICT_OR_NONE and data[k] is not None
+                                                            and not isinstance(data[k], dict)):
             out[k] = data[k]
         else:
             out[k] = json.loads(json.dumps(v))
@@ -2006,7 +2010,7 @@ def _valid_hex(c) -> bool:
 
 def normalize_effect(e) -> dict:
     """Fill in defaults and clamp values so any stored effect is safe to render."""
-    e = dict(e or {})
+    e = dict(e) if isinstance(e, dict) else {}
     etype = e.get("type") if e.get("type") in EFFECT_TYPES else "static"
     lo, hi = EFFECT_TYPES[etype]["colors"]
     colors = [c.lower() for c in (e.get("colors") or []) if _valid_hex(c)][:hi]
@@ -2166,7 +2170,7 @@ def base_effect(cfg: dict) -> Optional[dict]:
     if eff:
         return normalize_effect(eff)
     rgb = cfg.get("rgb")
-    if rgb:
+    if isinstance(rgb, dict) and rgb:
         return normalize_effect({"type": "static", "colors": [rgb_to_hex(rgb.get("rgb", (225, 29, 72)))]})
     return None
 
@@ -2507,14 +2511,15 @@ def newest_version(*versions: str) -> str:
 # Copy every new plugin folder in next to the old one first and swap only when all copies worked (1.5.1.5: a
 # full disk mid-copy left a plugin with a new plugin.json and half a dist, which Decky couldn't load).
 _PLUGIN_STAGE = (
+    'sudo rm -rf "$HOME/homebrew/plugins"/.allyhub-new-* ; '        # leftovers of a job that was cut off
     '{ ok=1; for d in "$tmp/out"/*/; do n=$(basename "$d"); s="$HOME/homebrew/plugins/.allyhub-new-$n"; '
     'sudo rm -rf "$s"; sudo cp -r "$d" "$s" || ok=0; done; '
     'if [ "$ok" != 1 ]; then sudo rm -rf "$HOME/homebrew/plugins"/.allyhub-new-*; '
     'echo "Not enough room to copy the plugin in; the old copy was kept." >&2; false; fi; } && ')
 _PLUGIN_SWAP = (
-    'for d in "$tmp/out"/*/; do n=$(basename "$d"); s="$HOME/homebrew/plugins/.allyhub-new-$n"; '
+    '{ ok=1; for d in "$tmp/out"/*/; do n=$(basename "$d"); s="$HOME/homebrew/plugins/.allyhub-new-$n"; '
     'sudo rm -rf "$HOME/homebrew/plugins/$n" && sudo mv "$s" "$HOME/homebrew/plugins/$n" && '
-    'sudo chown -R "$USER:$USER" "$HOME/homebrew/plugins/$n"; done && ')
+    'sudo chown -R "$USER:$USER" "$HOME/homebrew/plugins/$n" || ok=0; done; [ "$ok" = 1 ]; } && ')
 
 def github_decky_install_cmd(repo: str, asset: str, plugin_names: tuple, fallback: str = "") -> str:
     """Install a Decky plugin the way Bazzite's ujust recipes do: the newest stable GitHub release
@@ -3683,7 +3688,10 @@ def stale_nsl_shortcuts() -> list:
                 continue
             if "Standalone or with Steam?" not in text:
                 continue
-            exes = re.findall(r'(/[^\s"\']*?/drive_c/[^\s"\']*?\.exe)', text, flags=re.I)
+            # quoted paths first: an SD card label like "SD Card" puts a space in the path (1.5.1.5 break test)
+            exes = re.findall(r'"(/[^"]*?/drive_c/[^"]*?\.exe)"', text, flags=re.I) or \
+                re.findall(r"'(/[^']*?/drive_c/[^']*?\.exe)'", text, flags=re.I) or \
+                re.findall(r'(/[^\s"\']*?/drive_c/[^\s"\']*?\.exe)', text, flags=re.I)
             if exes and not any(Path(e).exists() for e in exes):
                 out.append(p)
     return out
@@ -4719,7 +4727,7 @@ def apply_charge_limit_once() -> bool:
 
 def apply_charge_limit() -> bool:
     """Put the saved limit back (the kernel resets it at boot). True when it's in place."""
-    want = (load_config().get("battery") or {}).get("limit") or ""
+    want = charge_limit_ok((load_config().get("battery") or {}).get("limit")) or ""
     b = battery_info()
     if not want or not b.get("limit_file"):
         return False
@@ -5667,6 +5675,8 @@ def update_all_cmd(updates: list) -> str:
     """One job for everything in the list; sudo asks once. Each part reports on its own line and a failure
     doesn't stop the rest. Each part runs in its own subshell: several builders end with `exit $rc`, which in a
     `{ }` group ended the whole job after the first part (1.5.1.5). The job fails if any part failed."""
+    if not updates:
+        return "echo 'Nothing to update.'"
     parts = [f"( {u['cmd']} ) && echo {shlex.quote('Updated ' + u['name'])} || "
              f"{{ echo {shlex.quote('Could not update ' + u['name'])} >&2; _fail=1; }}" for u in updates]
     return "_fail=0 ; " + " ; ".join(parts) + " ; echo 'Done.' ; [ \"$_fail\" = 0 ]"
@@ -5849,7 +5859,8 @@ def _profile_clean(key: str, v):
         if kk not in v:
             continue
         if key == "lighting" and kk == "effect":
-            out[kk] = normalize_effect(v[kk]) if isinstance(v[kk], dict) else None
+            if isinstance(v[kk], dict):                  # a missing effect never resets the one chosen here
+                out[kk] = normalize_effect(v[kk])
         elif key == "lighting" and kk == "custom":
             if isinstance(v[kk], dict):
                 out[kk] = {str(n)[:40]: normalize_effect(e) for n, e in list(v[kk].items())[:50] if isinstance(e, dict)}
@@ -5871,7 +5882,10 @@ def charge_limit_ok(value) -> Optional[str]:
     """A charge limit as a plain number 50-100, or None. Profiles are files from anywhere, so this is checked
     before it gets near a command."""
     v = str(value or "").strip()
-    return v if re.fullmatch(r"\d{2,3}", v) and 50 <= int(v) <= 100 else None
+    if not re.fullmatch(r"[0-9]{2,3}", v):        # ASCII digits only (no other scripts' digits)
+        return None
+    v = str(int(v))                               # "080" → "80": never something a kernel reads as octal
+    return v if 50 <= int(v) <= 100 else None
 
 
 def _profile_config(cfg: dict) -> dict:
@@ -5936,7 +5950,11 @@ def apply_profile_config(conf: dict) -> None:
             elif k == "game_colors":
                 cfg[k] = {**(cfg.get(k) if isinstance(cfg.get(k), dict) else {}), **v}   # merged, never wiped
             else:
-                cfg[k] = {**(cfg.get(k) if isinstance(cfg.get(k), dict) else {}), **v}
+                old = cfg.get(k) if isinstance(cfg.get(k), dict) else {}
+                if k == "lighting" and "custom" in v:    # custom effects are merged, never wiped
+                    v = dict(v, custom={**(old.get("custom") if isinstance(old.get("custom"), dict) else {}),
+                                        **v["custom"]})
+                cfg[k] = {**old, **v}
     update_config(fn)
 
 
@@ -7008,7 +7026,7 @@ UPDATE_CHANNELS = {"stable": ("main",), "testing": ("main", "testing")}
 
 def update_channel(cfg: dict = None) -> str:
     c = ((cfg or load_config()).get("updates") or {}).get("channel")
-    return c if c in UPDATE_CHANNELS else "stable"
+    return c if isinstance(c, str) and c in UPDATE_CHANNELS else "stable"
 
 
 def version_label(v: str = None) -> str:
@@ -7030,7 +7048,11 @@ def ensure_theme_files() -> list:
     missing = [f for f in THEME_FILES if not (APP_DIR / f).exists()]
     if not missing:
         return []
-    if time.time() - float(read_text(THEME_FILES_FAILED) or 0) < THEME_FILES_RETRY_S:
+    try:
+        since = time.time() - float(read_text(THEME_FILES_FAILED) or 0)
+    except ValueError:
+        since = THEME_FILES_RETRY_S
+    if 0 <= since < THEME_FILES_RETRY_S:
         return []          # tried and failed lately: never hammer GitHub once a minute (1.5.1.5)
     branch = update_state().get("branch") or ("testing" if load_config()["updates"].get("channel") == "testing"
                                               else "main")

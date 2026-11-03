@@ -4867,7 +4867,7 @@ class GamesPage(QWidget):
         self.games, self.live, self.show_all = [], True, False
         self.game, self.settings = None, None
         self.checks, self.other = {}, ""
-        self._saving, self._pending, self._warned_save = False, None, False
+        self._saving, self._pending, self._warned_save = False, {}, False
         self.v = page_shell(self, "Game settings",
                             "Switches instead of launch options, Proton per game, and help when a game won't start.")
         # every game first, then one game (1.5.0.17: upscaling for all games moved here from Performance)
@@ -5226,12 +5226,13 @@ class GamesPage(QWidget):
         opts = self.new_options()
         tool = self.chosen_tool()
         tool_arg = tool if tool != s.get("tool", "") else None
+        if self._saving:
+            # one write at a time: the newest state of EACH game is captured now and written next, even if you've
+            # left the game. No "nothing changed" check here: flipping a switch back during a write must still go out
+            self._pending[g["appid"]] = (g, opts, tool, tool_arg, note)
+            return
         if opts == s.get("options", "") and tool_arg is None and not note:
             return                                      # nothing changed: Steam isn't touched
-        if getattr(self, "_saving", False):
-            # one write at a time: the newest state is captured now and written next, even if you've left the game
-            self._pending = (g, opts, tool, tool_arg, note)
-            return
         self._start_save(g, opts, tool, tool_arg, note)
 
     def _start_save(self, g, opts, tool, tool_arg, note):
@@ -5244,7 +5245,8 @@ class GamesPage(QWidget):
     def _saved(self, g: dict, opts: str, tool: str, done, note: str = ""):
         self._saving = False
         ok = isinstance(done, list) and "options" in done
-        pend, self._pending = getattr(self, "_pending", None), None
+        pend = self._pending.pop(g["appid"], None) or (self._pending.pop(next(iter(self._pending))) if self._pending
+                                                        else None)
         if self.game is g and hasattr(self, "save_state"):
             self.save_state.setText("Saved ✔" if ok else "Couldn't save: Steam didn't take the change.")
         if pend is not None:
