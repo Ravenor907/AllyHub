@@ -820,7 +820,7 @@ def time_left_text() -> str:
 # ==========================================================================
 
 def external_display_connected() -> bool:
-    for conn in Path("/sys/class/drm").glob("card*-*"):
+    for conn in DRM_ROOT.glob("card*-*"):
         name = conn.name.split("-", 1)[1]
         if name.startswith("eDP") or name.startswith("Writeback"):
             continue
@@ -4276,7 +4276,7 @@ def proton_log(appid) -> str:
 # only talks to the agent's local socket (CONTROL_SOCK, this user only). Bump QAM_VERSION when they change.
 # ==========================================================================
 
-QAM_VERSION = "1.0.7"
+QAM_VERSION = "1.0.8"
 QAM_DIR = HOME / "homebrew/plugins/AllyHub"
 QAM_STAGE = DATA_DIR / "qam-plugin"
 QAM_PLUGIN_JSON = r'''{
@@ -4475,7 +4475,9 @@ function Content() {
 
   sections.push(h(PanelSection, { title: "Performance", key: "perf" },
     h(PanelSectionRow, null, h(ToggleField, { label: "Game Boost", checked: !!s.boost,
-      description: s.boost && s.boost_note ? `CPU: ${s.boost_note}` : "Performance CPU setting while you play.",
+      disabled: s.boost_ok === false && !s.boost,
+      description: s.boost_ok === false && !s.boost ? "Not available on this handheld."
+        : s.boost && s.boost_note ? `CPU: ${s.boost_note}` : "Performance CPU setting while you play.",
       onChange: (on) => act("boost", { on }) }))));
 
   if (s.lighting === "allyhub") {
@@ -4894,7 +4896,7 @@ def tm_restore_cmd(title: str, backup: str, undo: bool = False) -> str:
 
 
 def when_text(iso: str) -> str:
-    """'Today 14:32', 'Yesterday 21:05', 'Mar 3, 09:10' for a snapshot time."""
+    """'Today 2:32 PM', 'Yesterday 9:05 PM', 'Mar 3, 9:10 AM' for a snapshot time (12-hour, like the header clock)."""
     import datetime
     try:
         t = datetime.datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone()
@@ -4902,7 +4904,7 @@ def when_text(iso: str) -> str:
         return iso or "?"
     now = datetime.datetime.now().astimezone()
     days = (now.date() - t.date()).days
-    hm = t.strftime("%H:%M")
+    hm = t.strftime("%-I:%M %p")
     return f"Today {hm}" if days == 0 else f"Yesterday {hm}" if days == 1 else t.strftime("%b %-d, ") + hm
 
 
@@ -5297,7 +5299,7 @@ CATALOG = [
     Item(
         id="tailscale", name="Tailscale", category="Launchers & stores",
         desc="Private network between your devices. Stream your home PC with Moonlight from "
-             "anywhere, or reach your Ally from your phone. Set it up on the Connect page.",
+             "anywhere, or reach your handheld from your phone. Set it up under Settings → Connections.",
         monogram="Ts", color="#64748b",
         install=TAILSCALE_INSTALL,
         uninstall=('tmp=$(mktemp -d) && git clone --depth 1 https://github.com/tailscale-dev/deck-tailscale '

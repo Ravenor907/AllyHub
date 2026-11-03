@@ -526,6 +526,7 @@ class Agent:
             "game_live": bool(g.get("live")) and core.launch_parseable(g.get("options", "")),
             "game_tool": g.get("tool", ""), "lsfg": core.LSFG_WRAPPER.exists(),
             "boost": bool((self.cfg.get("performance") or {}).get("boost")), "boost_note": self.boost_note,
+            "boost_ok": bool(core.boost_backend()),
             "lighting": "huesync" if core.lighting_shelved(self.cfg) else "allyhub",
             "effects": names, "effect": core.effect_label(eff) if eff else "",
             "brightness": int(rgb.get("brightness", 255)),
@@ -776,6 +777,11 @@ class Agent:
                     log(f"keep current: {u['name']} failed (rc={rc}): {out[-300:]}")
         if done:
             log("keep current: updated " + ", ".join(done))
+            try:                                # one "updated by itself" line, not one per day (1.5.1.5)
+                core.write_json(ALERTS_FILE, [a for a in core.read_json(ALERTS_FILE, [])
+                                              if not str(a.get("id", "")).startswith("kept-current")])
+            except OSError:
+                pass
             add_alert(f"kept-current-{int(now)}", "Updated by itself: " + ", ".join(done) + ".", notify=False)
         if skipped:
             log("keep current: waiting for a password: " + ", ".join(skipped))

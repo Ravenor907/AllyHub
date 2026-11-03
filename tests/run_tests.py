@@ -2179,31 +2179,10 @@ check(_unlocked == [1, 1], "and it works every time")
 hub.activate_extra_theme = _real_act
 hub.unlock_extra_theme = _real_unlock
 tryit("turn on the extra theme", hub.activate_extra_theme)
-_wig = []
-_real_unlock2 = hub.unlock_extra_theme
 _real_act2 = hub.activate_extra_theme
-hub.activate_extra_theme = lambda: _wig.append(True)
-_g2 = hub.gamepad
-_g2._wig_last = 0.0
-_g2._wig_dir = 0
-import time as _t
-_t0 = _t.monotonic()
-for _i, _v in enumerate([30000, -30000] * 4):
-    _g2._wiggle(_v)
-check(not _wig, "a few quick flicks don't count")
-_g2._wig_start = _t.monotonic() - 11
-_g2._wiggle(30000 if _g2._wig_dir < 0 else -30000)
-check(_wig == [True], "scrolling up and down for 10 seconds turns the Ally Hub theme on right away")
-_s = object()
-_t3 = _t.monotonic()
-hub._sl = {"s": _s, "start": _t3 - 11, "t": _t3, "v": 50, "d": 1, "flips": 1}
-hub._slider_moved(_s, 40)
-check(_wig == [True, True], "a slider moved back and forth for 10 seconds switches to it too")
-hub._sl = {"s": _s, "start": _t3 - 3, "t": _t3, "v": 50, "d": 1, "flips": 5}
-hub._slider_moved(_s, 40)
-check(_wig == [True, True], "but not after a few seconds of normal adjusting")
+check("_wiggle" not in vars(gui.GamepadNav) and "_slider_moved" not in vars(gui.Hub),
+      "only the 15 taps and the theme list turn the extra theme on (no accidental slider or stick triggers)")
 hub.activate_extra_theme = _real_act2
-hub.unlock_extra_theme = _real_unlock2
 tryit("apply the extra theme", lambda: hub.unlock_extra_theme(apply=True))
 check(core.load_config()["theme"]["preset"] == "Ally Hub", "applied")
 core.update_config(lambda c: c["theme"].update(preset="ROG Crimson"))
@@ -2870,15 +2849,22 @@ core.sudo_password_set, hub.set_password, gui.ask_item = _sps, _sp, _ai2
 _np6, _sub6, _ia = hub.needs_password, hub.runner.submit, hub.on_item_action
 _acts = []
 hub.needs_password = lambda: False
-hub.on_item_action = lambda iid, action: _acts.append((iid, action))
+hub.runner.submit = lambda label, cmd, key="": _acts.append((key, label, cmd))
 hub.setup.step = hub.setup.steps().index("essentials"); hub.setup.refresh()
 for _k, (_cb, _have) in hub.setup.essentials.items():
     _cb.isChecked = lambda: True
 hub.setup.essentials = {k: (cb, False) for k, (cb, _h) in hub.setup.essentials.items()}
+_cs = gui.CATALOG_BY_ID["decky"].check
+gui.CATALOG_BY_ID["decky"].check = lambda st: False
 tryit("setup install essentials", hub.setup.install_essentials)
-check(("decky", "install") in _acts and (core.LUDUSAVI_ID, "install") in _acts and hub.qam_after_decky,
-      "picked essentials install, the Quick Access panel right after Decky")
-hub.needs_password, hub.on_item_action = _np6, _ia
+gui.CATALOG_BY_ID["decky"].check = _cs
+_dj = [a for a in _acts if a[0] == "decky"]
+check(len(_dj) == 1 and "one password" in _dj[0][1] and "Quick Access" in _dj[0][1]
+      and any(a[0] == core.LUDUSAVI_ID for a in _acts) and not hub.qam_after_decky,
+      "Setup installs Decky, the panel and the permissions as one job (one password); Flatpaks on their own")
+check(core.load_config()["saves"]["time_machine"] is True, "picking Ludusavi turns the Save time machine on")
+check(subprocess.run(["bash", "-n", "-c", _dj[0][2]]).returncode == 0, "the one-password setup job is valid shell")
+hub.needs_password, hub.runner.submit = _np6, _sub6
 tryit("setup finish", hub.setup.finish)
 check(core.load_config()["setup"]["done"] is True, "finishing marks setup done")
 tryit("home checklist", lambda: hub.health.refresh_notices({"password": False, "decky": {}}))
