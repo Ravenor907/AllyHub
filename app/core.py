@@ -88,6 +88,7 @@ DEFAULT_CONFIG = {
               # Game Mode and Desktop Mode show the same size differently, so each remembers its own
               # (None = use the shared "scale"/"ui_scale" above, which older versions saved)
               "scale_gamemode": None, "scale_desktop": None, "ui_scale_gamemode": None, "ui_scale_desktop": None,
+              "ui_scale_docked": None,  # Game Mode on a TV or monitor: its own interface size (1.5.1.5)
               "bars": "top",            # "sides": header/footer as icon columns
               "footer": False,          # bottom bar off by default (the owner's call)
               "advanced": False,        # Simple by default; Advanced shows the expert controls (1.4.0)
@@ -315,6 +316,68 @@ def battery_percent() -> str:
     if b.get("status"):
         s += f" ({b['status'].lower()})"
     return s
+
+
+def set_password_pty(new: str, timeout: float = 20.0) -> tuple:
+    """Set the FIRST password without a terminal window (1.5.1.5, Setup's biggest typing cost): runs `passwd` on a
+    pseudo-terminal and answers its two "new password" prompts. Only for a user with no password yet; if passwd
+    asks for a current one, it stops and returns (False, "current"). The password is never logged.
+    Returns (ok, reason)."""
+    import pty
+    import select
+    if not new or "\n" in new:
+        return False, "empty"
+    try:
+        pid, fd = pty.fork()
+    except OSError as e:
+        return False, f"pty: {e}"
+    if pid == 0:                                          # child: plain passwd for this user
+        try:
+            os.execvp("passwd", ["passwd"])
+        finally:
+            os._exit(127)
+    buf, answered, reason = "", 0, ""
+    deadline = time.monotonic() + timeout
+    try:
+        while time.monotonic() < deadline:
+            r, _w, _x = select.select([fd], [], [], 0.5)
+            if not r:
+                continue
+            try:
+                chunk = os.read(fd, 1024).decode(errors="replace")
+            except OSError:
+                break                                     # passwd exited
+            if not chunk:
+                break
+            buf += chunk
+            low = buf.lower()
+            if "current" in low and answered == 0:
+                reason = "current"
+                break
+            if "bad password" in low or "too short" in low or "too simple" in low:
+                reason = "weak"
+                break
+            if low.rstrip().endswith("password:"):
+                os.write(fd, (new + "\n").encode())
+                answered += 1
+                buf = ""
+    finally:
+        if reason:
+            try:
+                os.kill(pid, 9)
+            except OSError:
+                pass
+        try:
+            _pid, status = os.waitpid(pid, 0)
+        except ChildProcessError:
+            status = 1
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    ok = not reason and answered >= 2 and os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0
+    app_log("password", "set in-app" if ok else f"in-app set didn't work ({reason or 'passwd ' + str(status)})")
+    return ok, reason or ("" if ok else "failed")
 
 
 def sudo_password_set() -> Optional[bool]:
@@ -901,6 +964,8 @@ def theme_size(theme_cfg: dict, name: str, gamemode: bool):
 
 def ui_scale(theme_cfg: dict, gamemode: bool = None) -> float:
     v = theme_cfg.get("ui_scale", "auto") if gamemode is None else theme_size(theme_cfg, "ui_scale", gamemode)
+    if gamemode and theme_cfg.get("ui_scale_docked") is not None and external_display_connected():
+        v = theme_cfg["ui_scale_docked"]          # docked: the size picked for the big screen
     if v == "auto":
         return auto_ui_scale(gamemode)
     try:

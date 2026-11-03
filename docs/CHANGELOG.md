@@ -18,6 +18,15 @@
 - Huginn is the default look. If you were on the old default, it switches once; your own theme or colors stay.
 - Page titles that repeated the section name are gone, for more room.
 
+**Fewer steps**
+- First password is set right in Ally Hub (typed twice with the Steam keyboard), no terminal window.
+- Setup installs HueSync together with Decky Loader and the rest: one password for all of it.
+- The charge limit applies the moment you pick it. Interface size jumps straight to Restart to apply.
+- Docked to a TV, the interface size you pick there is remembered for the big screen on its own.
+- Store → Installed shows Your plugins first, where you turn a misbehaving plugin off.
+- Battery saver says what's already set and who runs the rings when it has nothing to change.
+- On Saves, X is Back up now. B shows no hint on the tab row, where it does nothing.
+
 **Fixes**
 - An update on a nearly full disk can no longer leave Ally Hub broken: it checks for room first and puts the old
   version back if a file can't be written.

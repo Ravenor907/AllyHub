@@ -401,6 +401,7 @@ class JobRunner(QObject):
     def __init__(self, bindir: Path):
         super().__init__()
         self.queue, self.proc, self.current, self.tail, self.token = [], None, None, [], None
+        self.labels = {}                         # job key -> the label it ran with
         env = QProcessEnvironment.systemEnvironment()
         env.insert("PATH", f"{bindir}:{env.value('PATH', '/usr/bin:/bin')}")
         env.insert("SUDO_ASKPASS", str(bindir / "allyhub-askpass"))
@@ -431,6 +432,7 @@ class JobRunner(QObject):
             return
         label, cmd, key = self.queue.pop(0)
         self.current, self.tail = (label, key), []
+        self.labels[key] = label                 # the finished-job message can say what actually happened
         self.log_file = None
         try:
             core.JOB_LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -2296,12 +2298,13 @@ class BrowsePage(QWidget):
         top.addWidget(self.btn_update)
         top.addStretch()
         cv.addLayout(top)
+        # Installed = the one place to turn off or remove anything, Decky plugins included (the owner, 1.5.0.9).
+        # Your plugins comes first (1.5.1.5): a misbehaving plugin is why you come here
+        cv.addWidget(store_page.mine_card)
+        store_page.mine_card.hide()
         self.list_v = QVBoxLayout()
         self.list_v.setSpacing(12)
         cv.addLayout(self.list_v)
-        # Installed = the one place to turn off or remove anything, Decky plugins included (the owner, 1.5.0.9)
-        cv.addWidget(store_page.mine_card)
-        store_page.mine_card.hide()
         cv.addStretch()
         self.stack.addWidget(scroll_page(self.inner))
         self.stack.addWidget(store_page)
@@ -2606,6 +2609,7 @@ class StoreRow(QFrame):
             set_pill(self.pill, f"UPDATE {installed['version']} → {latest['name']}", "update")
         elif installed:
             set_pill(self.pill, "INSTALLED", "on")
+            self.pill.setToolTip("Turn off or remove it under Store → Installed")
         else:
             self.pill.setText("")
         # 1.3.7.9 (the owner's call): one place per job. Installed plugins are turned off or removed under
@@ -5487,6 +5491,10 @@ class SetupPage(QWidget):
                     CATALOG_BY_ID["decky"].check(st), True)]
         options += [(i.id, i.name, i.desc, i.check(st), i.id in (core.LUDUSAVI_ID, "qam"))
                     for i in CATALOG if i.recommended and i.id != "decky"]
+        if core.find_leds() and core.lighting_shelved():
+            # HueSync runs the rings by default: installed with the rest, so Setup asks for one password (1.5.1.5)
+            options.append(("huesync", "HueSync", "Joystick ring lighting, from the Decky plugin store.",
+                            self.hub.huesync_page.installed(), True))
         self.essentials = {}
         for key, title, desc, have, preset in options:
             cb = QCheckBox(title + ("  ✔ installed" if have else ""))
@@ -5505,7 +5513,20 @@ class SetupPage(QWidget):
         if not pick:
             self.hub.toast("Nothing selected")
             return
-        self.hub.install_set(pick, ask_warnings=False)       # ticked here already means yes
+        if "huesync" in pick:
+            pick = [k for k in pick if k != "huesync"]
+
+            def with_store(plugins):
+                p = next((p for p in plugins if (p.get("name") or "").lower() == "huesync"), None)
+                url = core.store_artifact_url(p) if p else ""
+                cmd = core.decky_store_install_cmd(url, core.store_artifact_hash(p)) if url else ""
+                if not cmd:
+                    self.hub.toast("Couldn't reach the plugin store for HueSync: install it later under Customize → "
+                                   "Lighting.", 7000)
+                self.hub.install_set(pick, ask_warnings=False, extra=[("HueSync", cmd)] if cmd else None)
+            self.hub.store_page.with_plugins(with_store)
+        else:
+            self.hub.install_set(pick, ask_warnings=False)       # ticked here already means yes
         self.hub.toast("Installing… progress is in the Activity log (Settings → General)")
 
     def step_lighting(self):
@@ -6572,6 +6593,11 @@ class SystemPage(QWidget):
         lr.addWidget(self.limit_box)
         self.btn_limit = button("Apply limit", self.apply_limit, "primary")
         lr.addWidget(self.btn_limit)
+        # picking a value applies it (1.5.1.5): A opens the list, A on a value sets it. No Apply step, and Left/Right
+        # never applies values on the way past (each one could ask for the password)
+        self.limit_box.setProperty("padCycle", False)
+        self.limit_box.activated.connect(lambda *_: self.apply_limit())
+        self.btn_limit.hide()
         lr.addStretch()
         bv.addLayout(lr)
         self.card_battery = bat
@@ -6846,6 +6872,7 @@ class AppearancePage(QWidget):
         self.ui_sizes = [("auto", "")] + [(f, f"{int(f * 100)}%") for f in (1.0, 1.25, 1.5, 1.75, 2.0)]
         self.ui_size.addItems([f"Auto ({int(core.auto_ui_scale(GAMEMODE) * 100)}%)"] + [t for _, t in self.ui_sizes[1:]])
         self.ui_size.activated.connect(self.save_ui_size)
+        self.ui_size.setProperty("padCycle", False)      # A + pick, then focus jumps to Restart to apply
         ir.addWidget(self.ui_size)
         self.ui_note = label("Scales everything to fit your screen.", "cardDesc", wrap=True)
         ir.addWidget(self.ui_note, 1)
@@ -6926,6 +6953,8 @@ class AppearancePage(QWidget):
             b.setStyleSheet(f"QPushButton {{ border-left: 14px solid {pal[key]}; }}")
         self.scale.setValue(int(core.theme_size(t, "scale", GAMEMODE) or 100))
         cur = core.theme_size(t, "ui_scale", GAMEMODE)
+        if GAMEMODE and core.external_display_connected() and t.get("ui_scale_docked") is not None:
+            cur = t["ui_scale_docked"]
         idx = next((i for i, (v, _) in enumerate(self.ui_sizes) if v == cur), 0)
         self.ui_size.setCurrentIndex(idx)
         self.scale_lbl.setText(f"{self.scale.value()}%")
@@ -6977,9 +7006,13 @@ class AppearancePage(QWidget):
 
     def save_ui_size(self, idx):
         val = self.ui_sizes[idx][0]
-        update_config(lambda c: c["theme"].__setitem__(f"ui_scale_{core.mode_key(GAMEMODE)}", val))
+        docked = GAMEMODE and core.external_display_connected()
+        key = "ui_scale_docked" if docked else f"ui_scale_{core.mode_key(GAMEMODE)}"   # a TV gets its own (1.5.1.5)
+        update_config(lambda c: c["theme"].__setitem__(key, val))
         self.btn_ui_restart.show()
-        self.ui_note.setText("Restart Ally Hub to apply the new size.")
+        self.ui_note.setText("Restart Ally Hub to apply the new size." + (
+            " This size is used whenever the handheld is docked to a screen." if docked else ""))
+        QTimer.singleShot(0, lambda: _safe_focus(self.btn_ui_restart))      # one press to apply
 
     def save_scale(self):
         self._save(**{f"scale_{core.mode_key(GAMEMODE)}": self.scale.value()})
@@ -7855,8 +7888,9 @@ class Hub(QMainWindow):
         w = QApplication.focusWidget()
         sheet = getattr(self, "_sheet", None) is not None
         x = None if sheet else self.page_x()
+        on_tabs = w is not None and w in getattr(self, "tab_buttons", [])
         words = {"A": self.a_word(w) if w is not None else "Select",
-                 "B": "Close" if sheet else "Back", "X": x[0] if x else "", "Y": "Keyboard",
+                 "B": "Close" if sheet else "" if on_tabs else "Back", "X": x[0] if x else "", "Y": "Keyboard",
                  "Menu": "" if sheet else "Refresh", "View": "Hide hints"}
         if isinstance(w, (QComboBox, QSlider)):
             words["A"] += "   ◀ ▶ change"
@@ -7886,8 +7920,8 @@ class Hub(QMainWindow):
             return ("Game won't start?", self.games.rescue) if self.games.game is not None else None
         if page is self.updates:
             return ("Check for updates", self.updates.check_now)
-        if page is self.saves:
-            return ("Refresh", self.saves.load)
+        if page is self.saves and core.ludusavi_ready():
+            return ("Back up now", self.automation.backup_now)
         return None
 
     def _search_plugins(self):
@@ -8342,7 +8376,9 @@ class Hub(QMainWindow):
             msg_warn(self, APP_NAME, f"“{name}” may not have worked:\n\n{tail[-600:]}")
         if not failed_msg and code == 0 and key.split(":", 1)[0] not in JOB_OWN_TOAST:
             took = time.time() - getattr(self, "_job_t0", time.time())
-            self.toast(f"{name} done ✔" + (f" ({int(took)} s)" if took >= 5 else ""))
+            # store plugin jobs ("decky-mine:X", "store:X", toggles) say what they did, not just a plugin name
+            lbl = self.runner.labels.get(key, "") if ":" in key or key == "huesync" else ""
+            self.toast((f"{lbl}: done ✔" if lbl else f"{name} done ✔") + (f" ({int(took)} s)" if took >= 5 else ""))
         self.installing.discard(key)
         after = self._decky_after.pop(key, None)
         if after:
@@ -8597,18 +8633,19 @@ class Hub(QMainWindow):
             return
         self.install_set([i.id for i in todo], ask_warnings=True)
 
-    def install_set(self, ids: list, ask_warnings: bool = True):
+    def install_set(self, ids: list, ask_warnings: bool = True, extra: list = None):
         """Install several catalog items with ONE password (1.5.1.5: Setup asked 3 or 4 times, once per job).
         Decky Loader, the Quick Access panel, every plugin and the one-time permissions run as one job; Flatpak
         apps need no password and run on their own. Ludusavi turns the Save time machine on."""
+        extra = [e for e in (extra or []) if e and e[1]]      # (name, command): store plugins, e.g. HueSync
         items = [CATALOG_BY_ID[i] for i in ids if i in CATALOG_BY_ID]
         if ask_warnings:      # each item's own caution (one TDP tool at a time, …); Setup's ticks already said yes
             items = [i for i in items if not i.warn or i.id == "qam"
                      or ask(self, f"{i.warn}\n\nInstall {i.name}?")]
-        if not items:
+        if not items and not extra:
             return
         root = [i for i in items if i.id in ("decky", "qam", "tailscale") or i.decky_names]
-        if root and self.needs_password():
+        if (root or extra) and self.needs_password():
             return
         if any(k == "decky" or k.startswith("install-set") for k in self.runner.pending_keys()):
             self.toast("Already installing. Try again when it's done.")
@@ -8619,8 +8656,8 @@ class Hub(QMainWindow):
         decky_ok = decky is not None or CATALOG_BY_ID["decky"].check(self.state)
         chain = [i for i in root if i.id not in ("decky", "qam") and i.install]
         want_qam = any(i.id == "qam" for i in items)
-        if decky_ok and (decky is not None or chain or want_qam):
-            parts = [f"( {i.install} )" for i in chain]
+        if decky_ok and (decky is not None or chain or want_qam or extra):
+            parts = [f"( {i.install} )" for i in chain] + [f"( {cmd} )" for _n, cmd in extra]
             if want_qam:
                 if not load_config()["agent"].get("enabled") or not core.agent_running():
                     self.enable_agent()                 # the panel gets everything from the helper
@@ -8636,7 +8673,8 @@ class Hub(QMainWindow):
             key = "decky" if decky is not None else f"install-set:{self._set_n}"
             ids_in = [i.id for i in ([decky] if decky else []) + chain]
             self.installing.update(ids_in)
-            names = [i.name for i in ([decky] if decky else []) + chain] + (["Quick Access panel"] if want_qam else [])
+            names = [i.name for i in ([decky] if decky else []) + chain] + [n for n, _c in extra] + \
+                (["Quick Access panel"] if want_qam else [])
 
             def after(ok, ids_in=ids_in):
                 self.state = core.gather_state()
@@ -8737,6 +8775,36 @@ class Hub(QMainWindow):
         self.toast("Launching…")
 
     def set_password(self):
+        """No password yet: set it right here, typed twice with the Steam keyboard (1.5.1.5). Anything else (a
+        password already exists, passwd wants the current one, the in-app way fails) uses the terminal window."""
+        if core.sudo_password_set() is False and not self.password_window_open():
+            pw, ok = ask_text(self, "Create a sudo password", "Pick a password for your handheld. Ally Hub asks for "
+                              "it when something needs permission. Use at least 8 characters.", password=True)
+            if not ok or not pw:
+                return
+            again, ok = ask_text(self, "Create a sudo password", "Type it once more.", password=True)
+            if not ok:
+                return
+            if again != pw:
+                msg_warn(self, APP_NAME, "The two didn't match. Try again.")
+                return
+
+            def done(r):
+                okk, why = r if isinstance(r, tuple) else (False, "failed")
+                self.refresh_password()
+                if okk:
+                    self.toast("Password set ✔")
+                    if self.current_page() is self.setup:
+                        self.setup.refresh()
+                elif why == "weak":
+                    msg_warn(self, APP_NAME, "SteamOS wants a longer or less simple password. Try again.")
+                else:
+                    self.set_password_terminal()
+            BackgroundTask(self, lambda: core.set_password_pty(pw), done)
+            return
+        self.set_password_terminal()
+
+    def set_password_terminal(self):
         term = shutil.which("konsole")
         if not term:
             msg_info(self, APP_NAME, "Open a terminal and run:  passwd")
@@ -8948,8 +9016,11 @@ class Hub(QMainWindow):
                 c["rgb"] = old
             update_config(off)
             did.append("the rings are off")
+        if not did:
+            did_text = "Game Boost is already off." + (
+                " HueSync runs the rings: dim them in Quick Access → HueSync." if core.lighting_shelved() else "")
         msg_info(self, "Battery saver",
-                 ((lambda t: t[:1].upper() + t[1:])(", ".join(did)) + ".\n\n" if did else "") +
+                 ((lambda t: t[:1].upper() + t[1:])(", ".join(did)) + ".\n\n" if did else did_text + "\n\n") +
                  "For more time, in Quick Access (the ••• button) → Performance: set a frame rate limit (30 or 40) "
                  "and lower the TDP, and turn the screen brightness down." +
                  ("\n\nTurn the rings back on under Customize → Lighting." if "the rings are off" in did else ""))
